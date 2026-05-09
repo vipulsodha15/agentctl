@@ -24,7 +24,7 @@ The agent should be able to:
 - Support both terminal and, later, web UI access.
 - Keep `agentd` simple and avoid making it understand conversations.
 - Support interrupting an in-flight turn and queueing follow-up messages without restarting the container.
-- Survive container/runner/`agentd`/host crashes without losing the session.
+- **(Phase 2)** Survive container/runner/`agentd`/host crashes without losing the session. Phase 1 treats container termination mid-turn as session loss; the user must `agentctl destroy` and start fresh. See §7 for the deferred recovery design.
 
 For now, we are focusing only on the local solution.
 
@@ -290,6 +290,8 @@ The drain helper is the single most important invariant in the runner. Add a uni
 ---
 
 ## 7. Crash Recovery and Runtime Journaling
+
+> **Phase 1 scope: not implemented.** Phase 1 treats container/runner/host termination mid-turn as session loss. If the container dies during a turn, the user's path forward is `agentctl destroy <session>` and `agentctl start` afresh; the SDK's own JSONL on the volume may be left in an inconsistent state and we do not attempt to reconcile it. The design below — write-ahead `current_turn.json`, sub-case reconciliation, synthetic `tool_result` injection — is the **Phase 2** plan. It is preserved here because (a) the runtime journal (`transcript.jsonl`, `events.jsonl`) is still useful in Phase 1 for UI/audit, and (b) the recovery flow needs to be designed up front so Phase 2 doesn't require rewriting the runner. Until Phase 2: `current_turn.json` is **not** written; A5 collapses to "graceful drain only — `agentctl stop --force` is equivalent to session loss"; A10/A11 are deferred.
 
 Crashes happen mid-turn: the container OOMs, the host reboots, the runner segfaults, the user kills `agentd`. Recovery needs to be deterministic — never relies on guessing what state the SDK was in.
 
