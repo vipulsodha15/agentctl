@@ -1021,27 +1021,75 @@ Smallest viable local prototype, in order:
 
 ## 25. Open Questions (and verification plan)
 
-Resolved in this iteration:
+Open questions are grouped by impact: architectural questions affect correctness or break the §10 ownership boundaries; operational questions affect day-to-day usability; future questions are deferred to cloud/production phases; minor questions can be settled in implementation.
+
+### 25.1 Resolved in this iteration
 
 - ~~Q1 Exact Python SDK options for specifying Claude config/session directory~~ → `ClaudeAgentOptions(cwd="/workspace", resume=session_id, env={"CLAUDE_CONFIG_DIR": "/workspace/.claude"})`.
 - ~~Q2 Resume behavior with stable session_id~~ → `resume=session_id` on options; SDK loads JSONL automatically.
 - ~~Q3 Whether `CLAUDE_CONFIG_DIR` is the correct env var~~ → **yes**, source-verified at `claude_agent_sdk/_internal/sessions.py:122-140`.
 - ~~Q4 How much session state the SDK persists automatically~~ → full transcript: user/assistant/tool_use/tool_result/thinking. JSONL at `<CLAUDE_CONFIG_DIR>/projects/<sanitized-cwd>/<session_id>.jsonl`.
 
-Still open:
+### 25.2 Architectural — affect correctness or boundaries
 
-| # | Question | Verification plan |
+These must be resolved before or during Step 5 of §24 ("Queue + interrupt + drain") because each can break the runner state machine, the ownership invariants in §10, or the recovery flow in §7.
+
+| # | Question | Default lean | Verification plan |
+|---|---|---|---|
+| A1 | Single-runner invariant per session — what prevents two `agentctl start`s with the same session_id, or two `send`s racing into different containers? | `agentd` enforces session-level lock keyed by `session_id`; SQLite row's `container_id` acts as leader-election token. New `start` for an active session attaches instead. | Add concurrency test: spawn two `agentctl start sess_X` simultaneously; assert exactly one container exists and the second client attaches. |
+| A2 | `pending.jsonl` writer ownership — §23 step 3 has `agentd` writing the queue file directly, but §10 says only the runner writes to `.agent/`. The doc currently contradicts itself. | **Only the runner writes `pending.jsonl`.** When no container exists, `agentd` buffers `send`s in memory and forwards them on runner connect. Preserves §10 invariants. | Code review checkpoint at Step 5; lint to forbid `agentd` writes under `<workspace>/.agent/`. Update §23 to remove the agentd-writes-pending step. |
+| A3 | `claude` CLI auth bootstrap inside Linux containers — the CLI normally uses OAuth + macOS Keychain via `claude /login`. Inside Linux, no Keychain. Is `ANTHROPIC_API_KEY` alone sufficient end-to-end, or must `.claude.json` / `.credentials.json` be pre-seeded? | API key only (with `ANTHROPIC_AUTH_TOKEN` as a fallback for gateway tokens). No `.claude.json` pre-seed. | Step 1 spike: build the runner image, `docker run` with only `ANTHROPIC_API_KEY` set, exercise a `query()`. If it fails, inspect what the CLI requests; document the minimum bootstrap. Likely a Step 1 surprise. |
+| A4 | Container user / file ownership on bind-mount — root inside the container → root-owned files on the host volume → host user can't read workspace without sudo. | Run container with `--user $(id -u):$(id -g)`; runner image must work as non-root. Or: entrypoint `chown -R` to host UID at boot. | Test on a fresh macOS / Linux dev box; confirm host user can `cat`, `grep`, and `git -C /workspace/repos/...` without sudo. |
+| A5 | `agentctl stop` mid-turn semantics — graceful (interrupt + drain + SIGTERM) or hard (SIGKILL, recover via §7 next boot)? | **Graceful** by default with a 30s deadline; SIGKILL on deadline. Add `agentctl stop --force` for hard kill. | Implement and test both paths in Step 5; verify §7 recovery actually triggers on SIGKILL path. |
+| A6 | SDK / `claude` CLI version pinning + JSONL forward-compat — can runner image v2 (newer SDK) read a JSONL written by v1? | Pin exact SDK + CLI versions per runner image (`agent-runner:v0.1.0` = SDK 0.X.Y + CLI a.b.c). Refuse to resume across major SDK upgrades; require user-visible migration. | Add SDK + CLI versions to `session.json` at session creation. On runner boot, compare; warn or block on mismatch. Verify SDK changelog stance on JSONL format stability. |
+| A7 | MCP server lifecycle inside the container — do MCPs run inside the runner container or as sidecars? Per-MCP credential injection? Restart policy if an MCP crashes mid-turn? | MVP: in-process / same-container, stdio MCPs only. Credentials via env vars in `options.env`. No auto-restart in MVP — surface failure in transcript. | Spike with a single trivial MCP (echo server) at Step 8. Decide sidecar architecture only if process isolation is needed. |
+| A8 | Hot-mode idle timeout — how long to keep a container alive between turns, and what counts as "active"? | Default 30 min (`idle_container_timeout_seconds = 1800`). "Active" = last `query()` start time, NOT last subscriber attach. Reading history doesn't count. | `agentd` periodic sweep over SQLite `last_active_at`; container `stop` on expiry. Surface remaining TTL in `agentctl status`. |
+| A9 | `agentctl start --detach` semantics — what's the contract? | `--detach` returns immediately after the container is up and the session row is written; runner stays alive without an attached client. Output prints session id + attach hint. Interactive `start` (no `--detach`) keeps the runner alive on exit; user must `stop` explicitly. | Spec in §4 in a follow-up doc pass. |
+| A10 | Behavior of SDK `resume` after a `dangling_tool_use` crash sub-case (§7.3) — does the SDK error, succeed, or pass through? Synthetic `tool_result` injection must be done correctly via `claude_agent_sdk._internal.session_mutations`. | Inject synthetic `tool_result` with `is_error=true` and content `"Tool execution interrupted by container restart."` before next `query()`. | Simulate via pytest: kill subprocess after `tool_use` is appended but before `tool_result`; on resume, run injection; verify SDK accepts and the next turn proceeds. The single most important recovery test. |
+| A11 | Whether `enable_file_checkpointing=True` interacts oddly with our recovery logic — does it write its own state outside `.claude/projects/`? | Assume yes; treat checkpoint state as inside `CLAUDE_CONFIG_DIR` (volume-resident). Confirm. | Test alongside A10. Inspect filesystem for any writes outside `/workspace` after a turn with checkpointing enabled. |
+| A12 | Behavior when `pending.jsonl` is non-empty at session destroy — silently drop, refuse destroy, or warn? | Drop with a warning event written to `transcript.jsonl` (`{"type": "destroyed_with_pending", "count": N}`) before deletion. Surface count in `agentctl destroy` output. | Implement at Step 9 (UI); CLI shows `Warning: 2 queued messages will be discarded. Continue? [y/N]` |
+
+### 25.3 Operational — affect day-to-day usability
+
+These won't break the design, but ignoring them makes the prototype painful to live with.
+
+| # | Question | Default lean | Verification plan |
+|---|---|---|---|
+| O1 | Logging architecture — where do `agentd`, runner, and CLI subprocess logs go? | `agentd` → `~/.agentd/logs/agentd.log` (rotating). Runner stderr → captured by Docker (`docker logs <container>`). `claude` CLI subprocess stderr → SDK's `options.stderr` callback, teed into `.agent/runs/<turn_id>/cli-stderr.log`. | Spec at Step 4. Add `agentctl logs <session>` command for combined view. |
+| O2 | Streaming protocol framing and backpressure — how does runner ↔ agentd ↔ subscribers handle slow consumers without blocking the SDK? | Length-prefixed JSON over Unix socket. Per-subscriber bounded queue (e.g., 1000 events). Slow subscriber → drop and force reconnect with `since=<offset>` to backfill from `transcript.jsonl`. | Prototype at Step 4; load-test by attaching, sleeping, and verifying the runner is not blocked. |
+| O3 | Image build, distribution, updates — where does `agent-runner:local` come from? | Dockerfile in repo at `runtime/Dockerfile`; `make runner-image` builds it. `agentctl upgrade-runner` pulls a new tag. Multi-arch via `docker buildx` for ARM64 (Apple Silicon) + x86_64. | Set up in Step 1 alongside the image. |
+| O4 | macOS Docker Desktop bind-mount perf — git operations on bind-mounted volumes go through gRPC FS; slow on large repos. | Document as a known limitation. For very large repos, consider future named-volume-with-rsync hybrid; out of MVP scope. | Benchmark `git status` and `git clone` of a representative repo size; surface latency in `agentctl diff` if >2s. |
+| O5 | Cost / budget tracking in MVP — anything beyond raw API calls? | Per-session token counter accumulated from `ResultMessage.usage`; surface in `agentctl status` and web UI. No hard caps in MVP. | Implement at Step 4 alongside event teeing; trivial since usage is in the SDK message stream. |
+| O6 | Live model and config changes mid-session — can the user change model, `permission_mode`, or MCP set without a fresh session? | Model: yes, picked up on next `query()` since options are passed per-call. `permission_mode`: yes. MCPs: requires runner restart (re-init `ClaudeSDKClient`). Skills: hot-reload by SDK. | Document the matrix in §13; add `agentctl reconfigure <session> --model=...` for the model case. |
+| O7 | Network egress policy in containers — direct vs. via gateway | MVP allows direct (simpler dev experience). Production: egress only to LiteLLM/internal gateway via `--network` policy. | Defer to production hardening (Step 10). |
+
+### 25.4 Future / Cloud-Phase
+
+Deferred until we move beyond local. Tracked here so they're not forgotten.
+
+| # | Question | Notes |
 |---|---|---|
-| 1 | Best way to stream structured events from SDK to `agentctl`/web UI in practice (framing, backpressure semantics) | Prototype in Step 4; benchmark with a long-running tool spam |
-| 2 | Hot-mode idle timeout policy: how long to keep a container alive between turns | Default 30 min in config; revisit after dogfooding |
-| 3 | Behavior of SDK `resume` after a `dangling_tool_use` crash sub-case (§7.3): does the SDK error, succeed, or pass through? Need to write the synthetic tool_result correctly. | Simulate via `pytest`: kill subprocess after `tool_use` line is appended but before `tool_result`; resume; observe |
-| 4 | Whether `enable_file_checkpointing=True` interacts oddly with our recovery logic | Test alongside Q3 |
-| 5 | When to adopt the `SessionStore` plugin (Postgres/Redis/S3) for production cloud deployments | Defer until cloud-phase |
-| 6 | Network egress policy in containers — direct vs. via gateway | MVP allows direct; production needs gateway |
-| 7 | UI auth model (web UI multi-user → per-user session ownership) | Defer until multi-user is in scope |
-| 8 | What to do when `pending.jsonl` is non-empty at session destroy | Default: drop with a warning; surface in UI |
+| F1 | When to adopt the `SessionStore` plugin (Postgres/Redis/S3) for production cloud deployments | Available in SDK (`examples/session_stores/`). Subprocess still writes local disk; store is a mirror channel. Adopt when sessions need to survive node loss or be readable from multiple nodes. |
+| F2 | UI auth model — multi-user web UI with per-user session ownership and ACLs | Out of scope for local MVP. Likely needs SSO + a session-ownership column in SQLite. Web UI endpoints (§22.1) gain auth middleware. |
+| F3 | Token broker — short-lived session-scoped tokens minted by `agentd`/gateway, replacing long-lived dev creds | §18.2 sketches the pattern. Required before any multi-tenant deployment. |
+| F4 | GitHub App installation tokens replacing developer PATs | Same trigger as F3. Per-session installation token. |
+| F5 | Kubernetes mapping — session volume → PVC, container → pod, `agentd` → operator | §3 anticipates this. PVC reclaim policy and pod restartPolicy choices map onto §5 hot/cold. |
 
-### Mandatory smoke test before locking persistence (Step 4)
+### 25.5 Minor / Nice-to-Have
+
+Won't change the design; settle in implementation review.
+
+| # | Question | Default |
+|---|---|---|
+| M1 | Timestamp format in `transcript.jsonl` and `events.jsonl` | UTC ISO-8601 with millisecond precision (`2026-05-09T14:23:45.123Z`). Container clock assumed correct (Docker syncs from host). |
+| M2 | Mock/replay for tests — how to test runner without real API calls | Use `claude-agent-sdk`'s `InMemorySessionStore` + a fake transport stub for unit tests; record/replay for integration tests. |
+| M3 | `agentd` SQLite schema migrations on upgrade | Embed migration scripts (`migrations/0001_init.sql`, `0002_add_queue_depth.sql`) and apply on boot if `PRAGMA user_version` is stale. |
+| M4 | Subagent (`/.claude/agents/`) and slash-command (`/.claude/commands/`) preloading | Same template-copy pattern as skills. Seeded from `~/.agentd/templates/{agents,commands}/` at `agentctl start`. |
+| M5 | Default skill set for new sessions | `repo-discovery`, `code-review`, plus whatever the team standardizes on. List in `~/.agentd/templates/skills/README.md`. |
+| M6 | What happens to `transcript.jsonl` on long-running sessions (size, rotation) | Soft cap at 100 MB per file; rotate to `transcript.<offset>.jsonl` and keep an index. UI loads only the latest segment by default. |
+| M7 | Whether to surface `interrupt` from inside the agent's tool calls (e.g., long bash command) | MVP: only via explicit `agentctl interrupt`. Tool-level cancellation (e.g., SIGINT to a long bash) is a follow-up. |
+
+### 25.6 Mandatory smoke test before locking persistence (Step 4)
 
 ```bash
 # 1. Start, send one message, observe success.
@@ -1062,6 +1110,14 @@ agentctl send $SESSION_ID "What is my name?"
 ```
 
 If step 4 fails: the resume mechanism is broken. Do not proceed past Step 4 until it works.
+
+### 25.7 Triage summary
+
+- **Must resolve before Step 5**: A1, A2, A3, A4 (these block correct concurrent and persistent behavior).
+- **Must resolve during Step 5–6**: A5, A6, A7, A10, A11, A12 (interrupt/queue/recovery correctness).
+- **Resolve before Step 9 (web UI)**: O1, O2 (logging + streaming protocol).
+- **Resolve before public dogfooding**: A8, A9, O3, O5, O6.
+- **Defer**: F1–F5 (cloud phase), M1–M7 (implementation polish), O4, O7.
 
 ---
 
