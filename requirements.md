@@ -4,7 +4,9 @@
 
 `agentctl` is a local tool that lets a developer spin up isolated AI coding-agent sessions on their own machine. Each session runs in its own Docker container, pre-loaded with the team's skills and MCP integrations, and is reachable from both a CLI and a local Web UI.
 
-This document is the v1 functional and behavioral specification. It is the input to a separate technical-architecture pass; design choices it does not pin down are listed in §15 (Open product questions) and §16 (Out of scope for v1).
+This document is the v1 functional and behavioral specification. It is the input to a separate technical-architecture pass.
+
+**Architect: read §15 before starting.** It contains the open product questions that must be resolved as part of architecture. Each has a recommended starting point but is not yet decided. Items not pinned down by this document are either in §15 or in §16 (Out of scope for v1).
 
 ## 2. Components and glossary
 
@@ -631,9 +633,27 @@ In both cases, the cloned repo's original branch and SHA are recorded by `agentd
 
 ---
 
-## 15. Open product questions
+## 15. Open product questions — for the architect to resolve
 
-These are decisions that affect the spec but were deliberately deferred. The technical-architecture pass should resolve them with the owner.
+The questions below are **owned by the technical-architecture pass**. Each was deliberately deferred from this requirements document because it materially affects implementation choices the architect will be making anyway. The architect must:
+
+1. Pick a resolution for every open item below (the recommended starting point is acceptable unless the architect has a reason to deviate).
+2. Update this document by replacing each "OPEN" entry with a "RESOLVED" entry stating the decision and its consequences (mirroring the format of §15.1, which has already been resolved).
+3. Surface any new questions that arise during architecture as additional `15.x` entries here, so this section remains the canonical record of resolved product questions.
+
+**Status summary.**
+
+| # | Topic | Status | Recommended default |
+|---|---|---|---|
+| 15.1 | Tool permission model | RESOLVED | — (see entry) |
+| 15.2 | Repo onboarding flow | OPEN — architect | `--repo` + in-session clone only; no host bind-mounts |
+| 15.3 | Default model and per-session selection | OPEN — architect | Configurable; default Sonnet |
+| 15.4 | Concurrency / interrupt model | OPEN — architect | Queue inbound; expose explicit interrupt action |
+| 15.5 | MCP reachability checks at start | OPEN — architect | Soft-warn, do not block |
+| 15.6 | MCP registry seed source | OPEN — architect | Shipped config file, override per install |
+| 15.7 | Web UI auth on localhost | OPEN — architect | Per-install bearer token |
+| 15.8 | Image and skill update path | OPEN — architect | Explicit `agentctl update` |
+| 15.9 | Logging and observability layout | OPEN — architect | journald/unified log + per-session log files |
 
 ### 15.1. Tool permission model — RESOLVED
 
@@ -646,7 +666,7 @@ Implications:
 - Destructive operations *inside* the container (e.g., `rm -rf /work`) are possible and only undone by ending the session and starting a new one. The session volume is the blast-radius cap.
 - Pushes to remote repos via `git` use the developer's PAT; the developer is responsible for the consequences of those pushes (including force-pushes), the same as they would be running git themselves.
 
-### 15.2. Repo onboarding flow
+### 15.2. Repo onboarding flow — OPEN, architect to resolve
 
 How do repos enter a session?
 
@@ -656,14 +676,14 @@ How do repos enter a session?
 
 Recommended: only the first two. No host bind-mounts in v1.
 
-### 15.3. Default model and per-session model selection
+### 15.3. Default model and per-session model selection — OPEN, architect to resolve
 
 - Is the model fixed by the base image, or selectable per session?
 - What's the default? (Opus, Sonnet, Haiku?)
 
 Recommended: configurable via `agentctl config set model.default`, overridable per session with `agentctl start --model <name>`. Default Sonnet for cost.
 
-### 15.4. Concurrency / interrupt model
+### 15.4. Concurrency / interrupt model — OPEN, architect to resolve
 
 - If a user sends a new message while the agent is mid-response, what happens?
   - **A.** Queue and deliver after current turn finishes.
@@ -673,33 +693,33 @@ Recommended: configurable via `agentctl config set model.default`, overridable p
 
 Recommended: **A** for v1 with a visible "interrupt" button that explicitly cancels the current turn. Multiple inbound messages from different clients are serialized in arrival order at `agentd`.
 
-### 15.5. MCP reachability checks
+### 15.5. MCP reachability checks — OPEN, architect to resolve
 
 - At session start, should `agentd` probe each enabled MCP for reachability before starting the runtime?
 - Hard fail if any enabled MCP is unreachable, or soft-warn and start anyway?
 
 Recommended: **soft-warn**; surface unreachable MCPs in session log and UI status, but don't block.
 
-### 15.6. MCP registry seed source
+### 15.6. MCP registry seed source — OPEN, architect to resolve
 
 - Where does the initial registry seed live (config file shipped with `agentctl`, internal URL fetched at `init`, manual entry)?
 
 Recommended: shipped config file under `/etc/agentctl/registry.seed.toml` or equivalent, overridable per install.
 
-### 15.7. Web UI auth on localhost
+### 15.7. Web UI auth on localhost — OPEN, architect to resolve
 
 - The Web UI binds to `127.0.0.1` only, but any process on the machine can reach it. Do we add a session-cookie / origin-check / loopback-token to prevent local malware from driving sessions?
 
 Recommended: a per-`agentd`-install bearer token written to `~/.config/agentctl/web_token`; the CLI opens the UI with a URL containing the token. Not bulletproof but raises the bar.
 
-### 15.8. Image and skill update path
+### 15.8. Image and skill update path — OPEN, architect to resolve
 
 - How is the base image updated? Auto-pulled by `agentd` on a schedule? `agentctl update` command? Pinned by the developer?
 - Do running sessions need to be restarted to pick up new images / skills? (Yes, mechanically.)
 
 Recommended: explicit `agentctl update` pulls the latest image and prints which sessions would need restart for it to take effect.
 
-### 15.9. Logging and observability
+### 15.9. Logging and observability — OPEN, architect to resolve
 
 - Where do `agentd` logs live? Where do per-session logs live? What goes in each?
 - `agentctl logs <session>` is in the CLI surface (R4) but not specified.
