@@ -12,8 +12,8 @@ something here disagrees with those docs, those docs win.
 |---|---|---|
 | `agentctl` + `agentd` binary | Go 1.23 | Single binary; subcommand routing on `argv[0]`. `embed` for SPA assets and SQL migrations. Docker SDK is mature. No CGO needed. |
 | sqlite | `modernc.org/sqlite` | Pure-Go driver. WAL + `synchronous=NORMAL` + `foreign_keys=ON` + `busy_timeout=5000` per `data-model.md` §1. |
-| HTTP / WS server | `net/http` + `nhooyr.io/websocket` (or `coder/websocket` fork) | Stdlib `net/http` plus a small WS lib. No heavy framework. |
-| Config | `pelletier/go-toml/v2` | Stable, RFC-5605-compliant. |
+| HTTP / WS server | `net/http` + `gorilla/websocket` | Stdlib `net/http` plus a small WS lib. No heavy framework. |
+| Config | `pelletier/go-toml/v2` | De facto standard TOML 1.0 parser. |
 | ULID | `oklog/ulid/v2` | For session ids, message ids, turn ids, event ids. |
 | Logger | stdlib `log/slog` with NDJSON handler + redactor wrapper | Per `observability.md` §2. |
 | Web UI SPA | React 18 + Vite + TypeScript | Embedded in `agentd` via `embed.FS`. No SSR. Routes client-side. |
@@ -25,9 +25,9 @@ something here disagrees with those docs, those docs win.
 **Justifications already implicit in the docs:** Go 1.23 is named in the
 implementation prompt; `modernc.org/sqlite` is named; the SPA tech is named;
 the shim language and SDK pin are named in ADR 0014. Anything else above
-(slog, ULID, go-toml, websocket lib) is chosen here for the first time and
-will be added with a one-line justification when first imported per the
-"no new dependencies without justification" rule.
+(slog, ULID, `pelletier/go-toml/v2`, `gorilla/websocket`) is chosen here for
+the first time and will be added with a one-line justification when first
+imported per the "no new dependencies without justification" rule.
 
 ## 2. Repository layout
 
@@ -88,9 +88,12 @@ will be added with a one-line justification when first imported per the
 │   │   ├── repos.py
 │   │   └── requirements.txt
 │   └── config-templates/               # /etc/agentctl/templates/*
-├── builtin-skills/                     # shipped curated skills (start small; M3+ adds)
+├── builtin-skills/                     # 3 placeholder skills shipped in v1: refactor/, tests/, docs/
+│   ├── refactor/
+│   ├── tests/
+│   └── docs/
 ├── installer/
-│   └── install.sh                      # canonical installer (post-M1; M5 polish)
+│   └── install.sh                      # repo-checkout installer (no signing, no CDN in v1)
 ├── web/                                # React SPA
 │   ├── package.json
 │   ├── vite.config.ts
@@ -128,40 +131,47 @@ Key invariants:
 - **Build-context lives in repo at `image/`.** `install.sh` copies that tree
   into `~/.local/share/agentctl/image/`. The CI test rig copies it directly
   (no install.sh run needed in CI).
+- **No release-tarball distribution in v1.** `install.sh` is invoked from a
+  repo checkout (`bash installer/install.sh`); it builds the binary from
+  source and lays down `image/` + `builtin-skills/`. No CDN-hosted tarball,
+  no signature verification, no embedded public key. Hosted releases and
+  signing are post-v1 concerns.
 - **Migrations and SPA assets are embedded.** `internal/store` uses
   `go:embed migrations/*.sql`; `internal/websrv` uses `go:embed` against the
   Vite build output.
 
 ## 3. Milestone branch plan
 
-One feature branch per milestone, branched from `main`. Within a milestone,
-parallel sub-agents run in git worktrees that branch off the milestone
-branch and merge back via PR.
+`claude/build-agentctl-v1-grHwr` is the integration branch for v1 per the
+session's branch directive — every milestone merges back into it. Each
+milestone's work happens on a `milestone/mN` branch off the integration
+branch. Within a milestone, parallel sub-agents run in git worktrees that
+branch off the milestone branch and merge back via PR (or fast-forward).
 
 ```
-main
- ├── feature/m1                          (M1; sequential, single agent)
- ├── feature/m2                          (M2; merges from sub-agent worktrees)
- │    ├── feature/m2-container           (worktree A: cm + image + shim + control auth)
- │    └── feature/m2-actor               (worktree B: session actor + CLI start/attach/etc.)
- ├── feature/m3                          (M3; merges from three worktrees)
- │    ├── feature/m3-mcp                 (worktree B: registry CRUD + probes)
- │    ├── feature/m3-web                 (worktree A: HTTP/WS + auth + endpoints)
- │    └── feature/m3-spa                 (worktree C: React SPA)
- ├── feature/m4                          (M4; merges from three worktrees)
- │    ├── feature/m4-recovery            (worktree A: reconciler + sweepers + fault rig)
- │    ├── feature/m4-skills              (worktree B: skill CLI + snapshot + hardened image)
- │    └── feature/m4-network             (worktree C: per-session networks + doctor + update flow)
- └── feature/m5                          (M5; merges from three worktrees)
-      ├── feature/m5-cost                (worktree A: usage table writes + cost UI/CLI)
-      ├── feature/m5-diff                (worktree B: in-shim git + diff/export endpoints)
-      └── feature/m5-doctor              (worktree C: full doctor + logs polish + README)
+claude/build-agentctl-v1-grHwr            (integration; all milestones land here)
+ ├── milestone/m1                          (M1; sequential, single agent)
+ ├── milestone/m2                          (M2; merges from sub-agent worktrees)
+ │    ├── m2/container                     (worktree A: cm + image + shim + control auth)
+ │    └── m2/actor                         (worktree B: session actor + CLI start/attach/etc.)
+ ├── milestone/m3                          (M3; merges from three worktrees)
+ │    ├── m3/mcp                           (worktree B: registry CRUD + probes)
+ │    ├── m3/web                           (worktree A: HTTP/WS + auth + endpoints)
+ │    └── m3/spa                           (worktree C: React SPA)
+ ├── milestone/m4                          (M4; merges from three worktrees)
+ │    ├── m4/recovery                      (worktree A: reconciler + sweepers + fault rig)
+ │    ├── m4/skills                        (worktree B: skill CLI + snapshot + hardened image)
+ │    └── m4/network                       (worktree C: per-session networks + doctor + update flow)
+ └── milestone/m5                          (M5; merges from three worktrees)
+      ├── m5/cost                          (worktree A: usage table writes + cost UI/CLI)
+      ├── m5/diff                          (worktree B: in-shim git + diff/export endpoints)
+      └── m5/doctor                        (worktree C: full doctor + logs polish + README)
 ```
 
-Squash-merge into `main` happens **only** when the milestone's exit criteria
-in `phasing.md` pass under the Docker test rig. The `claude/build-agentctl-v1-grHwr`
-branch this run lives on is treated as the integration branch; each
-`feature/mN` is rebased onto it before merge.
+A milestone merges into `claude/build-agentctl-v1-grHwr` **only** when its
+exit criteria in `phasing.md` pass under the Docker test rig. The
+sub-milestone worktree branches (`mN/*`) are local-only — they never push
+to origin separately; only the integration branch does.
 
 ### Merge order within each milestone
 
@@ -382,11 +392,14 @@ document this in `test/README.md`.
 
 ### 5.4 Init flags for non-interactive use (added in M1)
 
-- `--anthropic-key <key>` — bypass the prompt; used by CI.
-- `--github-pat <pat>` — bypass the prompt.
-- `--no-import-claude-skills` — skip the Claude Code skills import step.
-- `--foreground` — run `agentd` in foreground (don't try to install a
-  service).
+- `--anthropic-key <key>` — bypass the Anthropic key prompt.
+- `--github-pat <pat>` — bypass the GitHub PAT prompt.
+- `--no-import-claude-skills` — skip the Claude Code skills import prompt.
+- `--foreground` — skip systemd / launchd install; run `agentd` in
+  foreground for the current shell. Distinct from the natural foreground
+  fallback that triggers when service install fails — `--foreground` is
+  the explicit "I want foreground, even though service install would have
+  worked" signal CI uses.
 
 These are all already covered by R1's "init flow" intent; we make them
 flags rather than env vars so they show up in `--help`.
@@ -453,26 +466,17 @@ The whole product is done when:
   When a sub-agent finishes, the parent verifies the diff in the worktree
   before merging — agent summaries describe intent, not what shipped.
 
-## 8. Open questions for the human reviewer
+## 8. Decisions made during scaffold review
 
-These are points where the docs allow several reasonable choices and the
-default below should be confirmed (or redirected) before M1 starts:
+Resolutions for the points the docs left open. These are binding for v1
+unless a new ADR (0016+) is filed.
 
-1. **WebSocket library.** The Go ecosystem has `gorilla/websocket`,
-   `nhooyr.io/websocket`, and `coder/websocket`. Plan: start with
-   `coder/websocket` (active fork of nhooyr's, idiomatic stdlib-style API,
-   v1.8+). Acceptable to switch if you prefer gorilla.
-2. **TOML library.** `pelletier/go-toml/v2` is the de facto choice. Confirm
-   or specify alternative.
-3. **SPA package manager.** `pnpm` (lockfile-friendly, fast). Alternative:
-   `npm`. Default: `pnpm`.
-4. **`installer/install.sh` signing.** Real signature verification needs an
-   embedded public key + a release-time signing pipeline. M1 lays down the
-   script with verification stubbed (`AGENTCTL_INSTALL_NO_VERIFY=1`-equivalent
-   default in dev); M5 wires the real key. Confirm this is acceptable.
-5. **Built-in skills shipped at v1.** `phasing.md` mentions "3 skills
-   (refactor, tests, docs)" in its sample doctor output. We will draft small
-   placeholders for these in M3 and refine in M5; confirm content is not on
-   the critical path for v1 GA.
-
-If any of (1)–(4) is wrong, please correct before approval.
+| # | Topic | Decision |
+|---|---|---|
+| 1 | WebSocket library | `gorilla/websocket`. |
+| 2 | TOML library | `pelletier/go-toml/v2`. |
+| 3 | SPA package manager | `npm` (default Node tooling, no extra CI install). |
+| 4 | `install.sh` distribution | **Repo-checkout install only.** v1 ships no hosted release tarball, no CDN, no signature verification, no embedded public key. `installer/install.sh` is invoked from a local checkout (`bash installer/install.sh`); it builds the binary from source, lays down `image/` + `builtin-skills/`, drops the binary into `INSTALL_DIR`. Hosted releases + signing are deferred to v1.x. |
+| 5 | Built-in skills | Three placeholder skills shipped: `refactor/`, `tests/`, `docs/` (matches the sample in `observability.md` §9). Lightly defined; primarily exercise the manifest format and `/help` rendering. Polish post-v1. |
+| 6 | `init --foreground` flag | Add in M1 alongside `--anthropic-key`, `--github-pat`, `--no-import-claude-skills`. Forces foreground mode (skips systemd / launchd install) for CI use. Distinct from the existing fallback that triggers on service-install failure. |
+| 7 | Integration branch | `claude/build-agentctl-v1-grHwr` is the v1 integration branch. Each `milestone/mN` rebases onto it before merge; sub-milestone `mN/*` worktree branches stay local. |
