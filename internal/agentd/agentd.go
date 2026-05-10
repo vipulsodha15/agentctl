@@ -2,10 +2,15 @@ package agentd
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +24,7 @@ import (
 	"github.com/agentctl/agentctl/internal/log"
 	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/paths"
+	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/recovery"
 	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/skills"
@@ -189,6 +195,10 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("web_token missing: %w (run `agentctl init`)", err)
 	}
+	if existing, ok := probeExistingAgentd(cfg.Agentd.WebAddr); ok {
+		return fmt.Errorf("agentd already running on %s (version=%s, uptime=%ds); %s",
+			cfg.Agentd.WebAddr, existing.Version, existing.UptimeS, stopServiceHint())
+	}
 	webLog := log.New(log.Options{Component: log.ComponentWeb})
 	webSrv := websrv.New(websrv.Options{
 		Addr:    cfg.Agentd.WebAddr,
@@ -202,6 +212,10 @@ func Run(ctx context.Context, opts Options) error {
 		Logger:  webLog,
 	})
 	if err := webSrv.Start(); err != nil {
+		if isAddrInUse(err) {
+			return fmt.Errorf("web server: %s already in use by another process; %s",
+				cfg.Agentd.WebAddr, stopServiceHint())
+		}
 		return fmt.Errorf("web server: %w", err)
 	}
 	defer func() { _ = webSrv.Close() }()
@@ -233,4 +247,47 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	logger.Info("agentd.shutdown")
 	return nil
+}
+
+// probeExistingAgentd reports whether an agentctl-shaped daemon is already
+// answering on addr. It only treats responses with our HealthResponse JSON
+// fields as a match so we don't mistake an unrelated process for ourselves.
+func probeExistingAgentd(addr string) (proto.HealthResponse, bool) {
+	c := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := c.Get("http://" + addr + "/healthz")
+	if err != nil {
+		return proto.HealthResponse{}, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return proto.HealthResponse{}, false
+	}
+	var h proto.HealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return proto.HealthResponse{}, false
+	}
+	if h.Version == "" {
+		return proto.HealthResponse{}, false
+	}
+	return h, true
+}
+
+func isAddrInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	return strings.Contains(err.Error(), "address already in use")
+}
+
+func stopServiceHint() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "stop the existing instance with `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.agentctl.agentd.plist` (or `lsof -i :7777` to find the holder)"
+	case "linux":
+		return "stop the existing instance with `systemctl --user stop agentd` (or `ss -ltnp 'sport = :7777'` to find the holder)"
+	}
+	return "stop the existing process holding the port and retry"
 }
