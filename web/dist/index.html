@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>agentctl</title>
+    <meta name="referrer" content="no-referrer" />
+    <script>
+      (function () {
+        var hash = location.hash || "";
+        var m = /[?&#]t=([^&]+)/.exec(hash);
+        if (m) {
+          document.cookie =
+            "agentctl_token=" +
+            decodeURIComponent(m[1]) +
+            "; Path=/; SameSite=Strict";
+          history.replaceState(null, "", location.pathname + location.search);
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-DUe40dVu.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DOMgNVhD.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

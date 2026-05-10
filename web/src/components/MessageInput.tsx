@@ -1,0 +1,135 @@
+import { useRef, useState } from "react";
+import { ApiError, apiJson, jsonBody } from "../api";
+import type { SendMessageRequest, SendMessageResponse } from "../types";
+import { SkillAutocomplete, getSkillNav } from "./SkillAutocomplete";
+
+interface Props {
+  sessionId: string;
+  inFlight: boolean;
+  queueDepth: number;
+}
+
+export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
+  const [value, setValue] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  async function send() {
+    const content = value.trim();
+    if (!content) return;
+    if (sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      const req: SendMessageRequest = {
+        content,
+        client_id: clientId(),
+        idempotency_key: cryptoRandomId(),
+      };
+      await apiJson<SendMessageResponse>(
+        `/v1/sessions/${encodeURIComponent(sessionId)}/messages`,
+        { method: "POST", ...jsonBody(req) },
+      );
+      setValue("");
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? `${err.code ?? err.status}: ${err.message}`
+          : String(err),
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function onPickSkill(name: string) {
+    // Replace the leading /<typed prefix> with /<name> and a trailing space
+    // so the user can immediately type arguments.
+    const rest = value.includes(" ") ? value.slice(value.indexOf(" ")) : "";
+    const next = `/${name} ${rest.trimStart()}`.replace(/\s+$/, " ");
+    setValue(next);
+    queueMicrotask(() => taRef.current?.focus());
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    const nav = getSkillNav();
+    if (nav && nav.hasItems) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        nav.next();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        nav.prev();
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        nav.pick();
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        nav.pick();
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  }
+
+  return (
+    <div className="input-area">
+      <SkillAutocomplete
+        sessionId={sessionId}
+        value={value}
+        onPick={onPickSkill}
+      />
+      <textarea
+        ref={taRef}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder={
+          inFlight
+            ? "Type to queue (will send when current turn ends)…"
+            : "Type a message — Enter to send, Shift+Enter for newline. / for skills."
+        }
+      />
+      <div className="controls">
+        <button
+          className="primary"
+          onClick={() => void send()}
+          disabled={sending || inFlight || value.trim() === ""}
+        >
+          {sending ? "Sending…" : "Send"}
+        </button>
+        <span className="queue-indicator">
+          {queueDepth > 0 ? `${queueDepth} queued` : ""}
+        </span>
+      </div>
+      {error && <div className="error-text">{error}</div>}
+    </div>
+  );
+}
+
+function clientId(): string {
+  const w = window as unknown as { __agentctlClientId?: string };
+  if (!w.__agentctlClientId) {
+    w.__agentctlClientId = `web-${cryptoRandomId()}`;
+  }
+  return w.__agentctlClientId;
+}
+
+function cryptoRandomId(): string {
+  // Avoid pulling in a ULID lib; the server treats this as opaque.
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}

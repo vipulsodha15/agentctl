@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${AGENTCTL_DEBUG:-}" == "1" ]]; then
+  set -x
+fi
+
+# container-and-image.md §2.6 step 5: re-route the SDK history dir onto the
+# session volume so idle-resume / restart preserves conversation history.
+mkdir -p /work/.claude/projects
+ln -sfn /work/.claude /home/agent/.claude
+
+# §2.5: PAT-based git credentials. The credentials file is mode 0600 and lives
+# on the session volume; the helper config tells git to read from it.
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  mkdir -p /work/.config/git
+  umask 077
+  printf 'https://x-access-token:%s@github.com\n' "${GITHUB_TOKEN}" \
+    > /work/.config/git/credentials
+  cat > /work/.config/git/config <<'GITCONFIG'
+[credential]
+        helper = store --file=/work/.config/git/credentials
+GITCONFIG
+fi
+
+if [[ -n "${GIT_AUTHOR_NAME:-}" ]]; then
+  git config --global user.name "${GIT_AUTHOR_NAME}" || true
+fi
+if [[ -n "${GIT_AUTHOR_EMAIL:-}" ]]; then
+  git config --global user.email "${GIT_AUTHOR_EMAIL}" || true
+fi
+
+exec /opt/agentctl/venv/bin/python -m shim "$@"

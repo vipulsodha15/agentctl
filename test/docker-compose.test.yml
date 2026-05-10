@@ -1,0 +1,33 @@
+services:
+  dind:
+    image: docker:24-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    volumes:
+      - sessions-dir:/root/.local/share/agentctl
+    networks: [default]
+
+  tester:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile.test
+    depends_on: [dind]
+    environment:
+      DOCKER_HOST: tcp://dind:2375
+      ANTHROPIC_API_KEY: ${ANTHOPIC_KEY:-}
+      GITHUB_PAT_TEST: ${GITHUB_PAT_TEST:-}
+      AGENTCTL_ALLOW_ROOT: "1"
+    volumes:
+      - sessions-dir:/root/.local/share/agentctl
+      - ../:/work
+    working_dir: /work
+    command: ["bash", "test/run-e2e.sh"]
+    networks: [default]
+
+volumes:
+  sessions-dir: {}
+
+networks:
+  default: {}
