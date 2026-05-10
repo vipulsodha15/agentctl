@@ -69,6 +69,53 @@ func (m *stubManager) Terminate(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *stubManager) Diff(_ context.Context, id string, _ sm.DiffRequest) (sm.DiffStream, error) {
+	if id == "missing" {
+		return nil, sm.ErrSessionNotFound
+	}
+	return newCannedDiff([]sm.DiffChunk{
+		{Repo: "alpha", Data: []byte("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")},
+		{Repo: "alpha", End: true, ExitCode: 0, BaseSHA: "abc"},
+	}), nil
+}
+
+func (m *stubManager) ExportPatch(ctx context.Context, id string, req sm.DiffRequest) (sm.DiffStream, error) {
+	return m.Diff(ctx, id, req)
+}
+
+func (m *stubManager) ExportPush(_ context.Context, id string, req sm.PushRequest) (sm.PushResult, error) {
+	if id == "missing" {
+		return sm.PushResult{}, sm.ErrSessionNotFound
+	}
+	return sm.PushResult{Success: true, Repo: req.Repo, Branch: req.Branch, Output: "pushed"}, nil
+}
+
+func (m *stubManager) SessionRepos(_ context.Context, id string) ([]proto.RepoState, error) {
+	if id == "missing" {
+		return nil, sm.ErrSessionNotFound
+	}
+	return []proto.RepoState{{Name: "alpha", URL: "https://example/alpha", Branch: "main"}}, nil
+}
+
+type cannedDiff struct {
+	chunks []sm.DiffChunk
+	idx    int
+	closed bool
+}
+
+func newCannedDiff(chunks []sm.DiffChunk) *cannedDiff { return &cannedDiff{chunks: chunks} }
+
+func (c *cannedDiff) Recv() (sm.DiffChunk, error) {
+	if c.idx >= len(c.chunks) {
+		return sm.DiffChunk{}, io.EOF
+	}
+	ch := c.chunks[c.idx]
+	c.idx++
+	return ch, nil
+}
+
+func (c *cannedDiff) Close() error { c.closed = true; return nil }
+
 type fakeStream struct {
 	events []proto.Event
 	idx    int
@@ -277,9 +324,7 @@ func TestUnavailableForUnimplemented(t *testing.T) {
 	cases := []struct {
 		method, path string
 	}{
-		{"GET", "/v1/sessions/sess_1/diff"},
 		{"POST", "/v1/sessions/sess_1/restart"},
-		{"POST", "/v1/sessions/sess_1/export/patch"},
 		{"GET", "/v1/usage"},
 	}
 	for _, c := range cases {
@@ -296,6 +341,92 @@ func TestUnavailableForUnimplemented(t *testing.T) {
 		if resp.StatusCode != http.StatusServiceUnavailable {
 			t.Errorf("%s %s: expected 503, got %d", c.method, c.path, resp.StatusCode)
 		}
+	}
+}
+
+func TestDiffEndpointReturnsPatch(t *testing.T) {
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("GET", "http://"+s.Addr()+"/v1/sessions/sess_1/diff", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "+++ b/x") {
+		t.Errorf("body: %q", string(body))
+	}
+}
+
+func TestExportPatchEndpointWritesAttachment(t *testing.T) {
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("POST", "http://"+s.Addr()+"/v1/sessions/sess_1/export/patch",
+		strings.NewReader(`{"repo":"alpha"}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Origin", "http://"+s.Addr())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Disposition"), "alpha.patch") {
+		t.Errorf("Content-Disposition: %q", resp.Header.Get("Content-Disposition"))
+	}
+}
+
+func TestExportPushReturnsJSON(t *testing.T) {
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("POST", "http://"+s.Addr()+"/v1/sessions/sess_1/export/push",
+		strings.NewReader(`{"repo":"alpha","branch":"feat/x","message":"hi"}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Origin", "http://"+s.Addr())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Branch  string `json:"branch"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Success || body.Branch != "feat/x" {
+		t.Errorf("body=%+v", body)
+	}
+}
+
+func TestSessionReposEndpoint(t *testing.T) {
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("GET", "http://"+s.Addr()+"/v1/sessions/sess_1/repos", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Repos []proto.RepoState `json:"repos"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Repos) != 1 || body.Repos[0].Name != "alpha" {
+		t.Errorf("repos=%+v", body.Repos)
 	}
 }
 

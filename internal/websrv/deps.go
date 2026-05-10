@@ -19,6 +19,10 @@ type Manager interface {
 	List(ctx context.Context) ([]proto.SessionSummary, error)
 	Get(ctx context.Context, sessionID string) (proto.SessionDetail, error)
 	Terminate(ctx context.Context, sessionID string) error
+	Diff(ctx context.Context, sessionID string, req sm.DiffRequest) (sm.DiffStream, error)
+	ExportPatch(ctx context.Context, sessionID string, req sm.DiffRequest) (sm.DiffStream, error)
+	ExportPush(ctx context.Context, sessionID string, req sm.PushRequest) (sm.PushResult, error)
+	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
 }
 
 // MCPRegistry is M3-B's territory; websrv only dispatches to it. Methods

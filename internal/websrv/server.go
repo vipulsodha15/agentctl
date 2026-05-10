@@ -282,15 +282,17 @@ func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest s
 			unavailable(w, "RestartSession", "M4")
 		})
 	case suffix == "diff" && method == http.MethodGet:
-		unavailable(w, "Diff", "M5")
+		s.handleDiff(w, r, id)
 	case suffix == "export/patch" && method == http.MethodPost:
 		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
-			unavailable(w, "ExportPatch", "M5")
+			s.handleExportPatch(w, r, id)
 		})
 	case suffix == "export/push" && method == http.MethodPost:
 		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
-			unavailable(w, "ExportPush", "M5")
+			s.handleExportPush(w, r, id)
 		})
+	case suffix == "repos" && method == http.MethodGet:
+		s.handleListSessionRepos(w, r, id)
 	case suffix == "logs" && method == http.MethodGet:
 		s.handleSessionLogs(w, r, id)
 	case suffix == "skills" && method == http.MethodGet:

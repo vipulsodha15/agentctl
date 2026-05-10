@@ -221,6 +221,14 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		s.handleValidateSkill(cw, frame)
 	case proto.OpGetCost:
 		s.handleGetCost(cw, frame)
+	case proto.OpDiff:
+		go s.handleDiff(cw, frame, false)
+	case proto.OpExportPatch:
+		go s.handleDiff(cw, frame, true)
+	case proto.OpExportPush:
+		s.handleExportPush(cw, frame)
+	case proto.OpListSessionRepos:
+		s.handleListSessionRepos(cw, frame)
 	default:
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
 	}

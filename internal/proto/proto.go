@@ -40,6 +40,10 @@ const (
 	OpExportSkill         = "ExportSkill"
 	OpValidateSkill       = "ValidateSkill"
 	OpGetCost             = "GetCost"
+	OpDiff                = "Diff"
+	OpExportPatch         = "ExportPatch"
+	OpExportPush          = "ExportPush"
+	OpListSessionRepos    = "ListSessionRepos"
 )
 
 type Frame struct {
@@ -533,6 +537,51 @@ type RangeCostTotals struct {
 type GetCostResponse struct {
 	PerSession *SessionCostTotals `json:"per_session,omitempty"`
 	Range      *RangeCostTotals   `json:"range,omitempty"`
+}
+
+type DiffRequest struct {
+	SessionID string `json:"session_id"`
+	Repo      string `json:"repo,omitempty"`
+	Format    string `json:"format,omitempty"`
+}
+
+type DiffChunkData struct {
+	Repo     string `json:"repo,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+	End      bool   `json:"end,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
+	BaseSHA  string `json:"base_sha,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	Note     string `json:"note,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type ExportPatchRequest struct {
+	SessionID string `json:"session_id,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+}
+
+type ExportPushRequest struct {
+	SessionID string `json:"session_id,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	Branch    string `json:"branch"`
+	Message   string `json:"message,omitempty"`
+}
+
+type ExportPushResponse struct {
+	Success bool   `json:"success"`
+	Repo    string `json:"repo,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type ListSessionReposRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type ListSessionReposResponse struct {
+	Repos []RepoState `json:"repos"`
 }
 
 type MCPSkippedData struct {

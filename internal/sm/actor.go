@@ -120,6 +120,8 @@ type actor struct {
 	control                ControlConn
 	terminated             bool
 	pendingSnap            map[string]chan ControlFrame
+	pendingDiffs           map[string]*pendingDiff
+	pendingPush            map[string]chan ControlFrame
 	containerID            string
 	networkID              string
 	networkName            string
@@ -136,6 +138,8 @@ func newActor(opts actorOptions) *actor {
 		skillCollisions: append([]string(nil), opts.SkillCollisions...),
 		repos:           opts.Repos,
 		pendingSnap:     map[string]chan ControlFrame{},
+		pendingDiffs:    map[string]*pendingDiff{},
+		pendingPush:     map[string]chan ControlFrame{},
 	}
 }
 
@@ -388,6 +392,12 @@ func (a *actor) handleControlFrame(fr ControlFrame) {
 		a.broadcast(proto.EventSessionError, fr.Data)
 	case RuntimeSnapshot:
 		a.routeSnapshotReply(fr)
+	case RuntimeDiffChunk:
+		a.routeDiffChunk(fr)
+	case RuntimeDiffEnd:
+		a.routeDiffEnd(fr)
+	case RuntimeExportPushResult:
+		a.routePushResult(fr)
 	case RuntimeHeartbeat:
 		a.mu.Lock()
 		a.summary.LastActivityAt = a.opts.Now()

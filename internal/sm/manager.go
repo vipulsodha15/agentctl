@@ -34,6 +34,10 @@ type Manager interface {
 	Shutdown(ctx context.Context) error
 	Busy(sessionID string) (busy bool, ok bool)
 	Stop(ctx context.Context, sessionID string, reason string) error
+	Diff(ctx context.Context, sessionID string, req DiffRequest) (DiffStream, error)
+	ExportPatch(ctx context.Context, sessionID string, req DiffRequest) (DiffStream, error)
+	ExportPush(ctx context.Context, sessionID string, req PushRequest) (PushResult, error)
+	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
 }
 
 type Stream = fan.Stream

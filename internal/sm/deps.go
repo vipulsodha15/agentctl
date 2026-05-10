@@ -96,19 +96,25 @@ type ControlConn interface {
 type ControlHandler func(conn ControlConn)
 
 const (
-	RuntimeHello          = "runtime.hello"
-	RuntimeReady          = "runtime.ready"
-	RuntimeEvent          = "runtime.event"
-	RuntimeError          = "runtime.error"
-	RuntimeSessionID      = "runtime.session_id"
-	RuntimeHeartbeat      = "runtime.heartbeat"
-	RuntimeSnapshot       = "runtime.snapshot"
-	RuntimeRepoChanged    = "repo.changed"
-	AgentdGreet           = "agentd.greet"
-	AgentdMessage         = "agentd.message"
-	AgentdInterrupt       = "agentd.interrupt"
-	AgentdSnapshotRequest = "agentd.snapshot_request"
-	AgentdShutdown        = "agentd.shutdown"
+	RuntimeHello            = "runtime.hello"
+	RuntimeReady            = "runtime.ready"
+	RuntimeEvent            = "runtime.event"
+	RuntimeError            = "runtime.error"
+	RuntimeSessionID        = "runtime.session_id"
+	RuntimeHeartbeat        = "runtime.heartbeat"
+	RuntimeSnapshot         = "runtime.snapshot"
+	RuntimeRepoChanged      = "repo.changed"
+	RuntimeDiffChunk        = "runtime.diff_chunk"
+	RuntimeDiffEnd          = "runtime.diff_end"
+	RuntimeExportPushResult = "runtime.export_push_result"
+	AgentdGreet             = "agentd.greet"
+	AgentdMessage           = "agentd.message"
+	AgentdInterrupt         = "agentd.interrupt"
+	AgentdSnapshotRequest   = "agentd.snapshot_request"
+	AgentdShutdown          = "agentd.shutdown"
+	AgentdDiffRequest       = "agentd.diff_request"
+	AgentdExportPatchReq    = "agentd.export_patch_request"
+	AgentdExportPushReq     = "agentd.export_push_request"
 )
 
 // RuntimeEventData mirrors the inner shape the shim emits inside a
