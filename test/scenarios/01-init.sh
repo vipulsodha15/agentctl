@@ -50,6 +50,9 @@ echo "[01-init] doctor exits 0"
 agentctl doctor
 
 echo "[01-init] re-running init (idempotency)"
-agentctl init --no-import-claude-skills --foreground >/dev/null
+# No --foreground here on purpose: the daemon is already up. Init will
+# detect the running daemon (probe /healthz) and skip the spawn-and-block
+# step, exiting cleanly after re-applying the idempotent install steps.
+agentctl init --no-import-claude-skills >/dev/null
 
 echo "[01-init] OK"

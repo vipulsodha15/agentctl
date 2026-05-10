@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentctl/agentctl/internal/agentd"
@@ -162,15 +164,20 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 		}
 	}
 
-	if foreground {
-		go func() {
-			if err := agentd.Run(ctx, agentd.Options{Layout: layout}); err != nil {
-				fmt.Fprintf(env.Stderr, "agentd: %v\n", err)
-			}
-		}()
+	alreadyRunning := foreground && probeHealth(cfg.Agentd.WebAddr)
+	var fgErr chan error
+	var fgCancel context.CancelFunc
+	if foreground && !alreadyRunning {
+		var fgCtx context.Context
+		fgCtx, fgCancel = context.WithCancel(ctx)
+		fgErr = make(chan error, 1)
+		go func() { fgErr <- agentd.Run(fgCtx, agentd.Options{Layout: layout}) }()
 	}
 
 	if err := waitForHealth(ctx, layout, cfg.Agentd.WebAddr, 10*time.Second); err != nil {
+		if fgCancel != nil {
+			fgCancel()
+		}
 		return wrapInit(ExitEnvironment, err)
 	}
 
@@ -179,7 +186,34 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 	}
 
 	printInitSummary(env, layout, cfg, foreground)
+
+	if foreground && !alreadyRunning {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		select {
+		case <-sigs:
+			fgCancel()
+			<-fgErr
+		case err := <-fgErr:
+			fgCancel()
+			if err != nil {
+				return wrapInit(ExitEnvironment, fmt.Errorf("agentd exited: %w", err))
+			}
+		}
+	} else if fgCancel != nil {
+		fgCancel()
+	}
 	return nil
+}
+
+func probeHealth(addr string) bool {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
 }
 
 func ensureDirs(l paths.Layout) error {
