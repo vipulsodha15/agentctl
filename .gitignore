@@ -15,3 +15,6 @@
 .idea/
 .vscode/
 *.swp
+
+# Claude Code agent worktree metadata (tooling state, not source)
+.claude/
