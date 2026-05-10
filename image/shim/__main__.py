@@ -1,72 +1,236 @@
-"""M1 placeholder shim. M2 wires this to claude-agent-sdk.
+"""Production runtime shim entrypoint.
 
-This shim opens the bind-mounted control sock if present, sends
-``runtime.hello``, prints any frames it receives, and exits cleanly when it
-sees ``agentd.shutdown``. Real SDK integration (run loop, runtime.event,
-runtime.snapshot) lands in M2.
+Pipeline (container-and-image.md §2.6):
+
+1.  Read ``secrets.env`` (already exposed via ``--env-file``) and the
+    per-session ``session.json`` written into the control dir at create time.
+2.  Connect to ``/run/agentctl/control/agentd.sock`` and send ``runtime.hello``
+    carrying ``session_token``.
+3.  Receive ``agentd.greet``; clone any ``repos[]`` (record SHAs to
+    ``/work/.agentctl/repo-bases.json``); send ``runtime.ready``.
+4.  Translate SDK events into ``runtime.event`` frames; service inbound
+    ``agentd.message`` / ``.interrupt`` / ``.snapshot_request`` / ``.shutdown``.
+5.  Watch ``/work/<repo>`` (excluding ``.git/objects``) and emit throttled
+    ``repo.changed`` frames.
+6.  Heartbeat every 5s.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import socket
+import signal
 import sys
+import threading
 import time
-from typing import Any
+from typing import Any, Optional
+
+from . import control, repos, runtime as rt
+from .watcher import RepoWatcher
 
 
-CONTROL_SOCK = "/run/agentctl/control/agentd.sock"
+SHIM_VERSION = "1.0.0-m2"
+SDK_VERSION = "0.1.80"
+HEARTBEAT_SECONDS = 5.0
+SHUTDOWN_GRACE_SECONDS = 30.0
+CONTROL_SOCK_DEFAULT = "/run/agentctl/control/agentd.sock"
+SESSION_META_DEFAULT = "/run/agentctl/control/session.json"
 
 
-def emit(stream: Any, payload: dict) -> None:
-    line = json.dumps(payload, separators=(",", ":"))
-    stream.write(line + "\n")
-    stream.flush()
+class Shim:
+    def __init__(self, *, control_sock: str, session_meta: str) -> None:
+        self._control_sock = control_sock
+        self._session_meta = session_meta
+        self._client: Optional[control.ControlClient] = None
+        self._driver: Optional[rt.RuntimeDriver] = None
+        self._watcher: Optional[RepoWatcher] = None
+        self._stopping = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._sdk_session_id: Optional[str] = None
+        self._meta: dict = {}
 
+    def _read_meta(self) -> dict:
+        if not os.path.exists(self._session_meta):
+            return {}
+        with open(self._session_meta, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-def main() -> int:
-    if not os.path.exists(CONTROL_SOCK):
-        sys.stderr.write(
-            "shim: control socket not present at "
-            + CONTROL_SOCK
-            + " — running in offline placeholder mode\n"
+    def run(self) -> int:
+        self._meta = self._read_meta()
+        session_token = self._meta.get("session_token") or os.environ.get("AGENTCTL_SESSION_TOKEN", "")
+        if not session_token:
+            sys.stderr.write("shim: AGENTCTL_SESSION_TOKEN missing\n")
+            return 64
+
+        self._client = control.ControlClient.connect(self._control_sock)
+        self._client.send(
+            control.KIND_HELLO,
+            control.hello_payload(session_token, shim_version=SHIM_VERSION, sdk_version=SDK_VERSION),
         )
-        sys.stderr.flush()
-        # M2 lands the real SDK loop. For M1 we exit cleanly so the container
-        # does not become a zombie when run for a smoke test.
+
+        greet = self._client.recv()
+        if greet is None:
+            return 0
+        if greet.get("kind") != control.KIND_GREET:
+            self._client.send(control.KIND_ERROR, {
+                "code": "protocol_error",
+                "message": f"expected agentd.greet, got {greet.get('kind')!r}",
+                "fatal": True,
+            })
+            return 65
+        greet_data = greet.get("data") or {}
+        self._sdk_session_id = greet_data.get("sdk_session_id") or self._meta.get("sdk_session_id")
+
+        repo_specs = repos.parse_repo_specs(greet_data.get("repos") or [])
+        clone_results = repos.clone_all(
+            repo_specs,
+            on_error=lambda r: self._client.send(control.KIND_ERROR, {
+                "code": "repo_clone_failed",
+                "message": f"{r.name}: {r.error}",
+                "fatal": False,
+            }),
+        )
+        repos.write_repo_bases(clone_results)
+
+        skills = self._discover_skills()
+        ready = {
+            "repos": [
+                {"name": r.name, "url": r.url, "base_sha": r.base_sha, "branch": r.branch}
+                for r in clone_results
+                if not r.error
+            ],
+            "skills": skills,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self._client.send(control.KIND_READY, ready)
+
+        self._driver = rt.RuntimeDriver(
+            rt.RuntimeConfig(
+                model=greet_data.get("model") or os.environ.get("AGENTCTL_MODEL", ""),
+                cwd="/work",
+                resume=self._sdk_session_id,
+                mcp_servers=greet_data.get("mcps") or {},
+            ),
+            emit_event=self._emit_event,
+            emit_session_id=self._emit_session_id,
+        )
+        self._driver.start()
+
+        self._watcher = RepoWatcher(
+            work_root="/work",
+            repos=[r.name for r in clone_results if not r.error],
+            emit=lambda payload: self._safe_send(control.KIND_REPO_CHANGED, payload),
+        )
+        self._watcher.start()
+
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="shim-heartbeat", daemon=True)
+        self._heartbeat_thread.start()
+
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, lambda *_: self._stopping.set())
+            signal.signal(signal.SIGINT, lambda *_: self._stopping.set())
+
+        rc = self._inbound_loop()
+        self._teardown()
+        return rc
+
+    def _discover_skills(self) -> list[dict]:
+        out: list[dict] = []
+        skills_dir = "/skills"
+        if not os.path.isdir(skills_dir):
+            return out
+        for entry in sorted(os.listdir(skills_dir)):
+            manifest = os.path.join(skills_dir, entry, "manifest.json")
+            if os.path.exists(manifest):
+                try:
+                    with open(manifest, "r", encoding="utf-8") as f:
+                        m = json.load(f)
+                except Exception:  # noqa: BLE001
+                    m = {}
+                out.append({"name": m.get("name", entry), "description": m.get("description", "")})
+        return out
+
+    def _inbound_loop(self) -> int:
+        assert self._client is not None
+        for frame in self._client.iter_frames():
+            if self._stopping.is_set():
+                break
+            kind = frame.get("kind")
+            data = frame.get("data") or {}
+            if kind == control.KIND_MESSAGE:
+                self._handle_message(data)
+            elif kind == control.KIND_INTERRUPT:
+                self._handle_interrupt(data)
+            elif kind == control.KIND_SNAPSHOT_REQUEST:
+                self._handle_snapshot_request(data)
+            elif kind == control.KIND_SHUTDOWN:
+                self._stopping.set()
+                break
+            else:
+                self._safe_send(control.KIND_ERROR, {
+                    "code": "unknown_inbound_kind",
+                    "message": f"shim does not handle {kind!r}",
+                    "fatal": False,
+                })
         return 0
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(CONTROL_SOCK)
-    fp = sock.makefile("rwb")
-    hello = {
-        "v": 1,
-        "seq": 0,
-        "kind": "runtime.hello",
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "data": {
-            "shim_version": "0.1.0-m1",
-            "sdk_version": "claude-agent-sdk==0.1.80",
-            "sdk": "claude-agent-sdk-python",
-            "pid": os.getpid(),
-            "capabilities": ["runtime.hello", "agentd.shutdown"],
-        },
-    }
-    fp.write((json.dumps(hello) + "\n").encode("utf-8"))
-    fp.flush()
+    def _handle_message(self, data: dict) -> None:
+        if self._driver is None:
+            return
+        turn_id = data.get("message_id") or data.get("turn_id") or ""
+        content = data.get("content") or ""
+        self._driver.submit_turn(turn_id=turn_id, content=content)
 
-    while True:
-        line = fp.readline()
-        if not line:
-            return 0
+    def _handle_interrupt(self, _data: dict) -> None:
+        if self._driver is None:
+            return
+        self._driver.interrupt()
+
+    def _handle_snapshot_request(self, data: dict) -> None:
+        request_id = data.get("request_id", "")
+        messages = rt.read_snapshot_jsonl("/work", self._sdk_session_id)
+        self._safe_send(control.KIND_SNAPSHOT, {
+            "request_id": request_id,
+            "messages": messages,
+        })
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stopping.is_set():
+            self._safe_send(control.KIND_HEARTBEAT, {})
+            self._stopping.wait(HEARTBEAT_SECONDS)
+
+    def _emit_event(self, event_kind: str, payload: dict) -> None:
+        self._safe_send(control.KIND_EVENT, {"kind": event_kind, **payload})
+
+    def _emit_session_id(self, sid: str) -> None:
+        self._sdk_session_id = sid
+        self._safe_send(control.KIND_SESSION_ID, {"sdk_session_id": sid})
+
+    def _safe_send(self, kind: str, data: dict) -> None:
+        if self._client is None:
+            return
         try:
-            frame = json.loads(line.decode("utf-8"))
-        except json.JSONDecodeError:
-            continue
-        if frame.get("kind") == "agentd.shutdown":
-            return 0
+            self._client.send(kind, data)
+        except Exception:  # noqa: BLE001
+            self._stopping.set()
+
+    def _teardown(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+        if self._driver is not None:
+            self._driver.shutdown(SHUTDOWN_GRACE_SECONDS)
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    sock = os.environ.get("AGENTCTL_CONTROL_SOCK", CONTROL_SOCK_DEFAULT)
+    meta = os.environ.get("AGENTCTL_SESSION_META", SESSION_META_DEFAULT)
+    return Shim(control_sock=sock, session_meta=meta).run()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
