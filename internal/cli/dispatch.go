@@ -57,6 +57,8 @@ func commands() []Command {
 		{Name: "interrupt", Summary: "Cancel a session's in-flight turn.", Run: runInterrupt},
 		{Name: "logs", Summary: "Tail daemon or session logs.", Run: runLogs},
 		{Name: "ui", Summary: "Open the local Web UI in a browser.", Run: runUI},
+		{Name: "mcp", Summary: "Manage the MCP registry (list/add/update/remove/set-default).", Run: runMCP},
+		{Name: "skill", Summary: "Manage skills (list/new/add/edit/remove/validate/show/export/import).", Run: runSkill},
 		{Name: "version", Summary: "Print version info.", Run: runVersion},
 		{Name: "help", Summary: "Show this help.", Run: runHelp},
 	}

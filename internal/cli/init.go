@@ -19,10 +19,11 @@ import (
 	"github.com/agentctl/agentctl/internal/agentd"
 	"github.com/agentctl/agentctl/internal/cliclient"
 	"github.com/agentctl/agentctl/internal/config"
+	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/paths"
-	"github.com/agentctl/agentctl/internal/registry"
 	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/service"
+	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/update"
 	"github.com/agentctl/agentctl/internal/version"
@@ -182,7 +183,9 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 	}
 
 	if !f.noImportSkills {
-		fmt.Fprintln(env.Stdout, "skills import: TODO(M3) — Claude Code skills import will land in M3.")
+		if err := importClaudeSkillsAtInit(env, layout, f); err != nil {
+			fmt.Fprintf(env.Stderr, "skills import: %v\n", err)
+		}
 	}
 
 	printInitSummary(env, layout, cfg, foreground)
@@ -363,11 +366,11 @@ func initDB(layout paths.Layout) error {
 }
 
 func applyRegistrySeed(layout paths.Layout) error {
-	data, _, err := registry.Resolve(layout.UserSeedFile, layout.SiteSeedFile)
+	data, _, err := mcp.ResolveSeed(layout.UserSeedFile, layout.SiteSeedFile)
 	if err != nil {
 		return err
 	}
-	rows, err := registry.Parse(data)
+	rows, err := mcp.ParseSeed(data)
 	if err != nil {
 		return err
 	}
@@ -376,7 +379,7 @@ func applyRegistrySeed(layout paths.Layout) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	if _, err := st.ApplyMCPSeed(rows); err != nil {
+	if _, err := mcp.ApplySeed(st, rows, time.Now().UTC()); err != nil {
 		return err
 	}
 	return nil
@@ -404,6 +407,64 @@ func writeInstallMetadata(layout paths.Layout) error {
 	}
 	data, _ := json.MarshalIndent(meta, "", "  ")
 	return os.WriteFile(layout.InstallMeta, data, 0o644)
+}
+
+func recordClaudeImportedSkills(layout paths.Layout, names []string, offeredAt time.Time) error {
+	var meta installMetadata
+	data, err := os.ReadFile(layout.InstallMeta)
+	if err == nil {
+		_ = json.Unmarshal(data, &meta)
+	}
+	at := offeredAt.UTC().Format(time.RFC3339)
+	meta.ClaudeImportOfferedAt = &at
+	for _, n := range names {
+		seen := false
+		for _, existing := range meta.ClaudeImportedSkills {
+			if existing == n {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			meta.ClaudeImportedSkills = append(meta.ClaudeImportedSkills, n)
+		}
+	}
+	out, _ := json.MarshalIndent(meta, "", "  ")
+	return os.WriteFile(layout.InstallMeta, out, 0o644)
+}
+
+func importClaudeSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error {
+	src := f.claudePath
+	if src == "" {
+		src = filepath.Join(layout.Home, ".claude", "skills")
+	}
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	mgr := skills.NewManager(skills.Options{
+		BuiltinDir: layout.BuiltinSkills,
+		CustomDir:  layout.CustomSkills,
+	})
+	imported, skipped, err := mgr.ImportDirectory(src, skills.ImportOptions{Force: f.importSkills})
+	if err != nil {
+		return err
+	}
+	if len(imported) == 0 && len(skipped) == 0 {
+		fmt.Fprintln(env.Stdout, "claude skills: nothing to import.")
+	}
+	for _, im := range imported {
+		fmt.Fprintf(env.Stdout, "claude skills: imported %s\n", im)
+	}
+	for _, sk := range skipped {
+		fmt.Fprintf(env.Stderr, "claude skills: skipped %s (%s)\n", sk.Name, sk.Reason)
+	}
+	if len(imported) > 0 {
+		_ = recordClaudeImportedSkills(layout, imported, time.Now())
+	}
+	return nil
 }
 
 func waitForHealth(ctx context.Context, layout paths.Layout, webAddr string, total time.Duration) error {
