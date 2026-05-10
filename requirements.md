@@ -318,7 +318,8 @@ Constraints every requirement and the technical design must respect:
 |---|---|---|
 | `name` | text, primary key | Short slug (e.g., `github`, `jira`). |
 | `url` | text | MCP server URL. |
-| `kind` | text | `internal` (no auth) or `github` (uses PAT). v1 supports these two; extending the kind is a v2+ concern. |
+| `kind` | text | Freeform identifier for the auth/wire style. v1 recognizes `none` (no auth) and `github_pat` (uses the developer's PAT). New kinds can be added without a schema migration; agentd warns on a kind it does not understand and disables that MCP for new sessions until upgraded. |
+| `auth_config_json` | text, optional | Kind-specific structured config (e.g., header overrides, OAuth client id for future kinds). v1's two kinds need none. |
 | `default_enabled` | bool | Whether this MCP is checked by default in the New Session form. |
 | `description` | text, optional | Free text shown in UI. |
 | `created_at` | timestamp | |
@@ -328,7 +329,7 @@ Constraints every requirement and the technical design must respect:
 **Web UI surface — Settings → MCPs.**
 
 - Table of registered MCPs with name, URL, kind, default-enabled toggle.
-- "Add MCP" form: name, URL, kind (default `internal`), description.
+- "Add MCP" form: name, URL, kind (free-text combo box; v1 known values `none` (default) and `github_pat`), optional `auth_config` JSON, description.
 - Edit and remove buttons per row.
 - Changes apply only to *future* sessions; running sessions are unaffected and the UI says so.
 
@@ -337,7 +338,7 @@ Constraints every requirement and the technical design must respect:
 | Command | Behavior |
 |---|---|
 | `agentctl mcp list` | Tabular list of all registry entries. |
-| `agentctl mcp add <name> --url <url> [--kind internal\|github] [--default-enabled]` | Insert a new entry. |
+| `agentctl mcp add <name> --url <url> [--kind <kind>] [--auth-config <json>] [--default-enabled]` | Insert a new entry. `--kind` accepts any string; v1 recognizes `none` (default) and `github_pat`. |
 | `agentctl mcp remove <name>` | Delete an entry (with confirmation). |
 | `agentctl mcp set-default <name> on\|off` | Toggle default-enabled. |
 
@@ -755,14 +756,14 @@ Format example:
 [[mcp]]
 name = "github"
 url = "https://api.githubcopilot.com/mcp/"
-kind = "github"
+kind = "github_pat"
 default_enabled = true
 description = "GitHub MCP server (uses developer PAT)."
 
 [[mcp]]
 name = "internal-jira"
 url = "https://mcp.internal.example.com/jira"
-kind = "internal"
+kind = "none"
 default_enabled = false
 description = "Team Jira MCP."
 ```

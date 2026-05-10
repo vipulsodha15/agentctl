@@ -61,16 +61,21 @@ CREATE INDEX idx_sessions_status_activity ON sessions(status, last_activity_at);
 CREATE INDEX idx_sessions_status_in_flight ON sessions(status, in_flight, queue_depth);
 
 -- MCP registry: install-wide, edited via R5 surfaces.
+-- `kind` is freeform; v1 recognizes `none` (no auth) and `github_pat`
+-- (uses the developer's GitHub PAT). Future kinds (e.g., `oauth_device`,
+-- `bearer`) add without a schema migration. Unknown kinds are accepted
+-- and surfaced in the registry; they only become functional once the
+-- agentd build understands how to wire their `auth_config_json`.
 CREATE TABLE mcp_registry (
-    name             TEXT PRIMARY KEY,
-    url              TEXT NOT NULL,
-    kind             TEXT NOT NULL                           -- internal|github
-                       CHECK (kind IN ('internal','github')),
-    default_enabled  INTEGER NOT NULL DEFAULT 0
-                       CHECK (default_enabled IN (0,1)),
-    description      TEXT,
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    name              TEXT PRIMARY KEY,
+    url               TEXT NOT NULL,
+    kind              TEXT NOT NULL,                          -- v1: none|github_pat. Freeform; agentd warns on unknown.
+    auth_config_json  TEXT,                                   -- kind-specific JSON; NULL for kinds that need none
+    default_enabled   INTEGER NOT NULL DEFAULT 0
+                        CHECK (default_enabled IN (0,1)),
+    description       TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
 );
 
 -- Usage / cost: one row per turn.end, persists past session termination.

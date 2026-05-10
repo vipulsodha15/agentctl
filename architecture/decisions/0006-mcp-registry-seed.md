@@ -38,9 +38,10 @@ Format: TOML (consistent with `config.toml`):
 [[mcp]]
 name = "github"
 url = "https://api.githubcopilot.com/mcp/"
-kind = "github"
+kind = "github_pat"     # freeform; v1 knows "none" and "github_pat"
 default_enabled = true
 description = "GitHub MCP server."
+# auth_config = { ... }  # optional, kind-specific JSON; v1 kinds need none
 ```
 
 No network fetch happens during `init`. Reasons:

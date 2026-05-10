@@ -266,8 +266,10 @@ or the git-push output). `data.repo` (optional) scopes to one repo. See
 #### Registry CRUD
 
 ```json
-// AddMCP
-{ "name": "team-x", "url": "https://…", "kind": "internal", "default_enabled": true, "description": "…" }
+// AddMCP — `kind` is freeform; v1 known values: "none", "github_pat".
+//          `auth_config` is kind-specific JSON (omit/null for v1 kinds).
+{ "name": "team-x", "url": "https://…", "kind": "none", "auth_config": null,
+  "default_enabled": true, "description": "…" }
 // UpdateMCP — same shape, all fields optional except name
 // RemoveMCP — { "name": "team-x", "force": false }
 // ListMCPs — {}
@@ -441,7 +443,7 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 
 | Kind | When | `data` |
 |---|---|---|
-| `agentd.greet` | First reply to `runtime.hello`. | `{ session_id, env: {…}, model, mcps: [{ name, url, kind, headers? }], repos: [...], limits, log_level }` |
+| `agentd.greet` | First reply to `runtime.hello`. | `{ session_id, env: {…}, model, mcps: [{ name, url, kind, auth_config?, headers? }], repos: [...], limits, log_level }` |
 | `agentd.message` | Deliver a queued user message. | `{ message_id, content, idempotency_key }` |
 | `agentd.interrupt` | Cancel current turn. | `{ reason: "user" \| "hard_cutoff" \| "shutdown" }` |
 | `agentd.snapshot_request` | Ask the runtime to dump current history. | `{ request_id }` |
