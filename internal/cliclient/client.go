@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/agentctl/agentctl/internal/proto"
@@ -24,9 +27,35 @@ func Dial(socketPath string, timeout time.Duration) (*Client, error) {
 	}
 	conn, err := net.DialTimeout("unix", socketPath, timeout)
 	if err != nil {
+		if hint := unreachableHint(socketPath, err); hint != "" {
+			return nil, fmt.Errorf("agentd unreachable: %s", hint)
+		}
 		return nil, fmt.Errorf("dial agentd socket %s: %w", socketPath, err)
 	}
 	return &Client{conn: conn}, nil
+}
+
+// unreachableHint distinguishes "agentd is not running" from generic dial
+// failures so the CLI can point users at the recovery path instead of
+// printing the raw connect error. Returns "" if the failure isn't one we
+// recognize as "service down."
+func unreachableHint(socketPath string, err error) string {
+	missing := errors.Is(err, os.ErrNotExist)
+	refused := errors.Is(err, syscall.ECONNREFUSED)
+	if !missing && !refused {
+		return ""
+	}
+	cause := "the socket does not exist"
+	if refused {
+		cause = "nothing is listening on the socket"
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return fmt.Sprintf("%s (%s); start it with `agentctl init` or `launchctl kickstart -k gui/$(id -u)/com.agentctl.agentd`", cause, socketPath)
+	case "linux":
+		return fmt.Sprintf("%s (%s); start it with `agentctl init` or `systemctl --user start agentd`", cause, socketPath)
+	}
+	return fmt.Sprintf("%s (%s); start it with `agentctl init`", cause, socketPath)
 }
 
 func (c *Client) Close() error {

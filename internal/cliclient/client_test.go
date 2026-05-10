@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,5 +46,25 @@ func TestSocketHealthRoundTrip(t *testing.T) {
 	}
 	if hr.Docker.Version != "27.0.0-test" {
 		t.Errorf("docker version = %q, want 27.0.0-test", hr.Docker.Version)
+	}
+}
+
+// TestDialMissingSocketProducesActionableHint guards the message `agentctl
+// start` (and every other socket-using command) prints when agentd isn't
+// running. We want a "start it with `agentctl init`" hint, not the raw
+// "dial unix … no such file or directory" that scared users into thinking
+// the install was broken.
+func TestDialMissingSocketProducesActionableHint(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "agentd.sock")
+	_, err := cliclient.Dial(missing, 250*time.Millisecond)
+	if err == nil {
+		t.Fatalf("expected dial to fail")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "agentd unreachable") {
+		t.Errorf("expected 'agentd unreachable' prefix, got: %s", msg)
+	}
+	if !strings.Contains(msg, "agentctl init") {
+		t.Errorf("expected hint mentioning `agentctl init`, got: %s", msg)
 	}
 }
