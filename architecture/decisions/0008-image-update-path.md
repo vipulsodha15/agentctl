@@ -1,8 +1,16 @@
 # ADR 0008 — Image and skill update path (§15.8)
 
-- **Status:** Accepted.
+- **Status:** Partially superseded by ADR 0014 (2026-05-10).
 - **Date:** 2026-05-09.
 - **Deciders:** Architect.
+
+> **Note:** ADR 0014 changed the image distribution model from
+> registry-pull to local-build, and decoupled skills from the image
+> via a bind-mount. The "explicit, never automatic" principle for
+> image updates documented below is **retained**. The mechanism
+> ("docker pull a tag" → "docker build the local context") and the
+> skills update path ("rebuild the image" → "agentctl skill ... + next
+> session start") changed. Read this ADR in conjunction with 0014.
 
 ## Context
 

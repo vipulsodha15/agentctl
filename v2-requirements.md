@@ -94,6 +94,59 @@ for historical reference.
 
 ---
 
+## V2.2. Live skill reload mid-session
+
+**Goal.** When the developer adds, edits, or removes a skill via the
+`agentctl skill ...` CLI, attached running sessions pick up the change
+without a session restart.
+
+**v1 posture.** Skills are bind-mounted as a per-session snapshot
+composed at start (R3, R9, ADR 0014). Adding/editing a skill takes
+effect on the **next session start**. To pick up the change in a running
+session, the developer runs `agentctl restart <session>` (preserves the
+volume).
+
+**v2 design sketch.**
+
+- `agentd` watches `~/.local/share/agentctl/{builtin,custom}-skills/` via
+  fsnotify.
+- On change: re-compose the per-session snapshot for each running
+  session (cp -r over the existing snapshot, atomic via swap-and-rename),
+  send a control-channel `agentd.skills_reloaded` to the shim, and emit
+  `skills.changed` to attached clients so `/help` and autocomplete
+  refresh.
+- The shim signals the runtime to rescan `/skills/` (SIGHUP-equivalent
+  if the runtime supports it; otherwise the runtime is told via the
+  control channel).
+- Per-install knob `session.skills_live_reload = true|false` (default
+  `true`) for developers who want strict per-session immutability.
+
+**Why deferred.** v1 sessions have a clean reproducibility story
+(`skills_snapshot_hash` is fixed at start). Live reload weakens that
+slightly and adds runtime-coordination plumbing; bundling it with v1
+risks the bigger pieces. Restart-to-pick-up-changes is acceptable for
+v1.
+
+## V2.3. Team-shared custom skills
+
+**Goal.** A team distributes its custom skills without requiring each
+developer to manually `agentctl skill add`.
+
+**v2 design sketch.**
+
+- `agentctl skill sync <git-url>` clones a skills repo (with the same
+  `<name>/manifest.json + impl files` layout) into a tracked subdir of
+  `~/.local/share/agentctl/custom-skills/team/`.
+- Periodic refresh on a configurable interval; manual refresh via
+  `agentctl skill sync --refresh`.
+- Signature verification: skills repo signs a manifest.lock at the
+  root; agentctl verifies against a configured public key before
+  activating updates. Optional but recommended.
+
+**Why deferred.** v1 has `agentctl skill export` + `add` for
+hand-distribution; that covers small-team use. The git-sync
++ signature workflow is a substantial separate design.
+
 ## V2.x. Other deferred items
 
 Placeholders aligned with `requirements.md` §16. These will be expanded
@@ -103,7 +156,6 @@ as v2 scoping begins.
 - Remote `agentd` (CLI on machine A, daemon on machine B).
 - Cloud-hosted sessions.
 - Live MCP toggling during a running session.
-- User-defined skills added per session.
 - Session forking, branching, or migration.
 - Cost limits / budgets / alerts.
 - Backup/restore of DB and volumes to external storage.
@@ -113,5 +165,7 @@ as v2 scoping begins.
 - Pre-warmed container pools.
 - Container pause/unpause as a third lifecycle state.
 - `agentctl self-update` subcommand (in-binary self-update without curl-pipe; v1 ships re-run-`install.sh` as the upgrade path).
+- Pre-built/published base image (skip the local build for fast onboarding in air-gapped or strict-security environments).
+- Reproducible-build hardening (pinned apt/npm digests, vendored dependencies, restricted upstream package sources).
 - OS keychain integration for secrets at rest.
 - `agentctl audit <session>` and `agentctl export-state` for backup.

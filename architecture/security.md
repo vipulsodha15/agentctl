@@ -13,12 +13,13 @@ network posture are handled end-to-end.
   do, agentctl can do; we make no attempt to defend against malware
   running as the same user. (See §3.)
 - The Docker daemon. agentctl trusts the Docker socket.
-- The `agentctl` and `agentd` binaries (signed by the project's release
-  process; signature verified by `install.sh` against an embedded public
-  key before the binary is written to disk — see install-and-update.md
-  §1.2).
-- The base image, by digest, after cosign verification
-  (container-and-image.md §1.5).
+- The `agentctl` and `agentd` binaries, the bundled Docker build context
+  (`Dockerfile`, shim source, entrypoint, config templates), and the
+  bundled built-in skills — all shipped together in a release tarball
+  signed by the project's release process and verified by `install.sh`
+  against an embedded public key before extraction (install-and-update.md
+  §1.2). The locally-built image inherits trust from these inputs;
+  see container-and-image.md §1.5 and ADR 0014.
 
 ### 1.2 Half-trusted
 
@@ -66,9 +67,15 @@ radius; we don't.
 - **Same-user malware.** Reads `secrets.json`, `web_token`, drives the
   Web UI. We raise the bar (file perms, token, Origin) but document the
   limitation.
-- **A hostile registry pushing a malicious image.** cosign verification
-  on the configured identity is the mitigation. A break here is a
-  registry-compromise event the team responds to out-of-band.
+- **A tampered release tarball.** Mitigated by `install.sh`'s signature
+  verification against an embedded public key (install-and-update.md
+  §1.2). A break here is a project release-pipeline compromise; the
+  team responds out-of-band.
+- **Compromised upstream package sources** used during the local image
+  build (Debian apt repos, npm registry, Docker Hub for `debian:bookworm-slim`
+  and `golang:1.23-bookworm`). Standard supply-chain risk; not eliminated
+  in v1. Reproducible-build hardening (pinned package digests,
+  vendored dependencies, restricted pull sources) is a v2 concern.
 - **A compromised PAT.** The developer rotates via `agentctl init
   --reset-token github`.
 - **Side-channel timing attacks across containers** (Spectre etc.).

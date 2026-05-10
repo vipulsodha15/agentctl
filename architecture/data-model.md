@@ -9,7 +9,10 @@
 | Web token | `~/.config/agentctl/web_token` | `agentctl init` | Bearer token for the browser. Mode `0600`. |
 | Config | `~/.config/agentctl/config.toml` | `agentctl config` | All tunables (idle timeout, caps, model default, prices, web addr, image pin). Mode `0600`. |
 | Registry seed | embedded in binary; optional `/etc/agentctl/registry.seed.toml`, `~/.config/agentctl/registry.seed.toml` | shipped | Initial MCP rows. |
-| Per-session dir | `~/.local/share/agentctl/sessions/<session_id>/` | `agentd` (created at start) | Volume, control sock, log, events buffer. |
+| Image build context | `~/.local/share/agentctl/image/` | `install.sh` | Dockerfile + shim source + entrypoint + config templates. Replaced atomically on every `install.sh` run. |
+| Built-in skills | `~/.local/share/agentctl/builtin-skills/` | `install.sh` | Project-curated baseline skills, replaced atomically on `install.sh` run. Read-only to `agentd`. |
+| Custom skills | `~/.local/share/agentctl/custom-skills/` | `agentd` | Developer's own skills, mutated via `agentctl skill ...`. Mode `0700` parent, `0600` files. |
+| Per-session dir | `~/.local/share/agentctl/sessions/<session_id>/` | `agentd` (created at start) | Volume, control sock, log, events buffer, **per-session composed skills snapshot**. |
 
 `agentd.db` is opened with `journal_mode=WAL`, `synchronous=NORMAL`,
 `foreign_keys=ON`, `busy_timeout=5000`. The WAL files live next to the DB
@@ -39,11 +42,13 @@ CREATE TABLE sessions (
     created_at          TEXT NOT NULL,                       -- RFC3339Nano
     last_activity_at    TEXT NOT NULL,
     terminated_at       TEXT,                                -- set when status=terminated
-    container_id        TEXT,                                -- Docker container id, NULL when stopped/terminated
-    image_digest        TEXT NOT NULL,                       -- pinned digest at create
-    network_id          TEXT,                                -- Docker network id, NULL after teardown
-    volume_path         TEXT,                                -- abs path; NULL after teardown
-    control_sock_path   TEXT,                                -- abs path; NULL after teardown
+    container_id          TEXT,                              -- Docker container id, NULL when stopped/terminated
+    image_id              TEXT NOT NULL,                     -- locally-built image ID (sha256:...) at create
+    network_id            TEXT,                              -- Docker network id, NULL after teardown
+    volume_path           TEXT,                              -- abs path; NULL after teardown
+    control_sock_path     TEXT,                              -- abs path; NULL after teardown
+    skills_snapshot_path  TEXT,                              -- abs path to per-session skills snapshot (composed at start, mounted ro at /skills/); NULL after teardown
+    skills_snapshot_hash  TEXT NOT NULL,                     -- sha256 of the snapshot tree at session create; reproducibility pin
     model               TEXT NOT NULL,                       -- e.g. "claude-sonnet-4-6"
     mem_limit_bytes     INTEGER NOT NULL,
     cpu_limit_cores     REAL NOT NULL,
@@ -195,12 +200,22 @@ sessions/<session_id>/
 │   └── …                      # scratch files the agent creates
 ├── control/                   # bind-mounted at /run/agentctl/control/
 │   └── agentd.sock            # 0660; only this socket; read-write
+├── skills/                    # bind-mounted at /skills/ read-only
+│   ├── <name>/                # composed at session start from
+│   │   └── manifest.json      #   builtin-skills/ + custom-skills/
+│   └── …                      #   (custom wins on collision)
 ├── secrets.env                # 0600; injected via Docker --env-file at run; cleared after start
 ├── session.json               # 0600; metadata read by the runtime shim
 ├── agentd.log                 # 0640; per-session NDJSON; rotated by agentd
 ├── agentd.log.1.gz, .2.gz, …  # rotated history (up to 7)
 └── events.ndjson              # 0640; rolling 50 MB cap; backstop for reconnects (see §2.1)
 ```
+
+The `skills/` snapshot is recreated fresh at every session start (it's
+a copy, not a symlink, so live changes to `~/.local/share/agentctl/{builtin,custom}-skills/`
+do not retroactively change a running session's view). Its sha256
+hash is stored on the session row as `skills_snapshot_hash` for
+reproducibility audit.
 
 Key invariants:
 
@@ -260,9 +275,13 @@ cpu_limit = 2.0
 queue_policy = "queue"     # queue | reject
 
 [image]
-ref = "agentctl/session-base:v1"
-pinned_digest = "sha256:…"
-previous_digest = ""
+# Local-build only in v1. There is no remote registry ref. The image is
+# built from `~/.local/share/agentctl/image/Dockerfile` by `agentctl init`
+# and `agentctl update`. See ADR 0014.
+local_tag = "agentctl/session-base:local"
+build_context_path = "~/.local/share/agentctl/image"
+pinned_id = "sha256:…"          # set by init/update
+previous_id = ""                 # for `agentctl update --rollback`
 
 [model]
 default = "claude-sonnet-4-6"

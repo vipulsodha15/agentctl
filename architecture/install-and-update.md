@@ -122,11 +122,21 @@ unattended provisioning via apt/dnf.
 After `install.sh` runs successfully, the developer's machine has:
 
 - `${INSTALL_DIR}/agentctl` — the binary.
+- `~/.local/share/agentctl/image/` — the Docker build context
+  (`Dockerfile`, shim source, entrypoint, config templates) used by
+  `agentctl init` and `agentctl update` to build the session base
+  image locally. See container-and-image.md §1.2 and ADR 0014.
+- `~/.local/share/agentctl/builtin-skills/` — the project's curated
+  baseline skills, replaced atomically on every `install.sh` run.
+  Read-only to `agentd`; the developer's `agentctl skill` CLI cannot
+  edit these.
 - `~/.local/share/agentctl/install_metadata.json` — install
-  bookkeeping.
+  bookkeeping (version, install method, install timestamp).
 
-That's it. No system-service unit, no config, no secrets, no DB —
-those land in `agentctl init` (§2).
+That's it. No system-service unit, no config, no secrets, no DB, no
+built image — those land in `agentctl init` (§2). In particular, the
+`docker build` of the session base image runs during `init`, not in
+the installer.
 
 ## 2. `agentctl init` — full flow
 
@@ -139,10 +149,9 @@ re-runnable; see §3.4 for repair semantics.
 flowchart TD
   A[Start init] --> B[Check Docker]
   B -- "missing/unreachable" --> Bx[exit 2 + URL]
-  B --> C[Pull base image by ref]
-  C -- "pull fails" --> Cx[exit 2 + remediation]
-  C --> D[Verify cosign signature]
-  D -- "fails" --> Dx[exit 2 + signature error]
+  B --> C[Build base image locally<br/>docker build at ~/.local/share/agentctl/image/]
+  C -- "build fails" --> Cx[exit 2 + tail of build log]
+  C --> D[Pin resulting image ID in config.toml]
   D --> E{secrets.json exists?}
   E -- "no" --> F[Prompt ANTHROPIC_API_KEY]
   E -- "yes" --> G[Skip prompt]
@@ -168,11 +177,17 @@ flowchart TD
 1. **Check Docker.** Runs `docker info`. On non-zero or no socket: exit
    with platform-specific URL (`https://docs.docker.com/desktop/install/mac-install/`,
    `…/linux-install/`). No further action.
-2. **Pull image.** Reads `config.toml` `[image].ref` (defaulted to
-   `agentctl/session-base:v1` if file absent). `docker pull <ref>`.
-3. **Verify signature.** `cosign verify` against the configured identity.
-   Skippable via `--skip-image-verify` for offline / dev installs but
-   loud-warns.
+2. **Build base image.** Runs `docker build -t agentctl/session-base:local
+   ~/.local/share/agentctl/image/`. Streams Docker's build output to
+   the terminal (with a phase header so the developer sees progress on
+   each layer). On a fresh machine this is ~3–10 minutes (debian +
+   apt + node + python + npm + go shim build); on a re-run with cache
+   it is seconds. On failure: exit 2 with the captured tail of the
+   build log and a remediation pointer (`agentctl init --repair`).
+3. **Pin image ID.** `docker inspect agentctl/session-base:local
+   --format '{{.Id}}'` → write to `config.toml` `[image].pinned_id`.
+   The previous value (if any) is moved to `[image].previous_id` for
+   `agentctl update --rollback`.
 4. **Token prompts.** Only if `secrets.json` doesn't already contain the
    relevant key. `--reset-token anthropic|github` forces re-prompt for
    the specified token.
@@ -203,7 +218,9 @@ flowchart TD
 
       Service:       active (systemd --user) — auto-starts on login
       Web UI:        http://127.0.0.1:7777/ (run `agentctl ui` to open)
-      Image pinned:  agentctl/session-base:v1@sha256:abcd…
+      Image pinned:  agentctl/session-base:local id=sha256:abcd…
+      Built-in skills: 3 (refactor, tests, docs)
+      Custom skills:   0
       MCPs:          github (default), internal-jira
 
     Next: agentctl start --repo <git-url>
@@ -215,9 +232,11 @@ Re-running `agentctl init` (no flags) should be a fast no-op when the
 install is healthy:
 
 - Docker check: re-run; cheap.
-- Image pull: skip if `pinned_digest` matches the configured ref's
-  current digest.
-- Signature verify: skip if cached verification is fresh (24h).
+- Image build: re-run `docker build`; Docker layer cache makes it a
+  no-op when no inputs changed (typically <2 s). If the build context
+  was updated by a fresh `install.sh` run, only the late layers
+  rebuild. The pinned ID is updated only if the resulting image ID
+  changed.
 - Tokens: not re-prompted unless missing or `--reset-token` given.
 - Secrets, web_token, config: not overwritten if present and well-formed.
 - DB: open + check migration version; no-op if up to date.
@@ -239,24 +258,27 @@ and aimed at fixing common drifts:
 - Re-apply registry seed (`INSERT OR IGNORE` only — never delete user
   edits).
 - Run pending migrations.
-- Re-pull the pinned image (so a wiped Docker cache is restored).
+- Re-build the base image (`docker build` against the current build
+  context) to restore a wiped Docker cache or pick up a refreshed
+  Dockerfile from a recent `install.sh` run.
 - Run `agentctl doctor` at the end.
 
 It does **not** re-prompt for tokens. Use `--reset-token` for that.
 
 ## 4. `agentctl update`
 
-The image-and-skill update flow. CLI only — Web UI does not initiate
-updates in v1.
+The image rebuild flow. CLI only — Web UI does not initiate updates in
+v1. See ADR 0014 for why this is a local rebuild instead of a registry
+pull.
 
 ### 4.1 Default flow
 
 ```text
 $ agentctl update
-Pulling agentctl/session-base:v1 …
-  pulled sha256:cafe…  (was sha256:abcd…)
-Verifying signature … ok
-Pinning new digest in ~/.config/agentctl/config.toml.
+Building agentctl/session-base:local …
+  [+] Building 18.4s (9/9) FINISHED
+  built sha256:cafe…  (was sha256:abcd…)
+Pinning new image ID in ~/.config/agentctl/config.toml.
 
 3 sessions exist:
   sess_01JFZ…  "auth-refactor"   running  on sha256:abcd…  (will pick up new image after next restart)
@@ -269,77 +291,106 @@ until they idle-stop and resume.
 
 Effects:
 
-- `config.toml` `[image].pinned_digest` ← new digest.
-- `[image].previous_digest` ← what `pinned_digest` was before.
-- The `sessions.image_digest` column on each session is **not** changed;
-  it tracks the digest the running container was created from.
+- `config.toml` `[image].pinned_id` ← new image ID.
+- `[image].previous_id` ← what `pinned_id` was before.
+- The `sessions.image_id` column on each session is **not** changed;
+  it tracks the image ID the running container was created from.
 
 ### 4.2 Variants
 
-- `agentctl update --report` — same per-session table, no pull.
-- `agentctl update --rollback` — swap `pinned_digest` and
-  `previous_digest`. Same staleness report.
+- `agentctl update --report` — same per-session table, no rebuild.
+- `agentctl update --rollback` — swap `pinned_id` and `previous_id`,
+  re-tag `agentctl/session-base:local` to the previous ID. Same
+  staleness report. No rebuild — Docker still has the previous layers.
+- `agentctl update --no-cache` — `docker build --no-cache`. Use after
+  npm/apt repository drift if you want to force a fresh resolve of
+  upstream dependencies.
 - `agentctl update --restart-stopped` — same as default plus run
   `RestartSession` on every `stopped` row. Useful before a long
   weekend so all sessions resume on the new image.
-- `agentctl update --gc` — *post-v1.* Image GC of unreferenced digests.
+- `agentctl update --gc` — *post-v1.* Docker image GC of unreferenced
+  IDs.
 
 ### 4.3 What agentd does
 
 `agentctl update` is a CLI-orchestrated flow that issues these calls to
 agentd:
 
-1. `Update{ref, dry_run}` → returns the resolved digest and the per-session
-   staleness report. agentd does the `docker pull` (so it runs as the
-   service user with Docker privileges). The CLI displays the result.
-2. The CLI then asks for confirmation if `--restart-stopped` was given
-   and issues `RestartSession{session_id}` per row.
-3. agentd updates `config.toml` `[image].pinned_digest` only on
-   confirmation.
+1. `Update{dry_run, no_cache}` → agentd runs `docker build` against the
+   build context at `~/.local/share/agentctl/image/`, computes the new
+   image ID, and returns the per-session staleness report. (agentd
+   runs the build because it is the service user with Docker
+   privileges.) Build progress streams back as `update.build_progress`
+   stream chunks.
+2. agentd updates `config.toml` `[image].pinned_id` on success.
+3. The CLI asks for confirmation if `--restart-stopped` was given and
+   issues `RestartSession{session_id}` per row.
 
 `agentctl restart <session>` is a separate command:
 
 1. Confirms with the user (especially if `running`).
 2. `Interrupt` (if needed).
-3. agentd: `docker stop+rm`, recreate from new pinned digest,
-   re-attach.
+3. agentd: `docker stop+rm`, recreate from new pinned ID, re-mount the
+   freshly-composed skills snapshot (in case built-in or custom skills
+   changed since the last session start), re-attach.
 4. Returns when `runtime.ready` is observed.
 
-### 4.4 Skills
+### 4.4 Skills are decoupled from the image
 
-Skills ride along inside the image. After `RestartSession`, `agentd`
-re-fetches the skills manifest from the new container and emits
-`skills.changed` so attached clients refresh their `/help` and
-autocomplete.
+Because skills are bind-mounted (not baked), `agentctl update` does
+**not** ship skill changes. The two paths are independent:
+
+- A skill change (built-in via `install.sh`, or custom via `agentctl
+  skill ...`) takes effect on the **next session start** — no rebuild.
+  Running sessions pick it up on `agentctl restart` (or the next
+  idle-stop + resume) when agentd re-composes the skills snapshot.
+- An image change (apt/npm/Dockerfile drift) takes effect on the next
+  session start that uses the new pinned ID.
+
+After `RestartSession`, `agentd` re-fetches the skills manifest from
+the new container and emits `skills.changed` so attached clients
+refresh their `/help` and autocomplete.
 
 ### 4.5 The agentctl CLI / agentd binary upgrade
 
-`agentctl update` covers only the **base image**, not the binary. To
-upgrade the binary, the developer re-runs `install.sh` (§1.4):
+`agentctl update` covers only the **base image rebuild**, not the
+binary. To upgrade the binary, the developer re-runs `install.sh`
+(§1.4):
 
 ```bash
 curl -fsSL https://install.agentctl.dev/install.sh | bash
 ```
 
 The script detects an existing install, downloads the newer release,
-verifies the signature, and atomically replaces the binary. After the
-binary is replaced:
+verifies the signature, and atomically replaces the binary. It also
+refreshes the bundled payload:
 
-- The new binary is on PATH the next time the developer invokes
-  `agentctl`.
-- The running `agentd` is **not** restarted by `install.sh`. The
-  developer runs `agentctl init --repair` (idempotent) which re-stamps
-  the system-service unit (in case it changed) and restarts the
-  daemon.
-- If the new binary ships a DB schema migration, `agentd` applies it
-  on next start (data-model.md §3).
-- If the binary is **older** than the on-disk DB schema (downgrade),
-  `agentd` refuses to start with `error{code: "schema_too_new"}`; the
-  developer is told the minimum version to install.
+- `~/.local/share/agentctl/image/` — Docker build context.
+- `~/.local/share/agentctl/builtin-skills/` — project-curated baseline
+  skills.
+
+After install.sh exits:
+
+1. The new binary is on PATH the next time the developer invokes
+   `agentctl`.
+2. The running `agentd` is **not** restarted by install.sh. Run
+   `agentctl init --repair` (idempotent) to re-stamp the system-service
+   unit and restart the daemon. Repair will also `docker build` the
+   image with whatever the refreshed Dockerfile contains.
+3. If the build context changed in ways not picked up by `--repair`'s
+   build, run `agentctl update` to force a fresh build.
+4. If the new binary ships a DB schema migration, `agentd` applies it
+   on next start (data-model.md §3).
+5. If the binary is **older** than the on-disk DB schema (downgrade),
+   `agentd` refuses to start with `error{code: "schema_too_new"}`; the
+   developer is told the minimum version to install.
+
+Built-in skills changes from install.sh take effect on the **next
+session start** automatically — no rebuild, no extra command.
 
 A native `agentctl self-update` subcommand that wraps "download new
-binary + verify + replace + restart" without curl-piping is a v2
-candidate (`v2-requirements.md`).
+binary + verify + replace + restart + rebuild" without curl-piping is
+a v2 candidate (`v2-requirements.md`).
 
 ## 5. `agentctl doctor`
 
@@ -358,8 +409,11 @@ for scripting).
 | `agentd.health` | `GET /healthz` returns ok=true. | "agentd unreachable; check journal." |
 | `docker.reachable` | `docker info` ok. | Platform-specific URL. |
 | `docker.api` | `agentd` can list containers under its label. | "agentd lacks Docker access; check group membership." |
-| `image.present` | Pinned digest exists locally. | "image missing; run `init --repair`." |
-| `image.signed` | cosign verify ok against pinned digest. | "signature mismatch; possible registry compromise." |
+| `image.present` | Pinned image ID exists locally. | "image missing; run `init --repair` to rebuild." |
+| `image.built` | Image was built from the current build context (i.e., the build context's content hash matches what produced the pinned ID). | "image is stale relative to build context; run `agentctl update`." |
+| `image.build_context` | Build context dir at `~/.local/share/agentctl/image/` exists and contains Dockerfile + shim source. | "build context missing; re-run `install.sh`." |
+| `skills.builtin` | Built-in skills dir present, each manifest parses, no name collisions within layer. | Per-skill errors. |
+| `skills.custom` | Custom skills dir present, each manifest parses, lists skills that override built-ins. | Per-skill errors + override notice. |
 | `mcp.registry` | mcp_registry rows are well-formed. | Per-row errors. |
 | `secrets.fresh` | Anthropic key + GitHub PAT still validate. | Suggests `--reset-token`. |
 | `network.peer_isolation` | Spin up two ephemeral diagnostic containers on two session networks; verify each is unable to reach the other. (Egress filtering is not enforced in v1; see `v2-requirements.md` §V2.1.) | Per-test pass/fail. |
@@ -399,8 +453,8 @@ Cross-references R1 error cases with implementation behavior.
 | Service install fails | Foreground fallback + warn | 0 (warn) | init step 9 |
 | `~/.config/agentctl` wrong perms | Fix to 0700/0600 + warn | 0 (warn) | init step 6 |
 | `~/.config/agentctl/web_token` corrupted (zero bytes) | Regenerate, log warning | 0 | init step 6 |
-| Image pull fails (network) | Print remediation, exit 2 | 2 | init step 2 |
-| Image signature mismatch | Print signature info, exit 2 | 2 | init step 3 |
+| Image build fails (network, disk, build error) | Print captured tail of build log + remediation, exit 2 | 2 | init step 2 |
+| Build context missing or corrupt | Print "re-run install.sh", exit 2 | 2 | init step 2 |
 | `agentd` healthy but failing checks (`Health.ok=false`) | Print structured error pointing to `agentctl doctor` | 4 | start step (R1) |
 | Peer-isolation self-test fails | Surface offending pair; refuse `doctor` healthy | 5 | doctor `network.peer_isolation` |
 | DB schema newer than binary | Refuse to start; print upgrade instructions | n/a | agentd boot |

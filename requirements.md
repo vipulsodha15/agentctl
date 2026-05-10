@@ -16,7 +16,7 @@ This document is the v1 functional and behavioral specification. It is the input
 - **Session** — a logical conversation with the agent, identified by a stable `session_id`. Has exactly one container at any moment (running or stopped) and exactly one host-mounted volume.
 - **Session container** — the Docker container running the agent runtime for a session, provisioned on demand from a pre-built base image.
 - **Session volume** — a host-mounted Docker volume (or bind-mount under `~/.local/share/agentctl/sessions/<session_id>/`) holding the session's persistent state: conversation history, working directory, repo clones, scratch files.
-- **Base image** — the pre-built Docker image containing the agent runtime, baked-in skills, and standard dev tooling. Versioned and pinned by `agentd` config.
+- **Base image** — the locally-built Docker image (built by `agentctl init` from a Dockerfile shipped with the install; see ADR 0014) containing the agent runtime, the runtime shim, and standard dev tooling. Pinned by image ID in `agentd` config. Does **not** contain skills; skills are bind-mounted at session start.
 - **MCP registry** — a table in `agentd`'s DB listing the MCP servers known to this install (name, URL, default-enabled flag).
 - **Client** — `agentctl` or a Web UI browser tab. Both are stateless consumers of `agentd`.
 
@@ -83,7 +83,7 @@ Constraints every requirement and the technical design must respect:
 **`agentctl init` behavior.**
 
 1. Verifies Docker is installed and the daemon is reachable; aborts with a clear remediation message if not.
-2. Pulls the base session image from the configured registry.
+2. Builds the base session image locally via `docker build` against the build context laid down by `install.sh` at `~/.local/share/agentctl/image/`. Streams build progress to the terminal. Pins the resulting image ID in `config.toml` `[image].pinned_id`. (There is no remote OCI registry in v1; see ADR 0014.)
 3. Prompts for `ANTHROPIC_API_KEY` and validates by issuing a minimal authenticated request; rejects on 401/403.
 4. Prompts for the developer's GitHub PAT and validates against `GET /user`; rejects on 401.
 5. Writes secrets to `~/.config/agentctl/secrets.json` (mode `0600`); parent dir is `0700`.
@@ -108,7 +108,7 @@ Constraints every requirement and the technical design must respect:
 
 **Acceptance criteria.**
 
-- A clean Linux/macOS machine with Docker installed completes `init` end-to-end in under 2 minutes (excluding image pull time).
+- A clean Linux/macOS machine with Docker installed completes `init` end-to-end in under 2 minutes (excluding the local `docker build` step, which dominates first-run time and is reported separately with phase progress; expect 3–10 minutes for the build on a fresh install).
 - `systemctl --user is-active agentd` (Linux) or `launchctl print gui/$(id -u)/com.agentctl.agentd` (macOS) reports active after `init`.
 - After a reboot, `agentd` is running without manual intervention; existing sessions are listable.
 - `agentctl start` returns an attached session within the cold-start budget (§4).
@@ -118,6 +118,7 @@ Constraints every requirement and the technical design must respect:
 **Error and edge cases.**
 
 - Docker missing or daemon unreachable → exit code 2, message naming the platform install URL.
+- `docker build` fails (network, disk full, base-image pull failure, build-step error) → exit code 2 with the captured tail of the build log and a remediation pointer (`agentctl init --repair` will retry the build).
 - Anthropic key validation fails → re-prompt up to 3 times, then abort with exit code 3.
 - GitHub PAT validation fails → same.
 - System service install fails (e.g., no `systemd --user` available) → fall back to a foreground `agentd` and warn loudly; sessions still work but won't survive logout.
@@ -194,9 +195,15 @@ Constraints every requirement and the technical design must respect:
 **Baked into the base image.**
 
 - The agent runtime (Claude Code) at a pinned version.
-- Team-curated skills, slash commands, and agent definitions, installed at well-known paths the runtime auto-loads.
 - Standard dev tooling: `git`, common language runtimes (Node, Python, etc., per team needs), build tools.
 - Non-secret base configuration for the runtime.
+- The runtime shim binary (compiled inside the image's multi-stage build).
+
+**Bind-mounted into the container at session start (by `agentd`).**
+
+- A per-session **skills snapshot** mounted read-only at `/skills/`. The snapshot is composed by `agentd` from the install's built-in skills (`~/.local/share/agentctl/builtin-skills/`) plus the developer's custom skills (`~/.local/share/agentctl/custom-skills/`); custom wins on name collision. Skills are not baked into the image; this lets developers add or edit skills without rebuilding it. See R9 for the manifest model and ADR 0014 for the bind-mount design.
+- The session volume at `/work` (working dir, repo clones, scratch).
+- The control socket at `/run/agentctl/control/`.
 
 **Injected per session at start (by `agentd`).**
 
@@ -211,7 +218,7 @@ Constraints every requirement and the technical design must respect:
 
 - `/work` — bind/volume mount for the session volume (working dir, repo clones, scratch).
 - `/home/agent/.config/...` — runtime config, populated from injected files.
-- `/skills/...` — baked-in skills, read-only.
+- `/skills/...` — bind-mounted per-session snapshot of built-in + custom skills, read-only.
 
 **Repo onboarding (open product question, see §15.2).** v1 supports at minimum: `agentctl start --repo <git_url>` clones the listed repos into `/work` before attaching the user. Cloning *during* a session via the agent's tools also works since the PAT is wired up.
 
@@ -220,7 +227,7 @@ Constraints every requirement and the technical design must respect:
 - A fresh session can run an Anthropic-API-backed turn without any extra config.
 - A fresh session can `git clone` a private repo the user's PAT has access to without further prompts.
 - Calling any MCP from the session's enabled set works without auth setup by the user.
-- Skills baked into the image are listed by `/help` (R9) on first turn.
+- Skills bind-mounted at session start (built-in + custom) are listed by `/help` (R9) on first turn.
 
 **Error and edge cases.**
 
@@ -531,7 +538,7 @@ In both cases, the cloned repo's original branch and SHA are recorded by `agentd
 
 ### R9. Explicit skill invocation by name
 
-**Goal.** Skills baked into the image are not only available for the agent to discover from context — the developer can run any of them by name to remove model judgment from the loop.
+**Goal.** Skills available to the session (built-in + custom, mounted at `/skills/` per R3) are not only available for the agent to discover from context — the developer can run any of them by name to remove model judgment from the loop.
 
 **User-facing behavior.**
 
@@ -542,27 +549,47 @@ In both cases, the cloned repo's original branch and SHA are recorded by `agentd
 
 **Source of skills.**
 
-- Skills come from the baked-in image (R3). The runtime exposes a manifest listing skill names and descriptions; both clients fetch this manifest from `agentd` (which reads it from the running container) on session attach and on a "skills changed" event.
-- v1 does not support adding skills at runtime; updates require a new base image.
+- Skills are NOT baked into the base image. They are bind-mounted into the container at `/skills/` at session start as a per-session snapshot composed by `agentd` (R3). The runtime auto-discovers them and exposes a manifest of names + descriptions; both clients fetch this manifest from `agentd` on session attach.
+- Two source layers compose the snapshot:
+  - **Built-in skills** at `~/.local/share/agentctl/builtin-skills/` — laid down by `install.sh`, replaced atomically on a fresh `install.sh` run, immutable to `agentd`.
+  - **Custom skills** at `~/.local/share/agentctl/custom-skills/` — managed by `agentd` via the `agentctl skill` CLI, mutable at any time.
+- Custom wins on name collision; the collision is logged via a `skill.collision` stream event so the developer can see they are overriding a built-in.
+- A skill change (`agentctl skill add|edit|remove`) takes effect in the **next** session start. Live reload mid-session is deferred to v2; the current session must be `agentctl restart`ed to pick up changes (preserves the volume).
+
+**CLI surface for custom skills.**
+
+| Command | Behavior |
+|---|---|
+| `agentctl skill list [--builtin] [--custom] [--json]` | Lists all skills with `SOURCE` (`builtin`/`custom`) and an `OVERRIDES` flag if a custom skill shadows a built-in. |
+| `agentctl skill new <name>` | Scaffolds `~/.local/share/agentctl/custom-skills/<name>/` with a starter `manifest.json` and an empty implementation file. |
+| `agentctl skill add <path-or-tarball>` | Copies/extracts a skill bundle into the custom-skills dir. Validates the manifest. Refuses on name collision unless `--force`. |
+| `agentctl skill edit <name>` | Opens `$EDITOR` on the skill's files in place. Validates on save. Refuses for built-in skills. |
+| `agentctl skill remove <name>` | Removes from custom-skills. Refuses for built-in (with "this is a built-in; uninstall by re-running install.sh from a different release"). |
+| `agentctl skill validate <name-or-path>` | Dry-run validation of a manifest; checks size limits and name collisions. |
+| `agentctl skill show <name>` | Prints the manifest, file list, and source layer. |
+| `agentctl skill export <name> [path]` | Tarballs a custom skill for sharing. |
 
 **Acceptance criteria.**
 
-- Every skill present in the image is invokable by `/<name>` and listed by `/help`.
+- Every skill in the per-session snapshot (built-in + custom, custom wins on collision) is invokable by `/<name>` and listed by `/help`.
 - Autocomplete in CLI and Web UI both filter the same manifest and produce the same suggestions.
 - An invalid skill name produces a clear error in the conversation, not silent fallthrough.
 - A skill that takes arguments accepts them after the name (`/<name> <args...>`); both clients pass arguments through unchanged.
+- `agentctl skill add` reflects in the next session within seconds; the current session continues with its frozen snapshot until restarted.
+- A custom skill that overrides a built-in produces a `skill.collision` event surfaced to attached clients so the developer can see what's overridden.
 
 **Error and edge cases.**
 
 - A skill fails internally → its error surfaces as a tool error in the conversation; the session is unaffected.
 - Skill manifest changes mid-session (e.g., container restart with an updated image — though out of scope per R3) → clients refetch on the next attach.
 
-**Dependencies.** R3 (skills baked into the image), R4 (CLI/UI parity).
+**Dependencies.** R3 (skills bind-mounted into the container), R4 (CLI/UI parity).
 
 **Out of scope (this requirement).**
 
-- User-defined skills added per session.
-- Skill marketplaces or registries.
+- Live reload of the bind-mounted skills snapshot mid-session (deferred to v2; current session must be restarted to pick up changes).
+- Team-shared custom skills via a synced repo (`agentctl skill sync <git-url>`) — deferred to v2.
+- Skill marketplaces or external registries.
 - Skill-level permission prompting separate from tool permission (§15.1).
 
 ---
@@ -652,7 +679,7 @@ The questions below are **owned by the technical-architecture pass**. Each was d
 | 15.5 | MCP reachability checks at start | RESOLVED | Soft-warn: probe enabled MCPs in parallel with a 1.5s timeout, surface failures, do not block start. |
 | 15.6 | MCP registry seed source | RESOLVED | Embedded default seed in the `agentctl` binary, overridable via `/etc/agentctl/registry.seed.toml` or `~/.config/agentctl/registry.seed.toml`. |
 | 15.7 | Web UI auth on localhost | RESOLVED | Per-install bearer token in `~/.config/agentctl/web_token`; required on every HTTP/WS request; strict `Origin` check; CLI hands the token to the browser via a one-shot URL fragment. |
-| 15.8 | Image and skill update path | RESOLVED | Explicit `agentctl update`; pulls and pins new tag; running sessions keep their pinned image; `agentctl update --report` lists sessions whose next resume will adopt the new image and which require an explicit restart. |
+| 15.8 | Image and skill update path | RESOLVED | Explicit `agentctl update`; rebuilds image locally and repins ID; running sessions keep their pinned image. Skills are bind-mounted (not baked); skill updates take effect on next session start without rebuild. See ADR 0014. |
 | 15.9 | Logging and observability layout | RESOLVED | `agentd` daemon log goes to journald (Linux) / unified log (macOS). Per-session NDJSON log at `~/.local/share/agentctl/sessions/<id>/agentd.log` with size+age rotation. `agentctl logs <session>` tails the per-session file; `agentctl logs --daemon` shells out to the system log. |
 
 ### 15.1. Tool permission model — RESOLVED
@@ -794,22 +821,30 @@ See `architecture/decisions/0007-web-ui-auth.md`.
 
 **Original question.** How are the base image and the skills inside it updated?
 
-**Decision:** explicit, never automatic.
+**Decision:** explicit, never automatic. Image update = local rebuild; skill update = mount-time composition (no rebuild).
+
+**Image (runtime + tooling).**
 
 - `agentctl update` is the developer's one entry point. It:
-  1. Resolves the configured image reference (`config.toml` `[image]`, default `agentctl/session-base:vN`) to a digest by calling Docker's pull.
-  2. Updates `config.toml` `image.pinned_digest` to the new digest.
-  3. Records the previous digest as `image.previous_digest` so a rollback is one command (`agentctl update --rollback`).
-  4. Prints a per-session report: each session's currently-running container's image digest vs the new pinned digest, and whether the next resume will adopt the new image automatically (sessions in `stopped` status will) or whether the user needs to restart it (sessions in `running` status keep their image until the next stop/resume cycle).
-- `agentctl update --report` prints the same per-session report without pulling.
-- A separate flag, `agentctl update --restart-stopped`, force-restarts already-stopped sessions to validate they still come up. (No effect on running sessions.)
-- `agentctl restart <session>` exists as the manual upgrade trigger for running sessions. It cancels in-flight turn (with confirmation), stops the container, recreates from the new pinned digest, preserves the volume, and reattaches.
-- `agentctl update` for the agentctl CLI and `agentd` daemon binaries is **out of scope** for v1; developers re-run the canonical installer script (`curl -fsSL https://install.agentctl.dev/install.sh | bash`), which detects the existing install, verifies the new release's signature, and atomically replaces the binary in place. `agentctl init --repair` then re-stamps the system service file and restarts the daemon. A native `agentctl self-update` subcommand (no curl pipe) is a v2 candidate.
-- Skills ship inside the base image and follow the same update path. The skills manifest (R9) is re-fetched from the new container on attach.
+  1. Re-runs `docker build` against the build context at `~/.local/share/agentctl/image/` (laid down by `install.sh`). Docker layer cache makes a no-input-change rebuild a no-op.
+  2. Updates `config.toml` `[image].pinned_id` to the new image ID.
+  3. Records the previous ID as `[image].previous_id` so a rollback is one command (`agentctl update --rollback` re-tags the previous ID — no rebuild needed since layers are cached).
+  4. Prints a per-session report: each session's currently-running container's image ID vs the new pinned ID, and whether the next resume will adopt the new image automatically (sessions in `stopped` status will) or whether the user needs to restart it (sessions in `running` status keep their image until the next stop/resume cycle).
+- `agentctl update --report` prints the same per-session report without rebuilding.
+- `agentctl update --no-cache` forces a clean rebuild (skip Docker layer cache).
+- `agentctl update --restart-stopped` force-restarts already-stopped sessions to validate they still come up.
+- `agentctl restart <session>` is the manual upgrade trigger for running sessions: cancels in-flight turn (with confirmation), stops the container, recreates from the new pinned ID, preserves the volume, and reattaches.
+- The agentctl CLI / agentd daemon binary itself updates by re-running the canonical installer (`curl -fsSL https://install.agentctl.dev/install.sh | bash`); install.sh also refreshes the build context at `~/.local/share/agentctl/image/` and the built-in skills at `~/.local/share/agentctl/builtin-skills/`. After a binary upgrade, run `agentctl init --repair` (which re-stamps the system-service unit + restarts agentd) and then `agentctl update` (which rebuilds the image with whatever the new context contains). A native `agentctl self-update` subcommand (no curl pipe) is a v2 candidate.
 
-Rationale: developers own when their working agent flips to a new image. Auto-pulling mid-session would surprise mid-debugging users and complicate cost attribution.
+**Skills (built-in and custom).**
 
-See `architecture/decisions/0008-image-update-path.md`.
+- Built-in skills update with `install.sh` (atomic replacement of `~/.local/share/agentctl/builtin-skills/`). They take effect on the **next session start** — no image rebuild required, since skills are bind-mounted (R3, ADR 0014).
+- Custom skills update via the `agentctl skill {add,edit,remove}` CLI (R9). They take effect on the **next session start**.
+- Running sessions keep their frozen per-session skills snapshot until they stop/restart. Live reload mid-session is v2.
+
+Rationale: developers own when their working agent flips to a new image; auto-rebuilding mid-session would surprise mid-debugging users and confuse cost attribution. Decoupling skills from the image (bind-mount instead of bake) means skill changes never require a rebuild — common operations stay fast.
+
+See `architecture/decisions/0008-image-update-path.md` and `architecture/decisions/0014-local-image-build-and-skill-mounts.md`.
 
 ### 15.9. Logging and observability — RESOLVED
 

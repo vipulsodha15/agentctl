@@ -171,7 +171,9 @@ sequenceDiagram
   alt Docker missing/unreachable
     CLI-->>Dev: exit 2 + remediation
   end
-  CLI->>DOC: docker pull agentctl/session-base:vN
+  CLI->>DOC: docker build agentctl/session-base:local<br/>(from ~/.local/share/agentctl/image/)
+  Note over CLI,DOC: ~3-10 min on first run; seconds on cache hit
+  CLI->>FS: write [image].pinned_id = sha256:abcd…
   CLI-->>Dev: prompt ANTHROPIC_API_KEY
   CLI->>ANT: GET /v1/models (Bearer key)
   alt 401/403
@@ -212,11 +214,13 @@ sequenceDiagram
   CLI->>AD: CreateSession(name, mcps, repos, model)
   AD->>DB: INSERT sessions row (status=starting)
   AD->>AD: probe MCPs (1.5s/probe, 3s ceiling) — soft-warn
-  AD->>FS: mkdir sessions/<id>/{volume,control,log}
+  AD->>FS: mkdir sessions/<id>/{volume,control,log,skills}
+  AD->>FS: compose sessions/<id>/skills/ from builtin-skills + custom-skills
+  AD->>FS: write skills_snapshot_hash to sessions row
   AD->>FS: write sessions/<id>/session.json (model, mcps, repos)
   AD->>FS: write sessions/<id>/secrets.env (0600, on tmpfs if available)
   AD->>DOC: docker network create agentctl-<id> (enable_icc=false)
-  AD->>DOC: docker run (mounts, env, --memory, --cpus, network)
+  AD->>DOC: docker run pinned_id (mounts incl. /skills ro, env, --memory, --cpus, network)
   DOC-->>CT: starts
   CT->>SHM: entrypoint
   SHM->>SHM: read session.json, clone --repo URLs, record SHAs

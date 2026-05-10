@@ -29,7 +29,7 @@ Each line is one NDJSON object:
 ```json
 {"ts":"2026-05-09T12:00:00.123Z","level":"info","component":"sessions",
  "msg":"session.started","session_id":"sess_01JFZ…",
- "image_digest":"sha256:abcd…","mcps":["github","internal-jira"]}
+ "image_id":"sha256:abcd…","mcps":["github","internal-jira"]}
 ```
 
 `journalctl --user -u agentd` reads it raw; `journalctl --user -u
@@ -227,10 +227,10 @@ The crash file is rotated to keep at most 10.
 The default columns (developer-facing observability surface):
 
 ```text
-ID            NAME              STATUS    LAST ACTIVITY  IMAGE        COST
-sess_01JFZ…   auth-refactor     running       2m ago     v1@abcd…    $0.42
-sess_01JG0…   lint-cleanup      stopped      1h ago      v1@abcd…    $0.08
-sess_01JG2…   old-experiment    terminated  yesterday    v1@abcd…    $1.20
+ID            NAME              STATUS    LAST ACTIVITY  IMAGE_ID    COST
+sess_01JFZ…   auth-refactor     running       2m ago     abcd1234    $0.42
+sess_01JG0…   lint-cleanup      stopped      1h ago      abcd1234    $0.08
+sess_01JG2…   old-experiment    terminated  yesterday    abcd1234    $1.20
 ```
 
 `agentctl ls --verbose` adds: `IN_FLIGHT QUEUE_DEPTH MEM_LIMIT
@@ -254,8 +254,11 @@ agentctl 0.1.0 — environment OK
   agentd.health         ok    uptime=4d sessions=4 reconciling=false
   docker.reachable      ok    Docker 27.0.0
   docker.api            ok
-  image.present         ok    sha256:abcd…
-  image.signed          ok    cosign verified
+  image.present         ok    agentctl/session-base:local id=sha256:abcd…
+  image.built           ok    matches build context hash sha256:1234…
+  image.build_context   ok    ~/.local/share/agentctl/image present
+  skills.builtin        ok    3 skills (refactor, tests, docs)
+  skills.custom         ok    1 skill (postmortem); 0 overrides
   mcp.registry          ok    2 entries
   secrets.fresh         ok    Anthropic + GitHub valid
   network.peer_isolation ok   probe A → probe B: connect timeout (expected)

@@ -26,13 +26,15 @@ in §6 maps every requirement to its landing milestone.
   - serves `/healthz` and a stub `Health` over the CLI socket,
   - logs to journald (Linux) and a file (macOS) per observability.md §2.
 - `agentctl` CLI binary that:
-  - implements `init` with Docker check, token validation, perm
-    fix-ups, registry seed apply, system-service install, foreground
-    fallback,
+  - implements `init` with Docker check, **local image build**
+    (`docker build` against `~/.local/share/agentctl/image/`), token
+    validation, perm fix-ups, registry seed apply, system-service
+    install, foreground fallback,
+  - implements `agentctl update` (re-build image, repin id),
   - implements `agentctl config get|set`,
   - implements `agentctl doctor` (subset: `bin.versions`, `fs.perms`,
     `db.integrity`, `service.active`, `agentd.health`,
-    `docker.reachable`).
+    `docker.reachable`, `image.built`, `image.build_context`).
 - systemd `--user` unit and launchd plist.
 
 ### Out of scope (M1)
@@ -136,7 +138,7 @@ Recovery, network policy hardening, R8 diff/export, R10 cost rows.
 - `Interrupt` from any one client cancels the in-flight turn.
 - Adding an MCP via either client is reflected in the other within
   seconds.
-- `/help` lists baked-in skills in both clients.
+- `/help` lists the per-session skills snapshot (built-in + custom) in both clients.
 - `Origin` mismatch is rejected with `403`.
 
 ### Acceptance criteria covered
@@ -165,8 +167,13 @@ Recovery, network policy hardening, R8 diff/export, R10 cost rows.
 - Per-session Docker bridge networks with `enable_icc=false`
   (peer-isolation; no iptables manipulation in v1).
 - Peer-isolation self-test in `agentctl doctor`.
-- Image v1: skills baked in, cosign-signed, `--read-only` rootfs,
-  capability drops, pids-limit.
+- Image v1 (locally built per ADR 0014): no skills layer; `--read-only`
+  rootfs, capability drops, pids-limit. Built from the bundled
+  Dockerfile via `agentctl init` / `agentctl update`. Skills
+  bind-mounted at session start.
+- `agentctl skill {list,new,add,edit,remove,validate,show,export}` CLI
+  surface (R9). Per-session skills-snapshot composition + bind-mount
+  + `skills_snapshot_hash` recording.
 - Backpressure + rate limits on control channel.
 - Image update path: `agentctl update`, `update --report`, `restart
   <session>`, `update --rollback`, `update --restart-stopped`.
@@ -273,7 +280,7 @@ criteria; "full" = all.
 | M1 | Unit tests on schema migrations, config, secrets file perms; smoke test for `init` on Linux/macOS runners. |
 | M2 | Container creation integration tests against real Docker on Linux; mock-Docker on macOS. Actor mailbox unit tests. |
 | M3 | E2E browser tests (Playwright) hitting localhost; multi-client fan-out tests; CSRF tests. |
-| M4 | Reconcile fault-injection harness; peer-isolation self-test in Linux + macOS CI; image build + cosign sign in release CI. |
+| M4 | Reconcile fault-injection harness; peer-isolation self-test in Linux + macOS CI; local image build smoke test on multiple distros (Ubuntu 22.04/24.04, Debian 12, Fedora 40, macOS Docker Desktop) in release CI. |
 | M5 | Cost computation parity tests; diff/export E2E; `agentctl doctor --fix` E2E. |
 
 ## 8. Cuttable scope (if we slip)
