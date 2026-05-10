@@ -643,17 +643,17 @@ The questions below are **owned by the technical-architecture pass**. Each was d
 
 **Status summary.**
 
-| # | Topic | Status | Recommended default |
+| # | Topic | Status | Resolution (one-line) |
 |---|---|---|---|
-| 15.1 | Tool permission model | RESOLVED | — (see entry) |
-| 15.2 | Repo onboarding flow | OPEN — architect | `--repo` + in-session clone only; no host bind-mounts |
-| 15.3 | Default model and per-session selection | OPEN — architect | Configurable; default Sonnet |
-| 15.4 | Concurrency / interrupt model | OPEN — architect | Queue inbound; expose explicit interrupt action |
-| 15.5 | MCP reachability checks at start | OPEN — architect | Soft-warn, do not block |
-| 15.6 | MCP registry seed source | OPEN — architect | Shipped config file, override per install |
-| 15.7 | Web UI auth on localhost | OPEN — architect | Per-install bearer token |
-| 15.8 | Image and skill update path | OPEN — architect | Explicit `agentctl update` |
-| 15.9 | Logging and observability layout | OPEN — architect | journald/unified log + per-session log files |
+| 15.1 | Tool permission model | RESOLVED | Runtime runs with permission prompting disabled; container is the sole safety boundary. |
+| 15.2 | Repo onboarding flow | RESOLVED | `--repo` clone-at-start and in-session clone only. No host bind-mounts in v1. |
+| 15.3 | Default model and per-session selection | RESOLVED | Configurable via `agentctl config`, per-session `--model`. Default `claude-sonnet-4-6`. |
+| 15.4 | Concurrency / interrupt model | RESOLVED | Per-session FIFO queue at `agentd`; explicit `Interrupt` action; arrival-order serialization across clients. |
+| 15.5 | MCP reachability checks at start | RESOLVED | Soft-warn: probe enabled MCPs in parallel with a 1.5s timeout, surface failures, do not block start. |
+| 15.6 | MCP registry seed source | RESOLVED | Embedded default seed in the `agentctl` binary, overridable via `/etc/agentctl/registry.seed.toml` or `~/.config/agentctl/registry.seed.toml`. |
+| 15.7 | Web UI auth on localhost | RESOLVED | Per-install bearer token in `~/.config/agentctl/web_token`; required on every HTTP/WS request; strict `Origin` check; CLI hands the token to the browser via a one-shot URL fragment. |
+| 15.8 | Image and skill update path | RESOLVED | Explicit `agentctl update`; pulls and pins new tag; running sessions keep their pinned image; `agentctl update --report` lists sessions whose next resume will adopt the new image and which require an explicit restart. |
+| 15.9 | Logging and observability layout | RESOLVED | `agentd` daemon log goes to journald (Linux) / unified log (macOS). Per-session NDJSON log at `~/.local/share/agentctl/sessions/<id>/agentd.log` with size+age rotation. `agentctl logs <session>` tails the per-session file; `agentctl logs --daemon` shells out to the system log. |
 
 ### 15.1. Tool permission model — RESOLVED
 
@@ -666,65 +666,175 @@ Implications:
 - Destructive operations *inside* the container (e.g., `rm -rf /work`) are possible and only undone by ending the session and starting a new one. The session volume is the blast-radius cap.
 - Pushes to remote repos via `git` use the developer's PAT; the developer is responsible for the consequences of those pushes (including force-pushes), the same as they would be running git themselves.
 
-### 15.2. Repo onboarding flow — OPEN, architect to resolve
+### 15.2. Repo onboarding flow — RESOLVED
 
-How do repos enter a session?
+**Original question.** How do repos enter a session? Options included `--repo` clone, in-session `git clone`, and host bind-mounts.
 
-- `agentctl start --repo <url>` clones at start (already in R3/R8).
-- Agent clones during the session via tools (also already covered by PAT wiring).
-- Bind-mount an existing host checkout into the container? (Powerful but breaks isolation; not recommended for v1.)
+**Decision:** v1 supports exactly two onboarding paths:
 
-Recommended: only the first two. No host bind-mounts in v1.
+1. `agentctl start --repo <url> [--repo <url> ...]` clones each repo into `/work/<repo_basename>` at session start using the developer's PAT, before the runtime is exposed to clients.
+2. The agent runtime running inside the container can `git clone` at any time during the session because the PAT is wired into both the env and the git credential helper (R3).
 
-### 15.3. Default model and per-session model selection — OPEN, architect to resolve
+**Host bind-mounts are explicitly excluded.** Bind-mounting a working copy from the host into `/work` would let a runaway agent write back to the developer's source tree without the session-volume blast-radius cap and would break the per-session isolation guarantees in R7.
 
-- Is the model fixed by the base image, or selectable per session?
-- What's the default? (Opus, Sonnet, Haiku?)
+**Implications.**
 
-Recommended: configurable via `agentctl config set model.default`, overridable per session with `agentctl start --model <name>`. Default Sonnet for cost.
+- `agentd` records the resolved commit SHA and remote branch for every cloned repo (start-time clones and in-session clones discovered by the file-watcher) so R8 diffs have a stable base.
+- Developers who want to feed a working tree into a session use `git push` to a branch (or a temporary remote) and `--repo` that URL. Convenience for the "I have unpushed local edits" case is deferred to a future requirement.
+- The CLI does not accept `--bind` / `--mount` flags in v1. Adding them later would be additive and would not break existing flows.
 
-### 15.4. Concurrency / interrupt model — OPEN, architect to resolve
+See `architecture/decisions/0002-repo-onboarding.md`.
 
-- If a user sends a new message while the agent is mid-response, what happens?
-  - **A.** Queue and deliver after current turn finishes.
-  - **B.** Interrupt current turn and start the new one.
-  - **C.** Reject with "agent is busy."
-- If two clients send simultaneously, who wins?
+### 15.3. Default model and per-session model selection — RESOLVED
 
-Recommended: **A** for v1 with a visible "interrupt" button that explicitly cancels the current turn. Multiple inbound messages from different clients are serialized in arrival order at `agentd`.
+**Original question.** Is the model fixed by the base image, or selectable per session? Default Opus, Sonnet, or Haiku?
 
-### 15.5. MCP reachability checks — OPEN, architect to resolve
+**Decision:** the model is selectable per session and defaults to **`claude-sonnet-4-6`** (the latest Sonnet at the time of v1 ship), with a default override path:
 
-- At session start, should `agentd` probe each enabled MCP for reachability before starting the runtime?
-- Hard fail if any enabled MCP is unreachable, or soft-warn and start anyway?
+- `agentctl config set model.default <id>` writes to `config.toml` and changes the default for new sessions.
+- `agentctl start --model <id>` overrides for a single session.
+- The model is recorded on the `sessions` row at start time; it does not change for the lifetime of the session.
+- The base image stays model-agnostic. `agentd` injects `AGENTCTL_MODEL` into the container at start; the runtime shim passes it to the agent runtime.
+- The model id is validated at start against the price table (`config.toml` `[pricing]` block, R10). Unknown ids start the session anyway but log a warning and produce `cost_usd = NULL` rows (matches R10's documented behavior).
 
-Recommended: **soft-warn**; surface unreachable MCPs in session log and UI status, but don't block.
+Sonnet is the default because it is the cost-balanced choice for everyday coding work; Opus and Haiku remain one-flag away.
 
-### 15.6. MCP registry seed source — OPEN, architect to resolve
+See `architecture/decisions/0003-default-model.md`.
 
-- Where does the initial registry seed live (config file shipped with `agentctl`, internal URL fetched at `init`, manual entry)?
+### 15.4. Concurrency / interrupt model — RESOLVED
 
-Recommended: shipped config file under `/etc/agentctl/registry.seed.toml` or equivalent, overridable per install.
+**Original question.** What happens to new inbound messages while the agent is mid-turn? How are simultaneous messages from multiple clients reconciled?
 
-### 15.7. Web UI auth on localhost — OPEN, architect to resolve
+**Decision:** option **A** — queue and deliver after the current turn finishes — plus an explicit `Interrupt` action exposed in both clients.
 
-- The Web UI binds to `127.0.0.1` only, but any process on the machine can reach it. Do we add a session-cookie / origin-check / loopback-token to prevent local malware from driving sessions?
+Concrete behavior:
 
-Recommended: a per-`agentd`-install bearer token written to `~/.config/agentctl/web_token`; the CLI opens the UI with a URL containing the token. Not bulletproof but raises the bar.
+1. `agentd` maintains a single per-session FIFO message queue. While a turn is in flight (any state from "user message accepted" through "final assistant message + tool results emitted"), additional inbound messages from any client are **queued** and a `queue.depth` event is broadcast so all clients can render a "queued" indicator.
+2. When the current turn completes, `agentd` dequeues and forwards the next message. Clients see a `turn.start` event for it.
+3. **Interrupt** is a separate, idempotent action (`POST /v1/sessions/<id>/interrupt`, `agentctl interrupt <session>`). It cancels the in-flight turn at the runtime by emitting `interrupt` on the control channel. The runtime stops the model stream, finalizes any tool result it was already waiting on, and emits `turn.cancelled`. The queue is preserved unless the user also passes `--clear-queue`.
+4. Two clients sending at the "same instant" are serialized by arrival order at the `agentd` socket (single accept loop per session). The queue records the originating client id so clients can render "from another tab."
+5. Idle-stop sweepers (R2) defer the stop while a turn is in flight or the queue is non-empty; the timer resets when both conditions are clear and `last_activity_at` ages past the threshold.
 
-### 15.8. Image and skill update path — OPEN, architect to resolve
+UX surface: a **Stop** button in the Web UI and `agentctl interrupt <session>` in the CLI both invoke `Interrupt`. A toggle (`agentctl config set session.queue_policy reject`) exists as an escape hatch but is not the default.
 
-- How is the base image updated? Auto-pulled by `agentd` on a schedule? `agentctl update` command? Pinned by the developer?
-- Do running sessions need to be restarted to pick up new images / skills? (Yes, mechanically.)
+See `architecture/decisions/0004-concurrency-and-interrupt.md`.
 
-Recommended: explicit `agentctl update` pulls the latest image and prints which sessions would need restart for it to take effect.
+### 15.5. MCP reachability checks — RESOLVED
 
-### 15.9. Logging and observability — OPEN, architect to resolve
+**Original question.** Should `agentd` probe enabled MCPs at session start? Hard fail or soft-warn on unreachable ones?
 
-- Where do `agentd` logs live? Where do per-session logs live? What goes in each?
-- `agentctl logs <session>` is in the CLI surface (R4) but not specified.
+**Decision:** **soft-warn**.
 
-Recommended: `agentd` logs to its system service journal (journald / unified log). Per-session logs in `~/.local/share/agentctl/sessions/<id>/agentd.log`. `agentctl logs <session>` tails the latter.
+- At session start, before launching the runtime, `agentd` issues a parallel TCP-connect probe (or HTTP `GET /` if the URL has a path, with a `User-Agent: agentctl-probe`) to each enabled MCP with a **1.5s** per-probe timeout and a **3s** overall ceiling.
+- Reachable MCPs are recorded as `ok` on the `sessions.mcp_status` JSON column.
+- Unreachable MCPs are recorded as `unreachable` with the failure reason and surfaced as a `mcp.unreachable` stream event the moment any client attaches.
+- The runtime is started with all enabled MCPs configured regardless. This lets a transiently down MCP recover later in the session without restarting it.
+- The Web UI's MCP panel shows status next to each MCP; CLI shows it in `agentctl ls --verbose` and at the top of `agentctl attach`.
+
+Rationale: hard-failing leaves developers locked out of work because of a transient internal-MCP outage; soft-warn satisfies the goal of "make problems visible" without blocking. The decision is reversible per-install if needed (`agentctl config set session.mcp_probe block_on_failure`).
+
+See `architecture/decisions/0005-mcp-reachability-checks.md`.
+
+### 15.6. MCP registry seed source — RESOLVED
+
+**Original question.** Where does the initial registry seed live?
+
+**Decision:** a **layered shipped config**:
+
+1. The `agentctl` binary embeds a default `registry.seed.toml` (the team's known internal MCPs and the GitHub MCP).
+2. Site override: `/etc/agentctl/registry.seed.toml`, if present, replaces the embedded defaults entirely.
+3. User override: `~/.config/agentctl/registry.seed.toml`, if present, replaces the site default.
+4. Resolution: first match wins (user → site → embedded).
+5. `agentctl init` and `agentctl init --repair` apply the resolved seed via `INSERT OR IGNORE` on `mcp_registry.name`. Re-running never overwrites existing entries (R5 acceptance criterion: idempotent `init`).
+
+No network fetch happens during `init` for registry seed — both for offline installability and to keep `init` reproducible.
+
+Format example:
+
+```toml
+[[mcp]]
+name = "github"
+url = "https://api.githubcopilot.com/mcp/"
+kind = "github"
+default_enabled = true
+description = "GitHub MCP server (uses developer PAT)."
+
+[[mcp]]
+name = "internal-jira"
+url = "https://mcp.internal.example.com/jira"
+kind = "internal"
+default_enabled = false
+description = "Team Jira MCP."
+```
+
+See `architecture/decisions/0006-mcp-registry-seed.md`.
+
+### 15.7. Web UI auth on localhost — RESOLVED
+
+**Original question.** Should we add a token / origin check to prevent any process on the host from driving the Web UI?
+
+**Decision:** per-install bearer token + strict `Origin` enforcement + token-handoff via fragment.
+
+Specifics:
+
+1. At `init`, `agentd` generates a 256-bit URL-safe random token and writes it to `~/.config/agentctl/web_token` (`0600`). It is rotatable via `agentctl init --reset-web-token`.
+2. Every HTTP request and WebSocket connection to `agentd`'s Web UI port carries the token in an `Authorization: Bearer <token>` header **or** an `agentctl_token` cookie set by the loader page. Requests missing or carrying a wrong token return `401`.
+3. The token is **never** in URL query strings or paths (logs, browser history, referer leakage). The single exception is the loader URL fragment (`#t=<token>`); fragments are not sent to the server and the loader page strips them from the URL after extracting the token to a `SameSite=Strict; Secure=false; HttpOnly=false` cookie.
+4. CSRF protection: every state-changing request must include `Origin: http://127.0.0.1:7777` (or the configured bind). Any other Origin or a missing Origin on POST/PATCH/DELETE returns `403`. Static assets are served by `agentd` itself; no third-party origins are involved.
+5. The CLI opens the UI via `agentctl ui` (or as part of `agentctl init`'s final summary): it constructs `http://127.0.0.1:7777/#t=<token>` and shells out to the platform browser launcher.
+6. WebSocket connections use the cookie set by the loader; the server checks both Origin and cookie before accepting.
+
+This is "raise the bar", not "secure against root." A process running as the same user can read `~/.config/agentctl/web_token` directly — that is the same trust boundary as `secrets.json` and is documented in `architecture/security.md`.
+
+See `architecture/decisions/0007-web-ui-auth.md`.
+
+### 15.8. Image and skill update path — RESOLVED
+
+**Original question.** How are the base image and the skills inside it updated?
+
+**Decision:** explicit, never automatic.
+
+- `agentctl update` is the developer's one entry point. It:
+  1. Resolves the configured image reference (`config.toml` `[image]`, default `agentctl/session-base:vN`) to a digest by calling Docker's pull.
+  2. Updates `config.toml` `image.pinned_digest` to the new digest.
+  3. Records the previous digest as `image.previous_digest` so a rollback is one command (`agentctl update --rollback`).
+  4. Prints a per-session report: each session's currently-running container's image digest vs the new pinned digest, and whether the next resume will adopt the new image automatically (sessions in `stopped` status will) or whether the user needs to restart it (sessions in `running` status keep their image until the next stop/resume cycle).
+- `agentctl update --report` prints the same per-session report without pulling.
+- A separate flag, `agentctl update --restart-stopped`, force-restarts already-stopped sessions to validate they still come up. (No effect on running sessions.)
+- `agentctl restart <session>` exists as the manual upgrade trigger for running sessions. It cancels in-flight turn (with confirmation), stops the container, recreates from the new pinned digest, preserves the volume, and reattaches.
+- `agentctl update` for the agentctl CLI and `agentd` daemon binaries is **out of scope** for v1; developers use whatever package manager installed them (`brew`, `apt`, GitHub release tarball). `agentctl init --repair` reinstalls the system service file when a binary upgrade has happened.
+- Skills ship inside the base image and follow the same update path. The skills manifest (R9) is re-fetched from the new container on attach.
+
+Rationale: developers own when their working agent flips to a new image. Auto-pulling mid-session would surprise mid-debugging users and complicate cost attribution.
+
+See `architecture/decisions/0008-image-update-path.md`.
+
+### 15.9. Logging and observability — RESOLVED
+
+**Original question.** Where do daemon and per-session logs live, what's their format, and what does `agentctl logs <session>` tail?
+
+**Decision:** two-tier logging.
+
+**Daemon log (cross-session).**
+
+- Linux: `agentd` writes structured logs to stderr; the systemd `--user` unit captures them in journald. `journalctl --user -u agentd` is the command.
+- macOS: `agentd` writes to stderr; launchd redirects to `~/Library/Logs/agentctl/agentd.log` (configured in the plist) **and** to the unified log via `os_log` for daemon-level events. The on-disk file is rotated by agentd's own rotator (size/age) since `launchd` has no built-in rotation.
+- Format: NDJSON, one event per line. Required fields: `ts` (RFC3339Nano), `level` (`debug|info|warn|error`), `component`, `msg`. Optional: `session_id`, `error`, `dur_ms`, plus arbitrary structured fields.
+
+**Per-session log.**
+
+- File: `~/.local/share/agentctl/sessions/<session_id>/agentd.log`, NDJSON, `0640`, owned by the agentd user.
+- Contains all `agentd` events scoped to that session (lifecycle, control-channel I/O metadata — never message contents — sweeper actions, MCP probe results, errors).
+- Rotation: in-process, rotate when file exceeds 50 MB or daily, whichever first; keep 7 generations (`agentd.log.1`..`agentd.log.7`); compressed with gzip after rotation.
+- Volume: bounded by the session's lifetime + retention; sessions terminated (`agentctl stop`) delete the directory including logs.
+
+**CLI commands.**
+
+- `agentctl logs <session>` tails the per-session NDJSON, pretty-printing by default; `--raw` emits NDJSON; `-f` follows.
+- `agentctl logs --daemon` tails the daemon log: `journalctl --user -u agentd -f` on Linux, the `~/Library/Logs/agentctl/agentd.log` file on macOS.
+- `agentctl logs <session> --container` is a thin pass-through to `docker logs <container_id>` if a developer needs the runtime's stdout/stderr directly.
+
+See `architecture/decisions/0009-logging-layout.md` and `architecture/observability.md`.
 
 ---
 
