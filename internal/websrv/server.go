@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/agentctl/agentctl/internal/api"
+	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/sm"
+	"github.com/agentctl/agentctl/web"
 )
 
 const (
@@ -25,28 +28,51 @@ type Server struct {
 	listener net.Listener
 	logger   *slog.Logger
 	apiSrv   *api.Server
+	manager  Manager
+	mcps     MCPRegistry
+	skills   SkillsService
+	logs     LogStreamer
+	doctor   Doctor
+	updater  Updater
 	token    string
 	addr     string
+	originOK string
 }
 
 type Options struct {
-	Addr   string
-	Token  string
-	API    *api.Server
-	Logger *slog.Logger
+	Addr    string
+	Token   string
+	API     *api.Server
+	Manager Manager
+	MCPs    MCPRegistry
+	Skills  SkillsService
+	Logs    LogStreamer
+	Doctor  Doctor
+	Updater Updater
+	Logger  *slog.Logger
 }
 
 func New(opts Options) *Server {
-	mux := http.NewServeMux()
 	s := &Server{
-		logger: opts.Logger,
-		apiSrv: opts.API,
-		token:  opts.Token,
-		addr:   opts.Addr,
+		logger:   opts.Logger,
+		apiSrv:   opts.API,
+		manager:  opts.Manager,
+		mcps:     opts.MCPs,
+		skills:   opts.Skills,
+		logs:     opts.Logs,
+		doctor:   opts.Doctor,
+		updater:  opts.Updater,
+		token:    opts.Token,
+		addr:     opts.Addr,
+		originOK: "http://" + opts.Addr,
 	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/", s.handleRoot)
-	mux.Handle("/v1/", s.authMiddleware(s.originMiddleware(http.HandlerFunc(s.handleV1))))
+	mux.Handle("/v1/", s.authMiddleware(http.HandlerFunc(s.routeV1)))
 
 	s.httpSrv = &http.Server{
 		Handler:           mux,
@@ -65,6 +91,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	s.listener = ln
+	s.originOK = "http://" + ln.Addr().String()
 	go func() {
 		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.logger.Error("web.serve_failed", slog.String("error", err.Error()))
@@ -95,18 +122,241 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(hr)
 }
 
+// routeV1 dispatches every /v1/* request after the auth middleware. Method
+// + path matching is hand-rolled (rather than gorilla/mux) to keep the
+// dependency set minimal — the route count is small and stable.
+func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	method := r.Method
+	switch {
+	case path == "/v1/sessions":
+		switch method {
+		case http.MethodGet:
+			s.handleListSessions(w, r)
+		case http.MethodPost:
+			s.requireOrigin(w, r, s.handleCreateSession)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	case path == "/v1/mcps":
+		switch method {
+		case http.MethodGet:
+			s.handleListMCPs(w, r)
+		case http.MethodPost:
+			s.requireOrigin(w, r, s.handleAddMCP)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	case path == "/v1/skills":
+		switch method {
+		case http.MethodGet:
+			s.handleListInstalledSkills(w, r)
+		case http.MethodPost:
+			s.requireOrigin(w, r, s.handleAddSkill)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	case path == "/v1/skills/import":
+		if method == http.MethodPost {
+			s.requireOrigin(w, r, s.handleImportSkill)
+			return
+		}
+		methodNotAllowed(w)
+		return
+	case path == "/v1/usage":
+		if method == http.MethodGet {
+			s.handleGetUsage(w, r)
+			return
+		}
+		methodNotAllowed(w)
+		return
+	case path == "/v1/doctor":
+		if method == http.MethodPost {
+			s.requireOrigin(w, r, s.handleDoctor)
+			return
+		}
+		methodNotAllowed(w)
+		return
+	case path == "/v1/update":
+		if method == http.MethodPost {
+			s.requireOrigin(w, r, s.handleUpdate)
+			return
+		}
+		methodNotAllowed(w)
+		return
+	}
+
+	if name, ok := matchPrefix(path, "/v1/mcps/"); ok && !strings.Contains(name, "/") {
+		switch method {
+		case http.MethodPatch:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleUpdateMCP(w, r, name)
+			})
+		case http.MethodDelete:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleRemoveMCP(w, r, name)
+			})
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
+
+	if rest, ok := matchPrefix(path, "/v1/skills/"); ok {
+		s.routeSkillsItem(w, r, rest)
+		return
+	}
+
+	if rest, ok := matchPrefix(path, "/v1/sessions/"); ok {
+		s.routeSessionItem(w, r, rest)
+		return
+	}
+
+	writeError(w, http.StatusNotFound, proto.ErrNotFound, "no such endpoint")
+}
+
+func (s *Server) routeSkillsItem(w http.ResponseWriter, r *http.Request, rest string) {
+	method := r.Method
+	if name, suffix, hasSuffix := splitOne(rest); hasSuffix {
+		switch suffix {
+		case "validate":
+			if method == http.MethodPost {
+				s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+					s.handleValidateSkill(w, r, name)
+				})
+				return
+			}
+		case "export":
+			if method == http.MethodGet {
+				s.handleExportSkill(w, r, name)
+				return
+			}
+		}
+		methodNotAllowed(w)
+		return
+	}
+	name := rest
+	switch method {
+	case http.MethodDelete:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleRemoveSkill(w, r, name)
+		})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest string) {
+	method := r.Method
+	id, suffix, hasSuffix := splitOne(rest)
+	if !hasSuffix {
+		switch method {
+		case http.MethodGet:
+			s.handleGetSession(w, r, id)
+		case http.MethodDelete:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleTerminateSession(w, r, id)
+			})
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
+	switch {
+	case suffix == "messages" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleSendMessage(w, r, id)
+		})
+	case suffix == "interrupt" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleInterrupt(w, r, id)
+		})
+	case suffix == "restart" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			unavailable(w, "RestartSession", "M4")
+		})
+	case suffix == "diff" && method == http.MethodGet:
+		unavailable(w, "Diff", "M5")
+	case suffix == "export/patch" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			unavailable(w, "ExportPatch", "M5")
+		})
+	case suffix == "export/push" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			unavailable(w, "ExportPush", "M5")
+		})
+	case suffix == "logs" && method == http.MethodGet:
+		s.handleSessionLogs(w, r, id)
+	case suffix == "skills" && method == http.MethodGet:
+		s.handleSessionSkills(w, r, id)
+	case suffix == "stream" && method == http.MethodGet:
+		s.handleAttachStream(w, r, id)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
-		http.NotFound(w, r)
+		s.handleSPAStatic(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	body, err := web.FS.ReadFile("dist/index.html")
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(fallbackLoaderHTML))
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(loaderHTML))
+	_, _ = w.Write(body)
 }
 
-func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"code":"not_found","message":"endpoint reserved for M3"}`, http.StatusNotFound)
+func (s *Server) handleSPAStatic(w http.ResponseWriter, r *http.Request) {
+	rel := strings.TrimPrefix(r.URL.Path, "/")
+	if rel == "" || strings.Contains(rel, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := web.FS.ReadFile("dist/" + rel)
+	if err != nil {
+		idx, ierr := web.FS.ReadFile("dist/index.html")
+		if ierr != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(idx)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeFor(rel))
+	_, _ = w.Write(body)
+}
+
+func contentTypeFor(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".html"):
+		return "text/html; charset=utf-8"
+	case strings.HasSuffix(name, ".js"):
+		return "application/javascript"
+	case strings.HasSuffix(name, ".css"):
+		return "text/css"
+	case strings.HasSuffix(name, ".json"):
+		return "application/json"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(name, ".png"):
+		return "image/png"
+	case strings.HasSuffix(name, ".woff2"):
+		return "font/woff2"
+	case strings.HasSuffix(name, ".map"):
+		return "application/json"
+	}
+	return "application/octet-stream"
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -114,30 +364,31 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		token := extractBearerToken(r)
 		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="agentctl"`)
-			http.Error(w, `{"code":"unauthenticated","message":"missing or invalid bearer token"}`, http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, proto.ErrUnauthenticated, "missing or invalid bearer token")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (s *Server) originMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
-			next.ServeHTTP(w, r)
-			return
-		}
-		expected := "http://" + s.addr
-		if origin := r.Header.Get("Origin"); origin != expected {
-			http.Error(w, `{"code":"forbidden","message":"origin mismatch"}`, http.StatusForbidden)
-			return
-		}
-		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
-			http.Error(w, `{"code":"forbidden","message":"cross-site request"}`, http.StatusForbidden)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// requireOrigin gates state-changing requests behind a matching Origin
+// header (and Sec-Fetch-Site when present) per ADR 0007.
+func (s *Server) requireOrigin(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	if !s.originAllowed(r) {
+		writeError(w, http.StatusForbidden, proto.ErrForbidden, "origin mismatch")
+		return
+	}
+	next(w, r)
+}
+
+func (s *Server) originAllowed(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != s.originOK {
+		return false
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+		return false
+	}
+	return true
 }
 
 func extractBearerToken(r *http.Request) string {
@@ -164,41 +415,81 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-const loaderHTML = `<!doctype html>
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if status != 0 {
+		w.WriteHeader(status)
+	}
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": proto.ErrorData{Code: code, Message: message},
+	})
+}
+
+func methodNotAllowed(w http.ResponseWriter) {
+	writeError(w, http.StatusMethodNotAllowed, proto.ErrBadRequest, "method not allowed")
+}
+
+func unavailable(w http.ResponseWriter, op, milestone string) {
+	writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable,
+		fmt.Sprintf("%s lands in %s", op, milestone))
+}
+
+func matchPrefix(path, prefix string) (string, bool) {
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+func splitOne(rest string) (head, tail string, hasTail bool) {
+	i := strings.Index(rest, "/")
+	if i < 0 {
+		return rest, "", false
+	}
+	return rest[:i], rest[i+1:], true
+}
+
+func mapManagerErr(err error) (status int, code string) {
+	switch {
+	case errors.Is(err, sm.ErrSessionNotFound):
+		return http.StatusNotFound, proto.ErrNotFound
+	case errors.Is(err, sm.ErrNoInFlight):
+		return http.StatusPreconditionFailed, proto.ErrPreconditionFailed
+	case errors.Is(err, sm.ErrSnapshotFailed):
+		return http.StatusInternalServerError, proto.ErrSnapshotFailed
+	default:
+		return http.StatusInternalServerError, proto.ErrInternal
+	}
+}
+
+const fallbackLoaderHTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>agentctl Web UI</title>
-<style>
-  body { font-family: system-ui, -apple-system, sans-serif; margin: 4rem auto; max-width: 36rem; color: #222; }
-  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; }
-  .placeholder { color: #777; font-style: italic; }
-</style>
 </head>
 <body>
-<h1>agentctl Web UI</h1>
-<p class="placeholder">M3 milestone &mdash; SPA not yet shipped.</p>
-<p>The auth handshake is wired: open this page via <code>agentctl ui</code> so the bearer token in the URL fragment can be persisted as a cookie.</p>
-<pre id="status">initializing&hellip;</pre>
 <script>
 (function () {
-  var status = document.getElementById("status");
   var hash = window.location.hash || "";
   var token = "";
-  if (hash.indexOf("#t=") === 0) {
-    token = decodeURIComponent(hash.substring(3));
-  } else if (hash.indexOf("#token=") === 0) {
-    token = decodeURIComponent(hash.substring(7));
-  }
+  if (hash.indexOf("#t=") === 0) { token = decodeURIComponent(hash.substring(3)); }
+  else if (hash.indexOf("#token=") === 0) { token = decodeURIComponent(hash.substring(7)); }
   if (token) {
     document.cookie = "agentctl_token=" + token + "; Path=/; SameSite=Strict";
     history.replaceState(null, "", window.location.pathname);
-    status.textContent = "auth cookie set; the SPA will load here in M3.";
-  } else {
-    status.textContent = "no token in URL fragment; run \"agentctl ui\" from a terminal.";
   }
 })();
 </script>
+<p>agentctl Web UI &mdash; SPA build pending; open with <code>agentctl ui</code>.</p>
 </body>
 </html>
 `

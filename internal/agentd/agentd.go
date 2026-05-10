@@ -136,10 +136,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	webLog := log.New(log.Options{Component: log.ComponentWeb})
 	webSrv := websrv.New(websrv.Options{
-		Addr:   cfg.Agentd.WebAddr,
-		Token:  tok,
-		API:    apiSrv,
-		Logger: webLog,
+		Addr:    cfg.Agentd.WebAddr,
+		Token:   tok,
+		API:     apiSrv,
+		Manager: manager,
+		Logs:    logStream,
+		Logger:  webLog,
 	})
 	if err := webSrv.Start(); err != nil {
 		return fmt.Errorf("web server: %w", err)
