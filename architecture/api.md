@@ -33,6 +33,8 @@ These names are used by both the CLI socket RPC and the HTTP+WS surface.
 | `ExportPush` | `git push` the session's working tree to a branch. | client → server |
 | `ListMCPs` / `AddMCP` / `UpdateMCP` / `RemoveMCP` / `SetDefaultMCP` | Registry CRUD. | client → server |
 | `ListSkills` | Fetch the skill manifest from the running container. | client → server |
+| `ListInstalledSkills` | Enumerate built-in + custom skills as known to agentd (independent of any session). | client → server |
+| `AddSkill` / `RemoveSkill` / `ImportSkill` / `ExportSkill` / `ValidateSkill` | Manage the custom-skills directory under `~/.local/share/agentctl/custom-skills/`. `ImportSkill` is used by `agentctl init`'s Claude Code import phase and by `agentctl skill import`. | client → server |
 | `GetCost` / `GetUsage` | Cost data. | client → server |
 | `GetLogs` | Stream per-session log file. | client → server (long-lived) |
 | `Doctor` | Run install + connectivity checks. | client → server |
@@ -276,6 +278,21 @@ or the git-push output). `data.repo` (optional) scopes to one repo. See
 // RemoveMCP — { "name": "team-x", "force": false }
 // ListMCPs — {}
 // SetDefaultMCP — { "name": "team-x", "default_enabled": true }
+
+// ImportSkill — copy a skill subdirectory from `source_path` on the host
+//               into ~/.local/share/agentctl/custom-skills/<name>/.
+//               agentd validates the manifest, refuses on collision
+//               with a built-in unless `force` is true, and records the
+//               final path. Used by `agentctl init`'s Claude import
+//               phase and `agentctl skill import`.
+{ "source_path": "/Users/me/.claude/skills/postmortem",
+  "name": "postmortem",                  // optional; defaults to basename(source_path)
+  "force": false,                        // overwrite existing custom skill / shadow built-in
+  "dry_run": false }
+// Response: { "imported": true, "name": "postmortem",
+//             "path": "~/.local/share/agentctl/custom-skills/postmortem",
+//             "shadowed_builtin": false,
+//             "skipped_reason": null }
 ```
 
 ### 2.5 Versioning
@@ -325,6 +342,12 @@ or the git-push output). `data.repo` (optional) scopes to one repo. See
 | `PATCH` | `/v1/mcps/{name}` | `UpdateMCP` |
 | `DELETE` | `/v1/mcps/{name}` | `RemoveMCP` |
 | `GET` | `/v1/sessions/{id}/skills` | `ListSkills` |
+| `GET` | `/v1/skills` | `ListInstalledSkills` |
+| `POST` | `/v1/skills` | `AddSkill` (multipart upload of a tarball or a path on the host) |
+| `POST` | `/v1/skills/import` | `ImportSkill` |
+| `POST` | `/v1/skills/{name}/validate` | `ValidateSkill` |
+| `GET` | `/v1/skills/{name}/export` | `ExportSkill` (octet-stream tarball) |
+| `DELETE` | `/v1/skills/{name}` | `RemoveSkill` |
 | `GET` | `/v1/usage?since=…&session_id=…` | `GetUsage` |
 | `POST` | `/v1/doctor` | `Doctor` |
 | `POST` | `/v1/update` | `Update` |

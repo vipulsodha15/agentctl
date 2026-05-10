@@ -78,6 +78,8 @@ Constraints every requirement and the technical design must respect:
 | `agentctl init` | One-time machine setup. Re-runnable. |
 | `agentctl init --reset-token anthropic\|github` | Rotate a stored token without touching the rest of the install. |
 | `agentctl init --repair` | Reinstall the system service and re-verify state without re-prompting for tokens. |
+| `agentctl init --import-claude-skills [--claude-path <path>]` | Force a re-prompt for the Claude Code skills import (overrides the "asked already" marker). |
+| `agentctl init --no-import-claude-skills` | Skip the Claude Code skills import prompt. |
 | `agentctl start [--name <name>] [--mcps ...] [--no-mcp ...] [--repo <url>...]` | Start a new session and attach the terminal to it. |
 
 **`agentctl init` behavior.**
@@ -90,7 +92,8 @@ Constraints every requirement and the technical design must respect:
 6. Initializes `~/.local/share/agentctl/agentd.db` (sqlite). Seeds the MCP registry with the team's default internal MCPs and the GitHub MCP entry.
 7. Installs `agentd` as a per-user system service (systemd `--user` on Linux; launchd user agent on macOS) and enables auto-start on boot/login.
 8. Waits for `agentd` to report healthy (`GET /healthz` returns 200) within 10s.
-9. Prints a summary: service status, Web UI URL, registered MCPs, next step (`agentctl start`).
+9. **Optional Claude Code skills import (interactive).** If `~/.claude/skills/` exists and contains skill subdirectories not already present in `~/.local/share/agentctl/custom-skills/`, prints what was found and prompts: `Import these as agentctl custom skills? [Y/n]`. On confirmation, copies each subdirectory into the custom-skills dir (skipping name collisions with built-in skills, with a per-skill warning). Records the offer in `install_metadata.json` so subsequent `init` runs do not re-prompt; the developer passes `--import-claude-skills` to force a re-prompt or `--no-import-claude-skills` to skip the offer entirely. Skipped silently if `~/.claude/skills/` is missing or empty.
+10. Prints a summary: service status, Web UI URL, registered MCPs, count of skills imported, next step (`agentctl start`).
 
 **`agentctl start` behavior.**
 
@@ -113,7 +116,8 @@ Constraints every requirement and the technical design must respect:
 - After a reboot, `agentd` is running without manual intervention; existing sessions are listable.
 - `agentctl start` returns an attached session within the cold-start budget (§4).
 - Stored secrets file mode is `0600`; parent directory mode is `0700`.
-- Re-running `init` is idempotent: no duplicate MCP rows, no duplicate service installs, no token re-prompt unless `--reset-token` is passed.
+- Re-running `init` is idempotent: no duplicate MCP rows, no duplicate service installs, no token re-prompt unless `--reset-token` is passed, no Claude-skills re-prompt unless `--import-claude-skills` is passed.
+- If `~/.claude/skills/` exists with N skill subdirectories at first `init`, the developer is prompted exactly once; on confirmation each non-colliding skill appears under `agentctl skill list --custom`; the originals at `~/.claude/skills/` are not modified.
 
 **Error and edge cases.**
 
@@ -124,6 +128,7 @@ Constraints every requirement and the technical design must respect:
 - System service install fails (e.g., no `systemd --user` available) → fall back to a foreground `agentd` and warn loudly; sessions still work but won't survive logout.
 - `~/.config/agentctl/` exists with wrong perms → fix to `0700`/`0600` and warn.
 - `init --repair` re-runs install steps idempotently without re-prompting unless tokens are also missing.
+- Claude skills import: a skill subdir in `~/.claude/skills/` whose `manifest.json` (or `SKILL.md`) fails to parse is skipped with a per-skill warning; the rest of the import proceeds. A name collision with a built-in skill is skipped with a warning suggesting `agentctl skill import --force` to override (which would shadow the built-in per R9's collision rule).
 - `agentctl start` invoked while `agentd` is unhealthy (responding but failing checks) → return a structured error pointing to `agentctl doctor`.
 
 **Dependencies.** Foundation for all other requirements.
@@ -568,6 +573,7 @@ In both cases, the cloned repo's original branch and SHA are recorded by `agentd
 | `agentctl skill validate <name-or-path>` | Dry-run validation of a manifest; checks size limits and name collisions. |
 | `agentctl skill show <name>` | Prints the manifest, file list, and source layer. |
 | `agentctl skill export <name> [path]` | Tarballs a custom skill for sharing. |
+| `agentctl skill import [<source>] [--force] [--dry-run]` | Import skills from a source directory into custom-skills. Default source is `~/.claude/skills/`. Each subdirectory is treated as a skill. Idempotent: skills already present in custom-skills are skipped (use `--force` to overwrite). Name collisions with built-in skills are skipped with a warning unless `--force` is passed (in which case the imported skill shadows the built-in per the precedence rule above). `--dry-run` reports what would be imported without writing. |
 
 **Acceptance criteria.**
 

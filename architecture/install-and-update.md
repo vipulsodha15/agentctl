@@ -131,7 +131,22 @@ After `install.sh` runs successfully, the developer's machine has:
   Read-only to `agentd`; the developer's `agentctl skill` CLI cannot
   edit these.
 - `~/.local/share/agentctl/install_metadata.json` — install
-  bookkeeping (version, install method, install timestamp).
+  bookkeeping. Schema:
+
+  ```json
+  {
+    "version": "0.2.3",
+    "install_method": "install.sh",
+    "installed_at": "2026-05-10T12:00:00Z",
+    "source_url": "https://github.com/.../release.tar.gz",
+    "claude_import_offered_at": null,
+    "claude_imported_skills": []
+  }
+  ```
+
+  The `claude_*` fields are written by `agentctl init`'s skills
+  import phase (§2.2 step 12); `install.sh` itself only writes
+  the first four.
 
 That's it. No system-service unit, no config, no secrets, no DB, no
 built image — those land in `agentctl init` (§2). In particular, the
@@ -168,7 +183,13 @@ flowchart TD
   L --> M[Start service]
   M --> N[Poll /healthz up to 10s]
   N -- "still unhealthy" --> Nx[exit 2 + diagnostics]
-  N --> O[Print summary]
+  N --> P{~/.claude/skills/<br/>exists & non-empty?<br/>not previously offered?}
+  P -- "no" --> O[Print summary]
+  P -- "yes" --> Q[List skills + prompt Y/n]
+  Q -- "n" --> O
+  Q -- "Y" --> R[ImportSkill per subdir<br/>via agentd<br/>skip name collisions]
+  R --> S[Mark offered in install_metadata.json]
+  S --> O
   O --> Z[Exit 0]
 ```
 
@@ -211,17 +232,49 @@ flowchart TD
     here.
 11. **Health check.** Poll `GET http://127.0.0.1:7777/healthz` (no auth
     required) for up to 10s. `ok=true` ⇒ proceed.
-12. **Summary.** Print:
+12. **Optional Claude Code skills import.** Skip silently if any of:
+    - `--no-import-claude-skills` flag was passed.
+    - `install_metadata.json` already records `claude_import_offered_at`
+      (and `--import-claude-skills` was not passed to force a re-prompt).
+    - The source dir (`~/.claude/skills/` by default; overridable with
+      `--claude-path <path>`) does not exist or contains no skill
+      subdirectories that aren't already in
+      `~/.local/share/agentctl/custom-skills/`.
+
+    Otherwise, print the skill list and prompt:
+
+    ```text
+    Found 4 skills in ~/.claude/skills/:
+      postmortem
+      summarize-pr
+      generate-fixtures
+      explain-stack-trace
+
+    Import these as agentctl custom skills? [Y/n]
+    ```
+
+    On `Y` (default): for each candidate subdir, the CLI calls agentd's
+    `ImportSkill { source_path, name }` op, which validates the
+    manifest and copies the directory into custom-skills. Per-skill
+    failures (manifest parse error, name collision with a built-in)
+    are logged inline and skipped; the rest proceed. On completion,
+    write `claude_import_offered_at` (RFC3339) and `claude_imported_skills`
+    (string array) to `install_metadata.json`.
+
+    On `n`: write `claude_import_offered_at` only (so we don't re-prompt
+    on subsequent inits unless `--import-claude-skills` is passed).
+
+13. **Summary.** Print:
 
     ```text
     agentctl is ready.
 
-      Service:       active (systemd --user) — auto-starts on login
-      Web UI:        http://127.0.0.1:7777/ (run `agentctl ui` to open)
-      Image pinned:  agentctl/session-base:local id=sha256:abcd…
+      Service:         active (systemd --user) — auto-starts on login
+      Web UI:          http://127.0.0.1:7777/ (run `agentctl ui` to open)
+      Image pinned:    agentctl/session-base:local id=sha256:abcd…
       Built-in skills: 3 (refactor, tests, docs)
-      Custom skills:   0
-      MCPs:          github (default), internal-jira
+      Custom skills:   4 imported from ~/.claude/skills/
+      MCPs:            github (default), internal-jira
 
     Next: agentctl start --repo <git-url>
     ```
@@ -243,6 +296,11 @@ install is healthy:
 - Registry seed: `INSERT OR IGNORE` is naturally idempotent.
 - Service unit: re-write the unit file (cheap; bytes match), reload,
   restart only if file content changed.
+- Claude Code skills import: not re-prompted on subsequent `init` runs.
+  `install_metadata.json`'s `claude_import_offered_at` is the marker
+  agentctl checks. Pass `--import-claude-skills` to force a re-prompt
+  (useful if the developer added new skills to `~/.claude/skills/`
+  after their first init).
 
 R1 acceptance criterion ("no duplicate MCP rows, no duplicate service
 installs, no token re-prompt") is met by these rules.
