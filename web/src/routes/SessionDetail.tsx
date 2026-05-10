@@ -435,6 +435,14 @@ function applyEvent(state: State, e: WireEvent): State {
 export function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // Guard against stale URLs (e.g. /sessions/undefined left over from a buggy
+  // build). Without this we'd attach the WS, the server would close it with
+  // session_not_found, and the SPA would keep retrying with no recovery path.
+  useEffect(() => {
+    if (!id || id === "undefined" || id === "null") {
+      navigate("/sessions", { replace: true });
+    }
+  }, [id, navigate]);
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const [tab, setTab] = useState<"conversation" | "changes">("conversation");
   const [endBusy, setEndBusy] = useState(false);
