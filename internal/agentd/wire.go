@@ -2,12 +2,16 @@ package agentd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"sync"
 	"time"
 
 	"github.com/agentctl/agentctl/internal/cc"
 	"github.com/agentctl/agentctl/internal/cm"
+	"github.com/agentctl/agentctl/internal/mcp"
+	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/sm"
 )
 
@@ -178,3 +182,107 @@ func (c *ccConnAdapter) Close() error {
 }
 
 var errAdapterClosed = errors.New("control adapter closed")
+
+type mcpAdapter struct{ inner mcp.Registry }
+
+func newMcpAdapter(r mcp.Registry) *mcpAdapter { return &mcpAdapter{inner: r} }
+
+func (a *mcpAdapter) List(ctx context.Context) ([]byte, error) {
+	entries, err := a.inner.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"mcps": entries})
+}
+
+func (a *mcpAdapter) Add(ctx context.Context, body []byte) ([]byte, error) {
+	var e mcp.Entry
+	if err := json.Unmarshal(body, &e); err != nil {
+		return nil, err
+	}
+	if err := a.inner.Add(ctx, e); err != nil {
+		return nil, err
+	}
+	out, err := a.inner.Get(ctx, e.Name)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(out)
+}
+
+func (a *mcpAdapter) Update(ctx context.Context, name string, body []byte) ([]byte, error) {
+	var upd mcp.EntryUpdate
+	if err := json.Unmarshal(body, &upd); err != nil {
+		return nil, err
+	}
+	if err := a.inner.Update(ctx, name, upd); err != nil {
+		return nil, err
+	}
+	out, err := a.inner.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(out)
+}
+
+func (a *mcpAdapter) Remove(ctx context.Context, name string, force bool) error {
+	return a.inner.Remove(ctx, name, force)
+}
+
+type skillsAdapter struct{ inner skills.Manager }
+
+func newSkillsAdapter(s skills.Manager) *skillsAdapter { return &skillsAdapter{inner: s} }
+
+func (a *skillsAdapter) ListInstalled(_ context.Context) ([]byte, error) {
+	list, err := a.inner.ListInstalled()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"skills": list})
+}
+
+func (a *skillsAdapter) ListForSession(ctx context.Context, _ string) ([]byte, error) {
+	return a.ListInstalled(ctx)
+}
+
+func (a *skillsAdapter) Add(_ context.Context, _ string, _ io.Reader) ([]byte, error) {
+	return nil, errors.New("skills add via HTTP upload lands in M4")
+}
+
+func (a *skillsAdapter) Import(_ context.Context, body []byte) ([]byte, error) {
+	var req struct {
+		SourcePath string `json:"source_path"`
+		Name       string `json:"name"`
+		Force      bool   `json:"force"`
+		DryRun     bool   `json:"dry_run"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	res, err := a.inner.Import(req.SourcePath, req.Name, skills.ImportOptions{Force: req.Force, DryRun: req.DryRun})
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(res)
+}
+
+func (a *skillsAdapter) Validate(_ context.Context, name string) ([]byte, error) {
+	res, err := a.inner.Validate(skills.ValidateSource{Name: name})
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(res)
+}
+
+func (a *skillsAdapter) Export(_ context.Context, name string, w io.Writer) error {
+	data, err := a.inner.Export(name)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
+}
+
+func (a *skillsAdapter) Remove(_ context.Context, name string, _ bool) error {
+	return a.inner.Remove(name)
+}

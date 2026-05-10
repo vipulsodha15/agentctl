@@ -36,11 +36,11 @@ type Manifest struct {
 }
 
 type InstalledSkill struct {
-	Name        string
-	Description string
-	Source      string
-	Path        string
-	Overrides   bool
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Source      string `json:"source"`
+	Path        string `json:"path,omitempty"`
+	Overrides   bool   `json:"overrides,omitempty"`
 }
 
 type AddSource struct {

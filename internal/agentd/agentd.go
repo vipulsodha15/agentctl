@@ -140,6 +140,8 @@ func Run(ctx context.Context, opts Options) error {
 		Token:   tok,
 		API:     apiSrv,
 		Manager: manager,
+		MCPs:    newMcpAdapter(mcpReg),
+		Skills:  newSkillsAdapter(skillMgr),
 		Logs:    logStream,
 		Logger:  webLog,
 	})

@@ -17,24 +17,24 @@ var (
 )
 
 type Entry struct {
-	Name           string
-	URL            string
-	Transport      string
-	Kind           string
-	AuthConfigJSON string
-	DefaultEnabled bool
-	Description    string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	Name           string    `json:"name"`
+	URL            string    `json:"url"`
+	Transport      string    `json:"transport"`
+	Kind           string    `json:"kind"`
+	AuthConfigJSON string    `json:"auth_config,omitempty"`
+	DefaultEnabled bool      `json:"default_enabled"`
+	Description    string    `json:"description,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type EntryUpdate struct {
-	URL            *string
-	Transport      *string
-	Kind           *string
-	AuthConfigJSON *string
-	DefaultEnabled *bool
-	Description    *string
+	URL            *string `json:"url,omitempty"`
+	Transport      *string `json:"transport,omitempty"`
+	Kind           *string `json:"kind,omitempty"`
+	AuthConfigJSON *string `json:"auth_config,omitempty"`
+	DefaultEnabled *bool   `json:"default_enabled,omitempty"`
+	Description    *string `json:"description,omitempty"`
 }
 
 type Registry interface {
