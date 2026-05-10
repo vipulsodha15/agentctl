@@ -109,6 +109,36 @@ Two tightly-coupled changes:
   `pip install claude-agent-sdk`) takes 3–10 minutes depending on
   network. install.sh remains fast; init is the slow step. We document
   this and stream Docker's build output so the developer sees progress.
+
+### Verified SDK details (as of 2026-05)
+
+- **Package:** `claude-agent-sdk` on PyPI. Pinned at v0.1.80 in the
+  v1 Dockerfile.
+- **Python requirement:** ≥3.10. The `python3` we install (debian
+  bookworm) is 3.11 — fine.
+- **Bundled CLI.** The SDK ships the Claude Code CLI inside the
+  package. We do **not** also `npm install -g @anthropic-ai/claude-code`.
+- **Permission mode value.** The SDK's enum string is `"bypassPermissions"`
+  (camelCase), passed via `ClaudeAgentOptions(permission_mode="bypassPermissions")`.
+- **Conversation history persistence.** The SDK auto-persists to
+  `~/.claude/projects/<encoded-cwd>/*.jsonl` where `<encoded-cwd>`
+  is the absolute working directory with non-alphanumeric characters
+  replaced by `-` (so cwd `/work` → `-work`). v1 sets up a symlink
+  `/home/agent/.claude → /work/.claude` at container start so the
+  SDK's writes land on the per-session volume; this is what makes
+  R6 idle-resume work. The shim does not implement its own history
+  format.
+- **Resume API.** `ClaudeAgentOptions(resume=<sdk_session_id>)`. The
+  SDK assigns a session id on first turn; the shim emits a
+  `runtime.session_id` event so agentd can persist it
+  (`sessions.sdk_session_id`) and pass it back on idle-resume.
+- **Known issue with `bypassPermissions`.** Each tool call emits
+  `Error in hook callback hook_0: Stream closed` lines on stderr
+  (upstream issue
+  [anthropics/claude-code#23728](https://github.com/anthropics/claude-code/issues/23728)).
+  Errors are non-fatal; tools complete normally. The shim filters
+  these from its stderr forwarding so they do not show up in
+  `agentctl logs --container`.
 - **No cryptographic signature on the image itself.** The image is
   a local artifact; we don't sign local builds. Trust derives from
   install.sh's verification of the inputs. A team that wants

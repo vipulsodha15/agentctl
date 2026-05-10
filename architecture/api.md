@@ -460,6 +460,7 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 | `runtime.ready` | Repos cloned, runtime initialized, ready for first message. | `{ repos: [{ name, url, base_sha, branch }], skills: [{ name, description }], started_at }` |
 | `runtime.event` | Stream events from the runtime: `assistant.delta`, `assistant.message`, `tool.call`, `tool.result`, `usage`, `turn.start`, `turn.end`, `turn.cancelled`. Each is opaque to agentd except `usage` (R10) and `turn.*` (queue / interrupt logic). | varies; documented in §5 |
 | `runtime.error` | Terminal error. agentd marks the session `error`. | `{ code, message, fatal }` |
+| `runtime.session_id` | Emitted once after the first SDK message of a session. Carries the SDK-assigned session id agentd persists as `sessions.sdk_session_id` for future `ClaudeAgentOptions.resume`. | `{ sdk_session_id }` |
 | `runtime.heartbeat` | Every 5 s. Used for liveness; absence for 30 s ⇒ session marked stopped. | `{}` |
 | `repo.changed` | Working tree changed (fs-watcher in shim). Fires throttled (max 2/s/repo). | `{ repo, files_changed, deletions, additions }` |
 | `runtime.snapshot` | Reply to an `agentd.snapshot_request`. | `{ messages: [...], tail_event_id }` |

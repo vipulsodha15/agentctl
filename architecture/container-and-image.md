@@ -74,11 +74,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # Layer 3 — agent runtime SDK (per-release)
-# We use the Python claude-agent-sdk: the shim drives a model session
-# in-process and streams typed events back to agentd over the control
-# sock. No subprocess of a separate "claude-code" CLI; no parsing of
-# stdout. See architecture/agentd.md and ADR 0014.
-ARG CLAUDE_AGENT_SDK_VERSION
+# We use the Python claude-agent-sdk (https://pypi.org/project/claude-agent-sdk/):
+# the shim drives a model session in-process and streams typed events back
+# to agentd over the control sock. The SDK bundles the Claude Code CLI,
+# so we do NOT also run `npm install -g @anthropic-ai/claude-code`.
+# See architecture/agentd.md and ADR 0014.
+ARG CLAUDE_AGENT_SDK_VERSION=0.1.80
 RUN python3 -m venv /opt/agentctl/venv && \
     /opt/agentctl/venv/bin/pip install --no-cache-dir \
         "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
@@ -292,7 +293,24 @@ as `agent` (uid 1000) and:
    headers). MCP entries whose `transport` or `kind` are not recognized
    by this image's runtime are dropped from the rendered config and
    reported as `mcp.skipped` events.
-5. Hands control to the Python shim:
+5. Before handing off to the shim, the entrypoint creates a symlink
+   that re-routes the SDK's persistence directory onto the per-session
+   volume:
+
+   ```bash
+   mkdir -p /work/.claude/projects
+   ln -sfn /work/.claude /home/agent/.claude
+   ```
+
+   `claude-agent-sdk` writes conversation history to
+   `~/.claude/projects/<encoded-cwd>/*.jsonl` (where `<encoded-cwd>`
+   is the absolute working directory with non-alphanumeric chars
+   replaced by `-`; for cwd `/work` that's `-work`). The symlink
+   makes those writes land at `/work/.claude/projects/-work/*.jsonl`,
+   which lives on the session volume and survives idle-stop /
+   container restart. R6 conversation continuity depends on this.
+
+6. Hands control to the Python shim:
 
    ```bash
    exec /opt/agentctl/venv/bin/python -m shim
@@ -302,34 +320,67 @@ as `agent` (uid 1000) and:
    `tini`'s child via `exec`.) The shim is the long-running process
    in the container for the rest of the session.
 
-6. Inside the shim (`shim/__main__.py`):
+7. Inside the shim (`shim/__main__.py`):
 
-   - Configures `claude-agent-sdk` with `model=AGENTCTL_MODEL`,
-     `permission_mode=bypass` (R3 §15.1), the per-session MCP set,
-     `cwd=/work`, and the skills directory at `/skills/`.
-   - On each `agentd.message` frame received over the control sock,
-     drives an SDK session turn — typically by calling the SDK's
-     async query/stream interface — and translates each yielded SDK
-     event into the corresponding `runtime.event` frame:
-     - SDK assistant deltas → `runtime.event{kind="assistant.delta"}`
-     - Tool calls and results → `runtime.event{kind="tool.call|tool.result"}`
-     - Per-turn usage block → `runtime.event{kind="usage", model, input_tokens, output_tokens, ...}`
+   - Reads `secrets.env` (already in env) and the per-session
+     `session.json`.
+   - Configures `claude-agent-sdk` via `ClaudeAgentOptions`:
+
+     ```python
+     opts = ClaudeAgentOptions(
+         model=os.environ["AGENTCTL_MODEL"],
+         permission_mode="bypassPermissions",   # R3 §15.1
+         cwd="/work",
+         mcp_servers=mcp_set_from_greet,
+         resume=existing_sdk_session_id,        # set on idle-resume
+         include_partial_messages=True,         # token-level streaming
+     )
+     ```
+
+     `bypassPermissions` is the documented value (camelCase). Note
+     that with this mode the SDK currently emits noisy
+     `Error in hook callback hook_0: Stream closed` lines for every
+     tool call (upstream issue
+     [anthropics/claude-code#23728](https://github.com/anthropics/claude-code/issues/23728));
+     the errors are non-fatal. The shim filters them from its own
+     stderr forwarding so they do not pollute `agentctl logs --container`.
+
+   - Drives the session via the SDK's `ClaudeSDKClient` (or `query()`
+     for one-shot turns). On each `agentd.message` from the control
+     sock, sends a user turn into the client and translates each
+     yielded SDK message into the corresponding `runtime.event` frame:
+
+     - Assistant deltas → `runtime.event{kind="assistant.delta"}`
+     - Tool calls / results → `runtime.event{kind="tool.call|tool.result"}`
+     - Per-turn usage block → `runtime.event{kind="usage", model, input_tokens, output_tokens, cache_*}`
      - End of turn → `runtime.event{kind="turn.end"}`
-   - Maintains the SDK's conversation history on the volume at
-     `/work/.history/` (the SDK's persistence target), so resume
-     after idle-stop reads that history back.
 
-7. Listens for control-sock inbound: `agentd.message` enqueues a turn
+   - On first turn after start, captures the SDK-assigned
+     `session_id` from the first message and forwards it in a
+     `runtime.session_id` event so agentd can persist it on the
+     `sessions.sdk_session_id` column for future resume.
+
+8. Listens for control-sock inbound: `agentd.message` enqueues a turn
    into the SDK; `agentd.interrupt` cancels the in-flight SDK stream
-   (the SDK exposes a cancel handle); `agentd.shutdown` initiates
+   via the client's cancel handle; `agentd.shutdown` initiates
    graceful exit with a 30s grace, then SIGKILL.
-8. Watches `/work/<repo>/` (excluding `.git/objects`) via `watchdog`
+9. Watches `/work/<repo>/` (excluding `.git/objects`) via `watchdog`
    and emits throttled `repo.changed` events on the control sock.
 
 If the shim exits with a non-zero status, agentd's read loop sees the
 control sock close. Docker reports the container as exited; `agentd`
 marks the session `stopped` (or `error` if exit was unclean per the
 shim's last `runtime.error` frame).
+
+#### Idle-resume
+
+When agentd resumes a session after idle-stop (R2, overview.md §6.5),
+the new container's shim reads `sdk_session_id` from
+`session.json` (agentd writes it from the row) and passes it as
+`ClaudeAgentOptions.resume=<sdk_session_id>` so the SDK reads back
+the conversation history from `/work/.claude/projects/-work/<id>.jsonl`.
+The agent picks up exactly where it left off; no replay logic in
+agentctl.
 
 ### 2.7 Working directory and user
 
@@ -345,7 +396,8 @@ R8 requires `agentctl diff` and `agentctl export` to work without
 attaching to the container. Implementation:
 
 - The shim records each repo's clone-time SHA and branch in
-  `/work/.history/repo-bases.json`.
+  `/work/.agentctl/repo-bases.json` (shim-owned metadata; distinct
+  from the SDK's `/work/.claude/` history dir).
 - `Diff` op: `agentd` issues `agentd.diff_request{repo}` on the control
   sock; the shim runs `git -C /work/<repo> diff --no-color
   <recorded_base_sha>` (and `git ls-files --others --exclude-standard`

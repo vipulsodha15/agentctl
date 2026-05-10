@@ -325,8 +325,12 @@ sequenceDiagram
   AD->>FAN: session.resumed, turn.start
 ```
 
-Resume preserves the volume; the runtime re-reads its history from
-`/work/.history/` (the runtime owns that path; `agentd` does not parse it).
+Resume preserves the volume; the SDK reconstructs its conversation
+history from `/work/.claude/projects/-work/<sdk_session_id>.jsonl`
+(the symlink set up at container start re-routes the SDK's
+`~/.claude/` onto the volume). The shim passes
+`ClaudeAgentOptions.resume=<sdk_session_id>` so the SDK reads these
+files; agentctl never parses them.
 
 ### 6.6 agentd restart recovery
 
