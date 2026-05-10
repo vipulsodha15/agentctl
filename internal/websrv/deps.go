@@ -60,3 +60,12 @@ type Doctor interface {
 type Updater interface {
 	Update(ctx context.Context, body []byte) ([]byte, error)
 }
+
+// UsageService is wired by M5-A; the handler calls into this for
+// `/v1/usage`. JSON-pass-through pattern matches MCP and Skills, plus a
+// typed RunningTotals fast-path used to enrich the session list with each
+// session's cost-to-date.
+type UsageService interface {
+	GetUsage(ctx context.Context, since, sessionID string) ([]byte, error)
+	RunningTotals(ctx context.Context, sessionIDs []string) (map[string]float64, error)
+}

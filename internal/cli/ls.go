@@ -58,13 +58,17 @@ func runLs(_ context.Context, env *Env, args []string) int {
 	}
 	now := time.Now().UTC()
 	for _, s := range resp.Sessions {
+		cost := "—"
+		if s.CostUSD != nil {
+			cost = fmt.Sprintf("$%.2f", *s.CostUSD)
+		}
 		if *verbose {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%t\t%d\t%dB\t%.2f\t-\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%t\t%d\t%dB\t%.2f\t%s\n",
 				s.ID, s.Name, s.Status, humanAge(now, s.LastActivityAt), shortImage(s.ImageID),
-				s.InFlight, s.QueueDepth, s.MemLimitBytes, s.CPULimitCores)
+				s.InFlight, s.QueueDepth, s.MemLimitBytes, s.CPULimitCores, cost)
 		} else {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t-\n",
-				s.ID, s.Name, s.Status, humanAge(now, s.LastActivityAt), shortImage(s.ImageID))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				s.ID, s.Name, s.Status, humanAge(now, s.LastActivityAt), shortImage(s.ImageID), cost)
 		}
 	}
 	_ = tw.Flush()

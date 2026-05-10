@@ -12,11 +12,14 @@ import (
 	"path/filepath"
 	"sync"
 
+	"time"
+
 	"github.com/agentctl/agentctl/internal/api"
 	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/sm"
+	"github.com/agentctl/agentctl/internal/usage"
 )
 
 type SessionLogStreamer interface {
@@ -27,6 +30,13 @@ type ContainerLogStreamer interface {
 	Stream(ctx context.Context, sessionID string, follow bool, send func(line []byte) error) error
 }
 
+// UsageAggregator is the subset of usage.Aggregator the socket server needs
+// for the GetCost op (R10). Declared as an interface so tests can stub it.
+type UsageAggregator interface {
+	PerSession(ctx context.Context, sessionID string) (usage.PerSessionTotals, error)
+	Range(ctx context.Context, start, end time.Time, sessionFilter string) (usage.RangeTotals, error)
+}
+
 type Server struct {
 	socketPath    string
 	apiSrv        *api.Server
@@ -35,6 +45,7 @@ type Server struct {
 	skills        skills.Manager
 	logStream     SessionLogStreamer
 	containerLogs ContainerLogStreamer
+	usage         UsageAggregator
 	logger        *slog.Logger
 	listener      net.Listener
 	wg            sync.WaitGroup
@@ -50,6 +61,7 @@ type Options struct {
 	Skills        skills.Manager
 	LogStream     SessionLogStreamer
 	ContainerLogs ContainerLogStreamer
+	Usage         UsageAggregator
 	Logger        *slog.Logger
 }
 
@@ -62,6 +74,7 @@ func New(opts Options) *Server {
 		skills:        opts.Skills,
 		logStream:     opts.LogStream,
 		containerLogs: opts.ContainerLogs,
+		usage:         opts.Usage,
 		logger:        opts.Logger,
 		closing:       make(chan struct{}),
 	}
@@ -206,6 +219,8 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		s.handleExportSkill(cw, frame)
 	case proto.OpValidateSkill:
 		s.handleValidateSkill(cw, frame)
+	case proto.OpGetCost:
+		s.handleGetCost(cw, frame)
 	default:
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
 	}
@@ -259,7 +274,35 @@ func (s *Server) handleListSessions(cw *connWriter, frame proto.Frame) {
 		s.writeError(cw, frame.ID, proto.ErrInternal, err.Error())
 		return
 	}
+	s.populateRunningCosts(list)
 	s.writeResponse(cw, frame.ID, proto.ListSessionsResponse{Sessions: list})
+}
+
+func (s *Server) populateRunningCosts(list []proto.SessionSummary) {
+	if s.usage == nil || len(list) == 0 {
+		return
+	}
+	type runningTotaller interface {
+		RunningTotals(ctx context.Context, ids []string) (map[string]float64, error)
+	}
+	rt, ok := s.usage.(runningTotaller)
+	if !ok {
+		return
+	}
+	ids := make([]string, 0, len(list))
+	for _, s := range list {
+		ids = append(ids, s.ID)
+	}
+	totals, err := rt.RunningTotals(context.Background(), ids)
+	if err != nil {
+		return
+	}
+	for i, sum := range list {
+		if v, ok := totals[sum.ID]; ok {
+			c := v
+			list[i].CostUSD = &c
+		}
+	}
 }
 
 func (s *Server) handleGetSession(cw *connWriter, frame proto.Frame) {

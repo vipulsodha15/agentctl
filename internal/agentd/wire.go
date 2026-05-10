@@ -15,6 +15,7 @@ import (
 	"github.com/agentctl/agentctl/internal/recovery"
 	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/sm"
+	"github.com/agentctl/agentctl/internal/usage"
 )
 
 type cmAdapter struct {
@@ -316,6 +317,65 @@ func (a *skillsComposerAdapter) Compose(dest string) (sm.SkillsComposeResult, er
 		Skills:     r.Skills,
 		Collisions: r.Collisions,
 	}, nil
+}
+
+type usageRecorderAdapter struct{ inner *usage.Service }
+
+func newUsageRecorderAdapter(s *usage.Service) *usageRecorderAdapter {
+	return &usageRecorderAdapter{inner: s}
+}
+
+func (a *usageRecorderAdapter) OnUsage(ctx context.Context, ev sm.UsageRecord) error {
+	return a.inner.OnUsage(ctx, usage.UsageEvent{
+		SessionID:        ev.SessionID,
+		TurnID:           ev.TurnID,
+		At:               ev.At,
+		Model:            ev.Model,
+		InputTokens:      ev.InputTokens,
+		OutputTokens:     ev.OutputTokens,
+		CacheReadTokens:  ev.CacheReadTokens,
+		CacheWriteTokens: ev.CacheWriteTokens,
+	})
+}
+
+func (a *usageRecorderAdapter) CostFor(ev sm.UsageRecord) (float64, bool) {
+	return a.inner.CostFor(usage.UsageEvent{
+		Model:            ev.Model,
+		InputTokens:      ev.InputTokens,
+		OutputTokens:     ev.OutputTokens,
+		CacheReadTokens:  ev.CacheReadTokens,
+		CacheWriteTokens: ev.CacheWriteTokens,
+	})
+}
+
+type usageWebAdapter struct{ inner *usage.Service }
+
+func newUsageWebAdapter(s *usage.Service) *usageWebAdapter {
+	return &usageWebAdapter{inner: s}
+}
+
+func (a *usageWebAdapter) RunningTotals(ctx context.Context, sessionIDs []string) (map[string]float64, error) {
+	return a.inner.RunningTotals(ctx, sessionIDs)
+}
+
+func (a *usageWebAdapter) GetUsage(ctx context.Context, since, sessionID string) ([]byte, error) {
+	now := time.Now().UTC()
+	if sessionID != "" && since == "" {
+		per, err := a.inner.PerSession(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(per)
+	}
+	start, end, err := usage.ParseRange(since, now)
+	if err != nil {
+		return nil, err
+	}
+	rng, err := a.inner.Range(ctx, start, end, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(rng)
 }
 
 type skillsAdapter struct{ inner skills.Manager }

@@ -97,6 +97,7 @@ type actorOptions struct {
 	ResolvedMCPs    []mcp.Entry
 	GitHubPAT       string
 	SkillCollisions []string
+	Usage           UsageRecorder
 }
 
 type actor struct {
@@ -407,15 +408,59 @@ func (a *actor) handleRuntimeEvent(fr ControlFrame) {
 	case proto.EventTurnEnd:
 		a.broadcast(inner.Kind, inner.Data)
 		a.completeTurn("ok")
+	case proto.EventUsage:
+		a.broadcast(inner.Kind, a.persistUsage(inner.Data))
 	case proto.EventTurnCancelled:
 		a.broadcast(inner.Kind, inner.Data)
 		a.completeTurn("cancelled")
-	case proto.EventUsage:
-		// TODO(M5): persist usage rows in `usage` table; M2 only fans out the event.
-		a.broadcast(inner.Kind, inner.Data)
 	default:
 		a.broadcast(inner.Kind, inner.Data)
 	}
+}
+
+// persistUsage writes the usage row (R10) and returns the same data with the
+// recorder-computed `cost_usd` filled in so the broadcast carries the
+// canonical price-table number even if the runtime didn't include one. If the
+// recorder is absent (tests / no-store mode) the original payload is forwarded
+// unchanged.
+func (a *actor) persistUsage(data json.RawMessage) json.RawMessage {
+	var u proto.UsageData
+	if err := json.Unmarshal(data, &u); err != nil {
+		a.opts.Logger.Warn("usage.malformed_payload", slog.String("error", err.Error()))
+		return data
+	}
+	if a.opts.Usage == nil {
+		return data
+	}
+	rec := UsageRecord{
+		SessionID:        a.opts.ID,
+		TurnID:           u.TurnID,
+		At:               a.opts.Now(),
+		Model:            u.Model,
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+	}
+	if rec.Model == "" {
+		a.mu.RLock()
+		rec.Model = a.summary.Model
+		a.mu.RUnlock()
+		u.Model = rec.Model
+	}
+	if err := a.opts.Usage.OnUsage(context.Background(), rec); err != nil {
+		a.opts.Logger.Warn("usage.persist_failed",
+			slog.String("turn_id", u.TurnID),
+			slog.String("error", err.Error()))
+	}
+	if cost, ok := a.opts.Usage.CostFor(rec); ok {
+		u.CostUSD = cost
+	}
+	out, err := json.Marshal(u)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 func (a *actor) completeTurn(_ string) {

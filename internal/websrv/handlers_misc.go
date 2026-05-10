@@ -7,8 +7,18 @@ import (
 	"github.com/agentctl/agentctl/internal/proto"
 )
 
-func (s *Server) handleGetUsage(w http.ResponseWriter, _ *http.Request) {
-	unavailable(w, "GetUsage", "M5")
+func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
+	if s.usage == nil {
+		unavailable(w, "GetUsage", "M5")
+		return
+	}
+	q := r.URL.Query()
+	body, err := s.usage.GetUsage(r.Context(), q.Get("since"), q.Get("session_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
+		return
+	}
+	writeRawJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {

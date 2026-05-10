@@ -26,6 +26,7 @@ import (
 	"github.com/agentctl/agentctl/internal/socksrv"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/sweep"
+	"github.com/agentctl/agentctl/internal/usage"
 	"github.com/agentctl/agentctl/internal/version"
 	"github.com/agentctl/agentctl/internal/websrv"
 )
@@ -107,6 +108,13 @@ func Run(ctx context.Context, opts Options) error {
 		CustomDir:  opts.Layout.CustomSkills,
 	})
 
+	usageLog := log.New(log.Options{Component: log.ComponentSessions})
+	usageSvc := usage.New(usage.Options{
+		Store:   st,
+		Pricing: cfg.Pricing.Tables,
+		Logger:  usageLog,
+	})
+
 	configPath := opts.Layout.ConfigFile
 	managerOpts := sm.Options{
 		Store:        st,
@@ -125,6 +133,7 @@ func Run(ctx context.Context, opts Options) error {
 		SecretsPath: opts.Layout.SecretsFile,
 		MCPs:        mcpReg,
 		Skills:      newSkillsComposerAdapter(skillMgr),
+		Usage:       newUsageRecorderAdapter(usageSvc),
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt
@@ -167,6 +176,7 @@ func Run(ctx context.Context, opts Options) error {
 		Skills:        skillMgr,
 		LogStream:     logStream,
 		ContainerLogs: containerLogStream,
+		Usage:         usageSvc,
 		Logger:        sockLog,
 	})
 	if err := socketSrv.Start(); err != nil {
@@ -187,6 +197,7 @@ func Run(ctx context.Context, opts Options) error {
 		Manager: manager,
 		MCPs:    newMcpAdapter(mcpReg),
 		Skills:  newSkillsAdapter(skillMgr),
+		Usage:   newUsageWebAdapter(usageSvc),
 		Logs:    logStream,
 		Logger:  webLog,
 	})

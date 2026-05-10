@@ -28,6 +28,20 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
 		return
 	}
+	if s.usage != nil && len(list) > 0 {
+		ids := make([]string, 0, len(list))
+		for _, sum := range list {
+			ids = append(ids, sum.ID)
+		}
+		if totals, terr := s.usage.RunningTotals(r.Context(), ids); terr == nil {
+			for i, sum := range list {
+				if v, ok := totals[sum.ID]; ok {
+					c := v
+					list[i].CostUSD = &c
+				}
+			}
+		}
+	}
 	writeJSON(w, 0, proto.ListSessionsResponse{Sessions: list})
 }
 

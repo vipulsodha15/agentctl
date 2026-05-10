@@ -117,3 +117,24 @@ type RuntimeEventData struct {
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data,omitempty"`
 }
+
+// UsageRecord is what the actor passes to a UsageRecorder when a
+// runtime.event{kind=usage} arrives. The recorder owns insertion and cost
+// computation; the actor owns broadcast.
+type UsageRecord struct {
+	SessionID        string
+	TurnID           string
+	At               time.Time
+	Model            string
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+}
+
+// UsageRecorder is the subset of internal/usage.Recorder + cost-computation
+// the actor needs. Implemented by *usage.Service in production.
+type UsageRecorder interface {
+	OnUsage(ctx context.Context, ev UsageRecord) error
+	CostFor(ev UsageRecord) (float64, bool)
+}

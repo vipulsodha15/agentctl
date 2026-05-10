@@ -72,6 +72,7 @@ func commands() []Command {
 
 		{Name: "skill", Group: groupSkills, Summary: "Manage skills (list/new/add/edit/remove/validate/show/export/import).", Run: runSkill},
 
+		{Name: "cost", Group: groupDiagnostics, Summary: "Show per-session or aggregate Anthropic API spend.", Run: runCost},
 		{Name: "doctor", Group: groupDiagnostics, Summary: "Run install + connectivity checks (--fix, --repair-db, --json).", Run: runDoctor},
 
 		{Name: "version", Group: groupMisc, Summary: "Print version info.", Run: runVersion},

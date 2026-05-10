@@ -31,6 +31,7 @@ type Server struct {
 	manager  Manager
 	mcps     MCPRegistry
 	skills   SkillsService
+	usage    UsageService
 	logs     LogStreamer
 	doctor   Doctor
 	updater  Updater
@@ -46,6 +47,7 @@ type Options struct {
 	Manager Manager
 	MCPs    MCPRegistry
 	Skills  SkillsService
+	Usage   UsageService
 	Logs    LogStreamer
 	Doctor  Doctor
 	Updater Updater
@@ -59,6 +61,7 @@ func New(opts Options) *Server {
 		manager:  opts.Manager,
 		mcps:     opts.MCPs,
 		skills:   opts.Skills,
+		usage:    opts.Usage,
 		logs:     opts.Logs,
 		doctor:   opts.Doctor,
 		updater:  opts.Updater,

@@ -95,6 +95,7 @@ type Options struct {
 	Control         ControlServer
 	MCPs            mcp.Registry
 	Skills          SkillsComposer
+	Usage           UsageRecorder
 	Logger          *slog.Logger
 	Now             func() time.Time
 	DefaultModel    string
@@ -319,6 +320,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		ResolvedMCPs:    resolvedEntries,
 		GitHubPAT:       pat,
 		SkillCollisions: skillsResult.Collisions,
+		Usage:           m.opts.Usage,
 	})
 	m.mu.Lock()
 	m.actors[id] = a
