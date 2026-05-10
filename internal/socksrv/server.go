@@ -13,7 +13,9 @@ import (
 	"sync"
 
 	"github.com/agentctl/agentctl/internal/api"
+	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/sm"
 )
 
@@ -25,6 +27,8 @@ type Server struct {
 	socketPath string
 	apiSrv     *api.Server
 	manager    sm.Manager
+	mcps       mcp.Registry
+	skills     skills.Manager
 	logStream  SessionLogStreamer
 	logger     *slog.Logger
 	listener   net.Listener
@@ -37,6 +41,8 @@ type Options struct {
 	SocketPath string
 	API        *api.Server
 	Manager    sm.Manager
+	MCPs       mcp.Registry
+	Skills     skills.Manager
 	LogStream  SessionLogStreamer
 	Logger     *slog.Logger
 }
@@ -46,6 +52,8 @@ func New(opts Options) *Server {
 		socketPath: opts.SocketPath,
 		apiSrv:     opts.API,
 		manager:    opts.Manager,
+		mcps:       opts.MCPs,
+		skills:     opts.Skills,
 		logStream:  opts.LogStream,
 		logger:     opts.Logger,
 		closing:    make(chan struct{}),
@@ -165,6 +173,28 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		go s.handleAttachStream(cw, frame)
 	case proto.OpGetLogs:
 		go s.handleGetLogs(cw, frame)
+	case proto.OpListMCPs:
+		s.handleListMCPs(cw, frame)
+	case proto.OpAddMCP:
+		s.handleAddMCP(cw, frame)
+	case proto.OpUpdateMCP:
+		s.handleUpdateMCP(cw, frame)
+	case proto.OpRemoveMCP:
+		s.handleRemoveMCP(cw, frame)
+	case proto.OpSetDefaultMCP:
+		s.handleSetDefaultMCP(cw, frame)
+	case proto.OpListInstalledSkills:
+		s.handleListInstalledSkills(cw, frame)
+	case proto.OpAddSkill:
+		s.handleAddSkill(cw, frame)
+	case proto.OpRemoveSkill:
+		s.handleRemoveSkill(cw, frame)
+	case proto.OpImportSkill:
+		s.handleImportSkill(cw, frame)
+	case proto.OpExportSkill:
+		s.handleExportSkill(cw, frame)
+	case proto.OpValidateSkill:
+		s.handleValidateSkill(cw, frame)
 	default:
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
 	}

@@ -17,15 +17,26 @@ const (
 )
 
 const (
-	OpHealth           = "Health"
-	OpCreateSession    = "CreateSession"
-	OpListSessions     = "ListSessions"
-	OpGetSession       = "GetSession"
-	OpSendMessage      = "SendMessage"
-	OpInterrupt        = "Interrupt"
-	OpAttachStream     = "AttachStream"
-	OpTerminateSession = "TerminateSession"
-	OpGetLogs          = "GetLogs"
+	OpHealth              = "Health"
+	OpCreateSession       = "CreateSession"
+	OpListSessions        = "ListSessions"
+	OpGetSession          = "GetSession"
+	OpSendMessage         = "SendMessage"
+	OpInterrupt           = "Interrupt"
+	OpAttachStream        = "AttachStream"
+	OpTerminateSession    = "TerminateSession"
+	OpGetLogs             = "GetLogs"
+	OpListMCPs            = "ListMCPs"
+	OpAddMCP              = "AddMCP"
+	OpUpdateMCP           = "UpdateMCP"
+	OpRemoveMCP           = "RemoveMCP"
+	OpSetDefaultMCP       = "SetDefaultMCP"
+	OpListInstalledSkills = "ListInstalledSkills"
+	OpAddSkill            = "AddSkill"
+	OpRemoveSkill         = "RemoveSkill"
+	OpImportSkill         = "ImportSkill"
+	OpExportSkill         = "ExportSkill"
+	OpValidateSkill       = "ValidateSkill"
 )
 
 type Frame struct {
@@ -299,4 +310,148 @@ type SessionStoppedData struct {
 
 type LogLineData struct {
 	Raw string `json:"raw"`
+}
+
+type MCPEntry struct {
+	Name           string    `json:"name"`
+	URL            string    `json:"url"`
+	Transport      string    `json:"transport"`
+	Kind           string    `json:"kind"`
+	AuthConfigJSON string    `json:"auth_config_json,omitempty"`
+	DefaultEnabled bool      `json:"default_enabled"`
+	Description    string    `json:"description,omitempty"`
+	CreatedAt      time.Time `json:"created_at,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
+}
+
+type ListMCPsRequest struct{}
+
+type ListMCPsResponse struct {
+	MCPs []MCPEntry `json:"mcps"`
+}
+
+type AddMCPRequest struct {
+	Name           string `json:"name"`
+	URL            string `json:"url"`
+	Transport      string `json:"transport,omitempty"`
+	Kind           string `json:"kind,omitempty"`
+	AuthConfigJSON string `json:"auth_config_json,omitempty"`
+	DefaultEnabled bool   `json:"default_enabled,omitempty"`
+	Description    string `json:"description,omitempty"`
+}
+
+type AddMCPResponse struct {
+	MCP MCPEntry `json:"mcp"`
+}
+
+type UpdateMCPRequest struct {
+	Name           string  `json:"name"`
+	URL            *string `json:"url,omitempty"`
+	Transport      *string `json:"transport,omitempty"`
+	Kind           *string `json:"kind,omitempty"`
+	AuthConfigJSON *string `json:"auth_config_json,omitempty"`
+	DefaultEnabled *bool   `json:"default_enabled,omitempty"`
+	Description    *string `json:"description,omitempty"`
+}
+
+type UpdateMCPResponse struct {
+	MCP MCPEntry `json:"mcp"`
+}
+
+type RemoveMCPRequest struct {
+	Name  string `json:"name"`
+	Force bool   `json:"force,omitempty"`
+}
+
+type RemoveMCPResponse struct {
+	Removed bool `json:"removed"`
+}
+
+type SetDefaultMCPRequest struct {
+	Name           string `json:"name"`
+	DefaultEnabled bool   `json:"default_enabled"`
+}
+
+type SetDefaultMCPResponse struct {
+	MCP MCPEntry `json:"mcp"`
+}
+
+type SkillEntry struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Source      string `json:"source"`
+	Path        string `json:"path,omitempty"`
+	Overrides   bool   `json:"overrides,omitempty"`
+}
+
+type ListInstalledSkillsRequest struct{}
+
+type ListInstalledSkillsResponse struct {
+	Skills []SkillEntry `json:"skills"`
+}
+
+type ImportSkillRequest struct {
+	SourcePath string `json:"source_path"`
+	Name       string `json:"name,omitempty"`
+	Force      bool   `json:"force,omitempty"`
+	DryRun     bool   `json:"dry_run,omitempty"`
+}
+
+type ImportSkillResponse struct {
+	Imported       []string `json:"imported"`
+	Skipped        []string `json:"skipped,omitempty"`
+	SkippedReasons []string `json:"skipped_reasons,omitempty"`
+	Shadowed       []string `json:"shadowed_builtins,omitempty"`
+}
+
+type AddSkillRequest struct {
+	Path  string `json:"path"`
+	Force bool   `json:"force,omitempty"`
+}
+
+type AddSkillResponse struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type RemoveSkillRequest struct {
+	Name string `json:"name"`
+}
+
+type RemoveSkillResponse struct {
+	Removed bool `json:"removed"`
+}
+
+type ValidateSkillRequest struct {
+	Name string `json:"name,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+
+type ValidateSkillResponse struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	OK          bool     `json:"ok"`
+	Issues      []string `json:"issues,omitempty"`
+}
+
+type ExportSkillRequest struct {
+	Name string `json:"name"`
+}
+
+type ExportSkillResponse struct {
+	Name    string `json:"name"`
+	Tarball []byte `json:"tarball"`
+}
+
+type MCPSkippedData struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	Kind      string `json:"kind"`
+	Reason    string `json:"reason"`
+}
+
+type MCPUnreachableData struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	Error     string `json:"error"`
 }
