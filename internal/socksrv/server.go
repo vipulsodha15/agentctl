@@ -23,40 +23,47 @@ type SessionLogStreamer interface {
 	Stream(ctx context.Context, sessionID string, follow bool, send func(line []byte) error) error
 }
 
+type ContainerLogStreamer interface {
+	Stream(ctx context.Context, sessionID string, follow bool, send func(line []byte) error) error
+}
+
 type Server struct {
-	socketPath string
-	apiSrv     *api.Server
-	manager    sm.Manager
-	mcps       mcp.Registry
-	skills     skills.Manager
-	logStream  SessionLogStreamer
-	logger     *slog.Logger
-	listener   net.Listener
-	wg         sync.WaitGroup
-	closing    chan struct{}
-	writeMu    sync.Mutex
+	socketPath    string
+	apiSrv        *api.Server
+	manager       sm.Manager
+	mcps          mcp.Registry
+	skills        skills.Manager
+	logStream     SessionLogStreamer
+	containerLogs ContainerLogStreamer
+	logger        *slog.Logger
+	listener      net.Listener
+	wg            sync.WaitGroup
+	closing       chan struct{}
+	writeMu       sync.Mutex
 }
 
 type Options struct {
-	SocketPath string
-	API        *api.Server
-	Manager    sm.Manager
-	MCPs       mcp.Registry
-	Skills     skills.Manager
-	LogStream  SessionLogStreamer
-	Logger     *slog.Logger
+	SocketPath    string
+	API           *api.Server
+	Manager       sm.Manager
+	MCPs          mcp.Registry
+	Skills        skills.Manager
+	LogStream     SessionLogStreamer
+	ContainerLogs ContainerLogStreamer
+	Logger        *slog.Logger
 }
 
 func New(opts Options) *Server {
 	return &Server{
-		socketPath: opts.SocketPath,
-		apiSrv:     opts.API,
-		manager:    opts.Manager,
-		mcps:       opts.MCPs,
-		skills:     opts.Skills,
-		logStream:  opts.LogStream,
-		logger:     opts.Logger,
-		closing:    make(chan struct{}),
+		socketPath:    opts.SocketPath,
+		apiSrv:        opts.API,
+		manager:       opts.Manager,
+		mcps:          opts.MCPs,
+		skills:        opts.Skills,
+		logStream:     opts.LogStream,
+		containerLogs: opts.ContainerLogs,
+		logger:        opts.Logger,
+		closing:       make(chan struct{}),
 	}
 }
 
@@ -175,6 +182,8 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		go s.handleAttachStream(cw, frame)
 	case proto.OpGetLogs:
 		go s.handleGetLogs(cw, frame)
+	case proto.OpGetContainerLogs:
+		go s.handleGetContainerLogs(cw, frame)
 	case proto.OpListMCPs:
 		s.handleListMCPs(cw, frame)
 	case proto.OpAddMCP:
@@ -389,6 +398,32 @@ func (s *Server) handleGetLogs(cw *connWriter, frame proto.Frame) {
 		return cw.write(out)
 	}
 	if err := s.logStream.Stream(context.Background(), req.SessionID, req.Follow, send); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrInternal, err.Error())
+		return
+	}
+	s.writeStreamEnd(cw, frame.ID, "eof")
+}
+
+func (s *Server) handleGetContainerLogs(cw *connWriter, frame proto.Frame) {
+	if s.containerLogs == nil {
+		s.writeError(cw, frame.ID, proto.ErrUnavailable, "container log streaming not configured")
+		return
+	}
+	var req proto.GetContainerLogsRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	if req.SessionID == "" {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "session_id required")
+		return
+	}
+	send := func(line []byte) error {
+		body, _ := json.Marshal(proto.LogLineData{Raw: string(line)})
+		out, _ := json.Marshal(proto.Frame{V: proto.ProtocolVersion, ID: frame.ID, Kind: proto.KindStreamChunk, Data: body})
+		return cw.write(out)
+	}
+	if err := s.containerLogs.Stream(context.Background(), req.SessionID, req.Follow, send); err != nil {
 		s.writeError(cw, frame.ID, proto.ErrInternal, err.Error())
 		return
 	}

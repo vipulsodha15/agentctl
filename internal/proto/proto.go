@@ -27,6 +27,7 @@ const (
 	OpTerminateSession    = "TerminateSession"
 	OpRestartSession      = "RestartSession"
 	OpGetLogs             = "GetLogs"
+	OpGetContainerLogs    = "GetContainerLogs"
 	OpListMCPs            = "ListMCPs"
 	OpAddMCP              = "AddMCP"
 	OpUpdateMCP           = "UpdateMCP"
@@ -175,6 +176,11 @@ type GetLogsRequest struct {
 	SessionID string `json:"session_id"`
 	Follow    bool   `json:"follow,omitempty"`
 	SinceMS   int64  `json:"since_ms,omitempty"`
+}
+
+type GetContainerLogsRequest struct {
+	SessionID string `json:"session_id"`
+	Follow    bool   `json:"follow,omitempty"`
 }
 
 type SessionSummary struct {

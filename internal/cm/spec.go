@@ -71,3 +71,17 @@ type NetworkCreateRequest struct {
 	Options    map[string]string
 	EnableIPv6 bool
 }
+
+type ContainerRef struct {
+	ID     string
+	Name   string
+	Labels map[string]string
+	State  string
+}
+
+type LogsOptions struct {
+	Follow bool
+	Stdout bool
+	Stderr bool
+	Tail   string
+}

@@ -21,21 +21,31 @@ func runLogs(ctx context.Context, env *Env, args []string) int {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	daemon := fs.Bool("daemon", false, "tail the daemon log instead of a session log")
+	container := fs.Bool("container", false, "tail container stdout/stderr for a session (proxies docker logs)")
 	follow := fs.Bool("f", false, "follow log output")
 	asJSON := fs.Bool("json", false, "raw NDJSON / journalctl JSON output")
 	raw := fs.Bool("raw", false, "emit per-session log lines unchanged (NDJSON)")
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: agentctl logs --daemon [-f] [--json]")
-		fmt.Fprintln(env.Stderr, "       agentctl logs <session> [-f] [--raw]")
-		fs.PrintDefaults()
+		fmt.Fprintln(env.Stderr, "Usage: agentctl logs <session> [-f] [--raw]")
+		fmt.Fprintln(env.Stderr, "       agentctl logs <session> --container [-f]")
+		fmt.Fprintln(env.Stderr, "       agentctl logs --daemon [-f] [--json]")
 		fmt.Fprintln(env.Stderr, "")
-		fmt.Fprintln(env.Stderr, "TODO(M5): --container will proxy `docker logs` for the session container.")
+		fmt.Fprintln(env.Stderr, "Tail one of three log surfaces:")
+		fmt.Fprintln(env.Stderr, "  default     pretty-print the per-session NDJSON log.")
+		fmt.Fprintln(env.Stderr, "  --container proxy docker container stdout/stderr via agentd.")
+		fmt.Fprintln(env.Stderr, "  --daemon    tail the agentd journal (Linux: journalctl --user; macOS: file).")
+		fmt.Fprintln(env.Stderr, "")
+		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
 	if *daemon {
-		switch runtime.GOOS {
+		if *container {
+			fmt.Fprintln(env.Stderr, "logs: --daemon and --container are mutually exclusive")
+			return ExitUsage
+		}
+		switch tailDaemonPlatform() {
 		case "linux":
 			return tailJournal(ctx, env, *follow, *asJSON)
 		default:
@@ -47,7 +57,52 @@ func runLogs(ctx context.Context, env *Env, args []string) int {
 		return ExitUsage
 	}
 	sessionID := fs.Arg(0)
+	if *container {
+		return streamContainerLog(ctx, env, sessionID, *follow)
+	}
 	return streamSessionLog(ctx, env, sessionID, *follow, *raw)
+}
+
+func tailDaemonPlatform() string {
+	if runtime.GOOS == "linux" {
+		return "linux"
+	}
+	return runtime.GOOS
+}
+
+func streamContainerLog(ctx context.Context, env *Env, sessionID string, follow bool) int {
+	c, err := cliclient.Dial(env.Layout.SocketFile, 3*time.Second)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "logs: %v\n", err)
+		return ExitEnvironment
+	}
+	defer func() { _ = c.Close() }()
+	stream, err := c.StartStream(proto.OpGetContainerLogs, proto.GetContainerLogsRequest{SessionID: sessionID, Follow: follow})
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "logs: %v\n", err)
+		return ExitGeneric
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			stream.Close()
+			return ExitOK
+		default:
+		}
+		fr := stream.Recv()
+		if fr.Err != nil {
+			fmt.Fprintf(env.Stderr, "logs: %v\n", fr.Err)
+			return ExitGeneric
+		}
+		if fr.EndCode != "" {
+			return ExitOK
+		}
+		var d proto.LogLineData
+		if err := json.Unmarshal(fr.Data, &d); err != nil {
+			continue
+		}
+		_, _ = io.WriteString(env.Stdout, d.Raw)
+	}
 }
 
 func streamSessionLog(ctx context.Context, env *Env, sessionID string, follow, raw bool) int {

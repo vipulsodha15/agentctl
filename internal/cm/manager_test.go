@@ -3,6 +3,7 @@ package cm
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -115,6 +116,24 @@ func (f *fakeDocker) NetworkList(_ context.Context, key, value string) ([]Networ
 	f.netListLabelKey = key
 	f.netListLabelVal = value
 	return append([]NetworkRef(nil), f.netListResult...), f.netListErr
+}
+
+func (f *fakeDocker) ContainerList(_ context.Context, _, _ string) ([]ContainerRef, error) {
+	return nil, nil
+}
+
+func (f *fakeDocker) ContainerLogs(_ context.Context, _ string, _ LogsOptions) (io.ReadCloser, error) {
+	return io.NopCloser(strReader("")), nil
+}
+
+type strReader string
+
+func (s strReader) Read(p []byte) (int, error) {
+	if len(s) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, s)
+	return n, io.EOF
 }
 
 func sampleSpec(t *testing.T) (Spec, string) {

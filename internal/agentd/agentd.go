@@ -81,6 +81,7 @@ func Run(ctx context.Context, opts Options) error {
 		cmAdapt   *cmAdapter
 		ccAdapt   *ccAdapter
 		recoverCM recovery.ContainerManager
+		cmMgr     cm.Manager
 	)
 	dockerSDK, dockerSDKErr := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	dockerCli, dockerErr := cm.NewDockerSDKClient()
@@ -91,7 +92,8 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		logger.Warn("docker.unavailable", slog.String("error", err.Error()))
 	} else {
-		cmAdapt = newCmAdapter(cm.NewManager(dockerCli))
+		cmMgr = cm.NewManager(dockerCli)
+		cmAdapt = newCmAdapter(cmMgr)
 		ccLog := log.New(log.Options{Component: log.ComponentContainer})
 		ccSrv := cc.New(cc.Options{Logger: ccLog})
 		ccAdapt = newCcAdapter(ccSrv)
@@ -151,15 +153,21 @@ func Run(ctx context.Context, opts Options) error {
 
 	logStream := &log.SessionLogStreamer{SessionsDir: opts.Layout.SessionsDir}
 
+	var containerLogStream socksrv.ContainerLogStreamer
+	if cmMgr != nil {
+		containerLogStream = newContainerLogStreamer(manager, cmMgr)
+	}
+
 	sockLog := log.New(log.Options{Component: log.ComponentSock})
 	socketSrv := socksrv.New(socksrv.Options{
-		SocketPath: opts.Layout.SocketFile,
-		API:        apiSrv,
-		Manager:    manager,
-		MCPs:       mcpReg,
-		Skills:     skillMgr,
-		LogStream:  logStream,
-		Logger:     sockLog,
+		SocketPath:    opts.Layout.SocketFile,
+		API:           apiSrv,
+		Manager:       manager,
+		MCPs:          mcpReg,
+		Skills:        skillMgr,
+		LogStream:     logStream,
+		ContainerLogs: containerLogStream,
+		Logger:        sockLog,
 	})
 	if err := socketSrv.Start(); err != nil {
 		return fmt.Errorf("cli socket: %w", err)

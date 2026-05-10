@@ -3,6 +3,7 @@ package cm
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -102,6 +103,39 @@ func (d *dockerSDK) Info(ctx context.Context) (Info, error) {
 		return Info{OK: false, Error: err.Error()}, nil
 	}
 	return Info{OK: true, Version: info.ServerVersion}, nil
+}
+
+func (d *dockerSDK) ContainerList(ctx context.Context, labelKey, labelValue string) ([]ContainerRef, error) {
+	args := filters.NewArgs()
+	if labelKey != "" {
+		if labelValue != "" {
+			args.Add("label", labelKey+"="+labelValue)
+		} else {
+			args.Add("label", labelKey)
+		}
+	}
+	list, err := d.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ContainerRef, 0, len(list))
+	for _, c := range list {
+		name := ""
+		if len(c.Names) > 0 {
+			name = c.Names[0]
+		}
+		out = append(out, ContainerRef{ID: c.ID, Name: name, Labels: c.Labels, State: c.State})
+	}
+	return out, nil
+}
+
+func (d *dockerSDK) ContainerLogs(ctx context.Context, id string, opts LogsOptions) (io.ReadCloser, error) {
+	return d.cli.ContainerLogs(ctx, id, container.LogsOptions{
+		ShowStdout: opts.Stdout || (!opts.Stdout && !opts.Stderr),
+		ShowStderr: opts.Stderr || (!opts.Stdout && !opts.Stderr),
+		Follow:     opts.Follow,
+		Tail:       opts.Tail,
+	})
 }
 
 func (d *dockerSDK) NetworkCreate(ctx context.Context, req NetworkCreateRequest) (NetworkRef, error) {

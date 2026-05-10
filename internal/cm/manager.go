@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -18,6 +19,8 @@ type Manager interface {
 	Remove(ctx context.Context, id string, force bool) error
 	Inspect(ctx context.Context, id string) (Status, error)
 	DockerInfo(ctx context.Context) (Info, error)
+	ContainerList(ctx context.Context, labelKey, labelValue string) ([]ContainerRef, error)
+	Logs(ctx context.Context, containerID string, follow bool) (io.ReadCloser, error)
 	NetworkCreate(ctx context.Context, sessionID, name string) (NetworkRef, error)
 	NetworkRemove(ctx context.Context, networkID string) error
 	NetworkList(ctx context.Context, labelKey, labelValue string) ([]NetworkRef, error)
@@ -52,6 +55,8 @@ type DockerClient interface {
 	Remove(ctx context.Context, id string, force bool) error
 	Inspect(ctx context.Context, id string) (Status, error)
 	Info(ctx context.Context) (Info, error)
+	ContainerList(ctx context.Context, labelKey, labelValue string) ([]ContainerRef, error)
+	ContainerLogs(ctx context.Context, id string, opts LogsOptions) (io.ReadCloser, error)
 	NetworkCreate(ctx context.Context, req NetworkCreateRequest) (NetworkRef, error)
 	NetworkRemove(ctx context.Context, networkID string) error
 	NetworkList(ctx context.Context, labelKey, labelValue string) ([]NetworkRef, error)
@@ -106,6 +111,17 @@ func (m *managerImpl) DockerInfo(ctx context.Context) (Info, error) {
 		return Info{OK: false, Error: err.Error()}, nil
 	}
 	return info, nil
+}
+
+func (m *managerImpl) ContainerList(ctx context.Context, labelKey, labelValue string) ([]ContainerRef, error) {
+	return m.docker.ContainerList(ctx, labelKey, labelValue)
+}
+
+func (m *managerImpl) Logs(ctx context.Context, containerID string, follow bool) (io.ReadCloser, error) {
+	if containerID == "" {
+		return nil, errors.New("logs: container id required")
+	}
+	return m.docker.ContainerLogs(ctx, containerID, LogsOptions{Follow: follow, Stdout: true, Stderr: true})
 }
 
 func (m *managerImpl) NetworkCreate(ctx context.Context, sessionID, name string) (NetworkRef, error) {
