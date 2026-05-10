@@ -16,6 +16,11 @@ func runInterrupt(_ context.Context, env *Env, args []string) int {
 	clear := fs.Bool("clear-queue", false, "drop any messages queued behind the cancelled turn")
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl interrupt <session> [--clear-queue]")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Cancels the in-flight turn for a session. The session itself stays running.")
+		fmt.Fprintln(env.Stderr, "If --clear-queue is set, any messages queued behind the cancelled turn are dropped.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

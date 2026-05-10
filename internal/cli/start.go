@@ -35,10 +35,17 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 	fs.Float64Var(&cpuLimit, "cpu-limit", 0, "container CPU limit in cores (0 = config default)")
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl start [--name NAME] [--mcps a,b] [--no-mcp x] [--repo URL ...] [--model MODEL] [--mem-limit N] [--cpu-limit N]")
-		fs.PrintDefaults()
 		fmt.Fprintln(env.Stderr, "")
-		fmt.Fprintln(env.Stderr, "Creates a session, attaches to its event stream, and renders messages live.")
-		fmt.Fprintln(env.Stderr, "Type a message + Enter to send. Ctrl-D / Ctrl-C detaches.")
+		fmt.Fprintln(env.Stderr, "Creates a new session, attaches to its event stream, and renders messages live.")
+		fmt.Fprintln(env.Stderr, "Type a message + Enter to send. Ctrl-D / Ctrl-C detaches; the session keeps running.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Examples:")
+		fmt.Fprintln(env.Stderr, "  agentctl start --repo https://github.com/me/repo.git")
+		fmt.Fprintln(env.Stderr, "  agentctl start --name auth-refactor --mcps github,internal-jira")
+		fmt.Fprintln(env.Stderr, "  agentctl start --no-mcp github --model claude-opus-4-7")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
+		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage

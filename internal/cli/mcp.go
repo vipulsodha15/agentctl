@@ -44,11 +44,14 @@ func runMCP(ctx context.Context, env *Env, args []string) int {
 func mcpUsage(env *Env) {
 	fmt.Fprintln(env.Stderr, "Usage: agentctl mcp <subcommand> [flags]")
 	fmt.Fprintln(env.Stderr, "")
+	fmt.Fprintln(env.Stderr, "Manage the MCP registry. Entries are stored in agentd.db; sessions read")
+	fmt.Fprintln(env.Stderr, "default-enabled rows at start, or the explicit --mcps list passed to start.")
+	fmt.Fprintln(env.Stderr, "")
 	fmt.Fprintln(env.Stderr, "Subcommands:")
-	fmt.Fprintln(env.Stderr, "  list                   List MCP registry entries.")
-	fmt.Fprintln(env.Stderr, "  add <name>             Add a new MCP entry.")
-	fmt.Fprintln(env.Stderr, "  update <name>          Update fields of an MCP entry.")
-	fmt.Fprintln(env.Stderr, "  remove <name>          Remove an MCP entry.")
+	fmt.Fprintln(env.Stderr, "  list                       List MCP registry entries (--json for machine-readable).")
+	fmt.Fprintln(env.Stderr, "  add <name>                 Add a new MCP entry.")
+	fmt.Fprintln(env.Stderr, "  update <name>              Update fields of an MCP entry.")
+	fmt.Fprintln(env.Stderr, "  remove <name>              Remove an MCP entry.")
 	fmt.Fprintln(env.Stderr, "  set-default <name> on|off  Toggle default-enabled.")
 }
 
@@ -108,6 +111,16 @@ func runMCPAdd(_ context.Context, env *Env, args []string) int {
 	description := fs.String("description", "", "free-text description")
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp add <name> --url <url> [--transport http|sse] [--kind none|github_pat] [--auth-config <json>] [--default-enabled] [--description <s>]")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Adds an MCP server entry to the registry. Sessions enable it via")
+		fmt.Fprintln(env.Stderr, "`agentctl start --mcps <name>` or by setting --default-enabled.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Examples:")
+		fmt.Fprintln(env.Stderr, "  agentctl mcp add github --url https://api.githubcopilot.com/mcp/ \\")
+		fmt.Fprintln(env.Stderr, "    --transport http --kind github_pat --default-enabled")
+		fmt.Fprintln(env.Stderr, "  agentctl mcp add internal-jira --url http://10.0.0.5/mcp/ --transport sse")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

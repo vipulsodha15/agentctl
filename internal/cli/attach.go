@@ -14,10 +14,17 @@ func runAttach(ctx context.Context, env *Env, args []string) int {
 	fs.SetOutput(env.Stderr)
 	send := fs.Bool("send", false, "read messages from stdin while attached")
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: agentctl attach <session>")
+		fmt.Fprintln(env.Stderr, "Usage: agentctl attach <session> [--send]")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Subscribes to a session's event stream. The first frame is always a")
-		fmt.Fprintln(env.Stderr, "session.snapshot; subsequent frames are live events.")
+		fmt.Fprintln(env.Stderr, "session.snapshot (full conversation + state); subsequent frames are live events.")
+		fmt.Fprintln(env.Stderr, "Ctrl-D / Ctrl-C detaches without affecting the session.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Examples:")
+		fmt.Fprintln(env.Stderr, "  agentctl attach sess_01JFZ123ABC")
+		fmt.Fprintln(env.Stderr, "  agentctl attach sess_01JFZ123ABC --send   # also forward stdin as messages")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

@@ -20,6 +20,12 @@ func runLs(_ context.Context, env *Env, args []string) int {
 	asJSON := fs.Bool("json", false, "emit JSON instead of a table")
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl ls [--verbose] [--json]")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Lists sessions known to agentd, ordered by last activity.")
+		fmt.Fprintln(env.Stderr, "Default columns: ID, NAME, STATUS, LAST ACTIVITY, IMAGE_ID, COST.")
+		fmt.Fprintln(env.Stderr, "--verbose adds: IN_FLIGHT, QUEUE, MEM, CPU.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

@@ -59,6 +59,13 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	skipDocker := fs.Bool("skip-docker-check", false, "(test-only) skip the docker info reachability check")
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl init [flags]")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "First-time setup: verifies Docker, builds the session base image,")
+		fmt.Fprintln(env.Stderr, "prompts for ANTHROPIC_API_KEY and GITHUB_PAT, ensures perms on")
+		fmt.Fprintln(env.Stderr, "~/.config/agentctl, seeds the MCP registry, installs the user service,")
+		fmt.Fprintln(env.Stderr, "and waits for /healthz to come up. Idempotent: re-run to repair drift.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

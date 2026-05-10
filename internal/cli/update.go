@@ -27,6 +27,17 @@ func runUpdate(ctx context.Context, env *Env, args []string) int {
 	yes := fs.Bool("yes", false, "do not prompt for confirmation")
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl update [--no-cache] [--report] [--rollback] [--restart-stopped] [--yes]")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Re-runs `docker build` against the local build context, repins config.toml")
+		fmt.Fprintln(env.Stderr, "[image].pinned_id, and (optionally) restarts stopped sessions onto the new id.")
+		fmt.Fprintln(env.Stderr, "Running sessions keep their existing image until they are restarted.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Examples:")
+		fmt.Fprintln(env.Stderr, "  agentctl update --report             # show staleness without rebuilding")
+		fmt.Fprintln(env.Stderr, "  agentctl update --no-cache --yes     # full rebuild, no prompts")
+		fmt.Fprintln(env.Stderr, "  agentctl update --rollback           # swap pinned <-> previous image id")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

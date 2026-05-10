@@ -9,7 +9,17 @@ import (
 	"github.com/agentctl/agentctl/internal/ui"
 )
 
-func runUI(_ context.Context, env *Env, _ []string) int {
+func runUI(_ context.Context, env *Env, args []string) int {
+	for _, a := range args {
+		if a == "--help" || a == "-h" || a == "help" {
+			fmt.Fprintln(env.Stderr, "Usage: agentctl ui")
+			fmt.Fprintln(env.Stderr, "")
+			fmt.Fprintln(env.Stderr, "Opens the local Web UI in the default browser. The URL includes the")
+			fmt.Fprintln(env.Stderr, "agentd web bearer token in the URL fragment so the SPA can authenticate")
+			fmt.Fprintln(env.Stderr, "without exposing the token to the network.")
+			return ExitOK
+		}
+	}
 	cfg, err := config.Load(env.Layout.ConfigFile)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "ui: %v\n", err)

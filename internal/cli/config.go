@@ -8,9 +8,12 @@ import (
 )
 
 func runConfig(_ context.Context, env *Env, args []string) int {
+	if len(args) >= 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		printConfigHelp(env)
+		return ExitOK
+	}
 	if len(args) < 2 {
-		fmt.Fprintln(env.Stderr, "Usage: agentctl config get <key>")
-		fmt.Fprintln(env.Stderr, "       agentctl config set <key> <value>")
+		printConfigHelp(env)
 		return ExitUsage
 	}
 	cfg, err := config.Load(env.Layout.ConfigFile)
@@ -46,4 +49,24 @@ func runConfig(_ context.Context, env *Env, args []string) int {
 	}
 	fmt.Fprintf(env.Stderr, "config: unknown subcommand %q\n", args[0])
 	return ExitUsage
+}
+
+func printConfigHelp(env *Env) {
+	fmt.Fprintln(env.Stderr, "Usage: agentctl config get <key>")
+	fmt.Fprintln(env.Stderr, "       agentctl config set <key> <value>")
+	fmt.Fprintln(env.Stderr, "")
+	fmt.Fprintln(env.Stderr, "Reads or writes a single key in ~/.config/agentctl/config.toml.")
+	fmt.Fprintln(env.Stderr, "Known keys:")
+	fmt.Fprintln(env.Stderr, "  agentd.web_addr            web server bind addr (default 127.0.0.1:7777)")
+	fmt.Fprintln(env.Stderr, "  agentd.log_level           debug|info|warn|error (SIGHUP to apply)")
+	fmt.Fprintln(env.Stderr, "  session.idle_timeout       Go duration (e.g. 15m)")
+	fmt.Fprintln(env.Stderr, "  session.max_idle           Go duration (e.g. 24h)")
+	fmt.Fprintln(env.Stderr, "  session.mem_limit          memory cap (e.g. 4GiB)")
+	fmt.Fprintln(env.Stderr, "  session.cpu_limit          decimal cores (e.g. 2.0)")
+	fmt.Fprintln(env.Stderr, "  session.queue_policy       queue|reject")
+	fmt.Fprintln(env.Stderr, "  image.local_tag            local docker tag")
+	fmt.Fprintln(env.Stderr, "  image.build_context_path   path to docker build context")
+	fmt.Fprintln(env.Stderr, "  image.pinned_id            sha256 id of the pinned image (set by init/update)")
+	fmt.Fprintln(env.Stderr, "  image.previous_id          sha256 id of the previous image (for --rollback)")
+	fmt.Fprintln(env.Stderr, "  model.default              default model name (e.g. claude-sonnet-4-6)")
 }
