@@ -87,6 +87,7 @@ type Options struct {
 	Containers      ContainerManager
 	Control         ControlServer
 	MCPs            mcp.Registry
+	Skills          SkillsComposer
 	Logger          *slog.Logger
 	Now             func() time.Time
 	DefaultModel    string

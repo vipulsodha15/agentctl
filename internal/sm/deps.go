@@ -23,15 +23,32 @@ const (
 )
 
 type ContainerSpec struct {
-	SessionID string
-	ImageID   string
-	Name      string
-	Labels    map[string]string
-	EnvFile   string
-	Mounts    []ContainerMount
-	MemBytes  int64
-	CPUs      float64
-	NetworkID string
+	SessionID      string
+	ImageID        string
+	Name           string
+	Labels         map[string]string
+	EnvFile        string
+	Mounts         []ContainerMount
+	MemBytes       int64
+	CPUs           float64
+	NetworkID      string
+	ReadOnlyRootFS bool
+	CapDrop        []string
+	SecurityOpts   []string
+	PidsLimit      int64
+	Tmpfs          map[string]string
+	MemorySwap     int64
+}
+
+type SkillsComposer interface {
+	Compose(dest string) (SkillsComposeResult, error)
+}
+
+type SkillsComposeResult struct {
+	Path       string
+	Hash       string
+	Skills     []string
+	Collisions []string
 }
 
 type ContainerMount struct {

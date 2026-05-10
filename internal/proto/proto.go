@@ -222,6 +222,7 @@ const (
 	EventQueueDepth        = "queue.depth"
 	EventRepoChanged       = "repo.changed"
 	EventSkillsChanged     = "skills.changed"
+	EventSkillCollision    = "skill.collision"
 	EventRuntimeThrottled  = "runtime.throttled"
 	EventLogLine           = "log.line"
 	EventMCPUnreachable    = "mcp.unreachable"
@@ -310,6 +311,11 @@ type SessionStoppedData struct {
 
 type LogLineData struct {
 	Raw string `json:"raw"`
+}
+
+type SkillCollisionData struct {
+	Name      string `json:"name"`
+	Overrides string `json:"overrides"`
 }
 
 type MCPEntry struct {

@@ -91,6 +91,7 @@ type Manager interface {
 	ImportDirectory(rootDir string, opts ImportOptions) ([]string, []SkippedImport, error)
 	Show(name string) (InstalledSkill, error)
 	Scaffold(name string) (string, error)
+	Compose(dest string) (ComposeResult, error)
 }
 
 type Options struct {
