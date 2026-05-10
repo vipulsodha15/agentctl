@@ -14,20 +14,30 @@ import (
 
 	"github.com/agentctl/agentctl/internal/api"
 	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/sm"
 )
+
+type SessionLogStreamer interface {
+	Stream(ctx context.Context, sessionID string, follow bool, send func(line []byte) error) error
+}
 
 type Server struct {
 	socketPath string
 	apiSrv     *api.Server
+	manager    sm.Manager
+	logStream  SessionLogStreamer
 	logger     *slog.Logger
 	listener   net.Listener
 	wg         sync.WaitGroup
 	closing    chan struct{}
+	writeMu    sync.Mutex
 }
 
 type Options struct {
 	SocketPath string
 	API        *api.Server
+	Manager    sm.Manager
+	LogStream  SessionLogStreamer
 	Logger     *slog.Logger
 }
 
@@ -35,6 +45,8 @@ func New(opts Options) *Server {
 	return &Server{
 		socketPath: opts.SocketPath,
 		apiSrv:     opts.API,
+		manager:    opts.Manager,
+		logStream:  opts.LogStream,
 		logger:     opts.Logger,
 		closing:    make(chan struct{}),
 	}
@@ -96,9 +108,21 @@ func (s *Server) acceptLoop() {
 	}
 }
 
+type connWriter struct {
+	conn net.Conn
+	mu   sync.Mutex
+}
+
+func (w *connWriter) write(payload []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return WriteFrame(w.conn, payload)
+}
+
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.wg.Done()
 	defer func() { _ = conn.Close() }()
+	cw := &connWriter{conn: conn}
 	for {
 		payload, err := ReadFrame(conn)
 		if err != nil {
@@ -109,47 +133,253 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		var frame proto.Frame
 		if err := json.Unmarshal(payload, &frame); err != nil {
-			s.writeError(conn, "", proto.ErrBadRequest, "invalid frame: "+err.Error())
+			s.writeError(cw, "", proto.ErrBadRequest, "invalid frame: "+err.Error())
 			continue
 		}
-		s.dispatch(conn, frame)
+		s.dispatch(cw, frame)
 	}
 }
 
-func (s *Server) dispatch(conn net.Conn, frame proto.Frame) {
+func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 	if frame.Kind != proto.KindRequest {
-		s.writeError(conn, frame.ID, proto.ErrBadRequest, fmt.Sprintf("unexpected kind %q", frame.Kind))
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, fmt.Sprintf("unexpected kind %q", frame.Kind))
 		return
 	}
 	switch frame.Op {
 	case proto.OpHealth:
 		resp := s.apiSrv.Health(context.Background())
-		s.writeResponse(conn, frame.ID, resp)
+		s.writeResponse(cw, frame.ID, resp)
+	case proto.OpCreateSession:
+		s.handleCreateSession(cw, frame)
+	case proto.OpListSessions:
+		s.handleListSessions(cw, frame)
+	case proto.OpGetSession:
+		s.handleGetSession(cw, frame)
+	case proto.OpSendMessage:
+		s.handleSendMessage(cw, frame)
+	case proto.OpInterrupt:
+		s.handleInterrupt(cw, frame)
+	case proto.OpTerminateSession:
+		s.handleTerminate(cw, frame)
+	case proto.OpAttachStream:
+		go s.handleAttachStream(cw, frame)
+	case proto.OpGetLogs:
+		go s.handleGetLogs(cw, frame)
 	default:
-		s.writeError(conn, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
 	}
 }
 
-func (s *Server) writeResponse(conn net.Conn, id string, data any) {
+func (s *Server) requireManager(cw *connWriter, id string) bool {
+	if s.manager == nil {
+		s.writeError(cw, id, proto.ErrUnavailable, "session manager not available")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleCreateSession(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.CreateSessionRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	res, err := s.manager.Create(context.Background(), sm.CreateRequest{
+		Name:          req.Name,
+		MCPs:          req.MCPs,
+		ExcludeMCPs:   req.ExcludeMCPs,
+		Repos:         req.Repos,
+		Model:         req.Model,
+		MemLimitBytes: req.MemLimitBytes,
+		CPULimitCores: req.CPULimitCores,
+	})
+	if err != nil {
+		s.writeError(cw, frame.ID, proto.ErrInternal, err.Error())
+		return
+	}
+	resp := proto.CreateSessionResponse{
+		SessionID: res.SessionID,
+		Status:    res.Status,
+		Attach:    proto.AttachPointer{StreamOp: proto.OpAttachStream},
+		Session:   res.Summary,
+	}
+	s.writeResponse(cw, frame.ID, resp)
+}
+
+func (s *Server) handleListSessions(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	list, err := s.manager.List(context.Background())
+	if err != nil {
+		s.writeError(cw, frame.ID, proto.ErrInternal, err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.ListSessionsResponse{Sessions: list})
+}
+
+func (s *Server) handleGetSession(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.GetSessionRequest
+	_ = json.Unmarshal(frame.Data, &req)
+	d, err := s.manager.Get(context.Background(), req.SessionID)
+	if err != nil {
+		s.writeError(cw, frame.ID, proto.ErrNotFound, err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.GetSessionResponse{Session: d})
+}
+
+func (s *Server) handleSendMessage(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.SendMessageRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	res, err := s.manager.Send(context.Background(), sm.SendRequest{
+		SessionID: req.SessionID, Content: req.Content, ClientID: req.ClientID, IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.SendMessageResponse{
+		MessageID: res.MessageID, Queued: res.Queued, QueueDepth: res.QueueDepth, Idempotent: res.Idempotent,
+	})
+}
+
+func (s *Server) handleInterrupt(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.InterruptRequest
+	_ = json.Unmarshal(frame.Data, &req)
+	res, err := s.manager.Interrupt(context.Background(), req.SessionID, req.ClearQueue)
+	if err != nil {
+		if errors.Is(err, sm.ErrNoInFlight) {
+			s.writeError(cw, frame.ID, proto.ErrPreconditionFailed, err.Error())
+			return
+		}
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.InterruptResponse{
+		Interrupted: res.Interrupted, ClearedQueueDepth: res.ClearedQueueDepth,
+	})
+}
+
+func (s *Server) handleTerminate(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.TerminateSessionRequest
+	_ = json.Unmarshal(frame.Data, &req)
+	if err := s.manager.Terminate(context.Background(), req.SessionID); err != nil {
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.TerminateSessionResponse{SessionID: req.SessionID, Status: "terminated"})
+}
+
+func (s *Server) handleAttachStream(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.AttachStreamRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	stream, err := s.manager.Attach(context.Background(), req.SessionID)
+	if err != nil {
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	defer stream.Close()
+	for {
+		ev, ok, reason := stream.Recv()
+		if !ok {
+			s.writeStreamEnd(cw, frame.ID, reason)
+			return
+		}
+		body, _ := json.Marshal(ev)
+		out, _ := json.Marshal(proto.Frame{V: proto.ProtocolVersion, ID: frame.ID, Kind: proto.KindStreamChunk, Data: body})
+		if err := cw.write(out); err != nil {
+			return
+		}
+	}
+}
+
+func (s *Server) handleGetLogs(cw *connWriter, frame proto.Frame) {
+	if s.logStream == nil {
+		s.writeError(cw, frame.ID, proto.ErrUnavailable, "log streaming not configured")
+		return
+	}
+	var req proto.GetLogsRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	send := func(line []byte) error {
+		body, _ := json.Marshal(proto.LogLineData{Raw: string(line)})
+		out, _ := json.Marshal(proto.Frame{V: proto.ProtocolVersion, ID: frame.ID, Kind: proto.KindStreamChunk, Data: body})
+		return cw.write(out)
+	}
+	if err := s.logStream.Stream(context.Background(), req.SessionID, req.Follow, send); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrInternal, err.Error())
+		return
+	}
+	s.writeStreamEnd(cw, frame.ID, "eof")
+}
+
+func (s *Server) writeResponse(cw *connWriter, id string, data any) {
 	body, err := json.Marshal(data)
 	if err != nil {
-		s.writeError(conn, id, proto.ErrInternal, err.Error())
+		s.writeError(cw, id, proto.ErrInternal, err.Error())
 		return
 	}
 	frame := proto.Frame{V: proto.ProtocolVersion, ID: id, Kind: proto.KindResponse, Data: body}
 	out, err := json.Marshal(frame)
 	if err != nil {
-		s.writeError(conn, id, proto.ErrInternal, err.Error())
+		s.writeError(cw, id, proto.ErrInternal, err.Error())
 		return
 	}
-	if err := WriteFrame(conn, out); err != nil {
+	if err := cw.write(out); err != nil {
 		s.logger.Debug("sock.write_failed", slog.String("error", err.Error()))
 	}
 }
 
-func (s *Server) writeError(conn net.Conn, id, code, msg string) {
+func (s *Server) writeError(cw *connWriter, id, code, msg string) {
 	body, _ := json.Marshal(proto.ErrorData{Code: code, Message: msg})
 	frame := proto.Frame{V: proto.ProtocolVersion, ID: id, Kind: proto.KindError, Data: body}
 	out, _ := json.Marshal(frame)
-	_ = WriteFrame(conn, out)
+	_ = cw.write(out)
+}
+
+func (s *Server) writeStreamEnd(cw *connWriter, id, reason string) {
+	body, _ := json.Marshal(map[string]string{"reason": reason})
+	frame := proto.Frame{V: proto.ProtocolVersion, ID: id, Kind: proto.KindStreamEnd, Data: body}
+	out, _ := json.Marshal(frame)
+	_ = cw.write(out)
+}
+
+func mapSMError(err error) string {
+	switch {
+	case errors.Is(err, sm.ErrSessionNotFound):
+		return proto.ErrNotFound
+	case errors.Is(err, sm.ErrNoInFlight):
+		return proto.ErrPreconditionFailed
+	case errors.Is(err, sm.ErrSnapshotFailed):
+		return proto.ErrSnapshotFailed
+	default:
+		return proto.ErrInternal
+	}
 }

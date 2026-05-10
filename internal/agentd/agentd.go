@@ -10,9 +10,11 @@ import (
 
 	"github.com/agentctl/agentctl/internal/api"
 	"github.com/agentctl/agentctl/internal/config"
+	"github.com/agentctl/agentctl/internal/fan"
 	"github.com/agentctl/agentctl/internal/log"
 	"github.com/agentctl/agentctl/internal/paths"
 	"github.com/agentctl/agentctl/internal/secrets"
+	"github.com/agentctl/agentctl/internal/sm"
 	"github.com/agentctl/agentctl/internal/socksrv"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/version"
@@ -63,10 +65,29 @@ func Run(ctx context.Context, opts Options) error {
 	apiSrv := api.New(api.Options{Docker: dockerProbe})
 	apiSrv.SetReconciling(false)
 
+	hub := fan.NewHub()
+	smLog := log.New(log.Options{Component: log.ComponentSessions})
+	manager := sm.New(sm.Options{
+		Store:        st,
+		SessionsDir:  opts.Layout.SessionsDir,
+		Hub:          hub,
+		Logger:       smLog,
+		DefaultModel: cfg.Model.Default,
+		// TODO(M2-A integration): wire cm.NewManager() and cc.NewServer() once
+		// M2-A's branch is rebased in. Until then sessions can be created and
+		// drive the actor logic but no container is started; control frames
+		// arrive via direct InjectControlConn in tests.
+	})
+	defer func() { _ = manager.Shutdown(ctx) }()
+
+	logStream := &log.SessionLogStreamer{SessionsDir: opts.Layout.SessionsDir}
+
 	sockLog := log.New(log.Options{Component: log.ComponentSock})
 	socketSrv := socksrv.New(socksrv.Options{
 		SocketPath: opts.Layout.SocketFile,
 		API:        apiSrv,
+		Manager:    manager,
+		LogStream:  logStream,
 		Logger:     sockLog,
 	})
 	if err := socketSrv.Start(); err != nil {
