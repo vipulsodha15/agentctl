@@ -300,7 +300,9 @@ class Shim:
             self._stopping.wait(HEARTBEAT_SECONDS)
 
     def _emit_event(self, event_kind: str, payload: dict) -> None:
-        self._safe_send(control.KIND_EVENT, {"kind": event_kind, **payload})
+        # agentd's RuntimeEventData expects {"kind": ..., "data": {...}} — nest
+        # the payload, don't flatten it into the parent envelope.
+        self._safe_send(control.KIND_EVENT, {"kind": event_kind, "data": payload})
 
     def _emit_session_id(self, sid: str) -> None:
         self._sdk_session_id = sid

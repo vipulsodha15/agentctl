@@ -284,7 +284,11 @@ def translate_message(message: Any, *, turn_id: str) -> list[tuple[str, dict]]:
 
 def _usage_dict(usage: Any) -> dict:
     def _g(name: str) -> int:
-        v = getattr(usage, name, 0)
+        # claude-agent-sdk emits usage as a plain dict (not a typed object).
+        if isinstance(usage, dict):
+            v = usage.get(name, 0)
+        else:
+            v = getattr(usage, name, 0)
         if v is None:
             return 0
         try:

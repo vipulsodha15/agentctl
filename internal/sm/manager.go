@@ -467,7 +467,10 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		CapDrop:        []string{"ALL"},
 		SecurityOpts:   []string{"no-new-privileges"},
 		PidsLimit:      512,
-		Tmpfs:          map[string]string{"/home/agent": "rw,size=64m,mode=0700,uid=1000,gid=1000"},
+		Tmpfs: map[string]string{
+			"/home/agent": "rw,size=64m,mode=0700,uid=1000,gid=1000",
+			"/tmp":        "rw,size=128m,mode=1777",
+		},
 	}
 
 	handle, err := m.opts.Containers.Create(ctx, spec)
