@@ -18,6 +18,7 @@ const darwinPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
   <key>ProgramArguments</key>
   <array>
     <string>{{BIN}}</string>
+    <string>agentd</string>
   </array>
   <key>RunAtLoad</key>         <true/>
   <key>KeepAlive</key>

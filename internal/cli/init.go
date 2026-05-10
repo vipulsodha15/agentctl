@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -182,9 +183,13 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 		go func() { fgErr <- agentd.Run(fgCtx, agentd.Options{Layout: layout}) }()
 	}
 
-	if err := waitForHealth(ctx, layout, cfg.Agentd.WebAddr, 10*time.Second); err != nil {
+	if err := waitForHealth(ctx, layout, cfg.Agentd.WebAddr, 30*time.Second); err != nil {
 		if fgCancel != nil {
 			fgCancel()
+		}
+		hint := healthHint(foreground, fgErr)
+		if hint != "" {
+			err = fmt.Errorf("%w (%s)", err, hint)
 		}
 		return wrapInit(ExitEnvironment, err)
 	}
@@ -472,6 +477,26 @@ func importClaudeSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error 
 		_ = recordClaudeImportedSkills(layout, imported, time.Now())
 	}
 	return nil
+}
+
+func healthHint(foreground bool, fgErr chan error) string {
+	if foreground && fgErr != nil {
+		select {
+		case err := <-fgErr:
+			if err != nil {
+				return "agentd: " + err.Error()
+			}
+		default:
+		}
+		return "see stderr above for agentd logs"
+	}
+	switch runtime.GOOS {
+	case "linux":
+		return "check `systemctl --user status agentd` and `journalctl --user -u agentd`"
+	case "darwin":
+		return "check ~/Library/Logs/agentctl/agentd.log"
+	}
+	return ""
 }
 
 func waitForHealth(ctx context.Context, layout paths.Layout, webAddr string, total time.Duration) error {

@@ -19,7 +19,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart={{BIN}}
+ExecStart={{BIN}} agentd
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=60

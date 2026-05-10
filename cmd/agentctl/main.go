@@ -19,14 +19,24 @@ func main() {
 	defer stop()
 
 	progName := filepath.Base(os.Args[0])
-	if isDaemonName(progName) {
-		if hasHelpFlag(os.Args[1:]) {
+	args := os.Args[1:]
+	if isDaemonName(progName) || isDaemonArg(args) {
+		if hasHelpFlag(args) {
 			printDaemonHelp()
 			os.Exit(0)
 		}
 		os.Exit(daemonMain(ctx))
 	}
-	os.Exit(cli.Dispatch(ctx, os.Args[1:]))
+	os.Exit(cli.Dispatch(ctx, args))
+}
+
+// isDaemonArg lets the service unit launch the daemon as `agentctl agentd`
+// regardless of the binary's path. The "agentd"-named symlink isn't reliable
+// because os.Executable() (used to write the unit) resolves symlinks back to
+// the agentctl binary, so the unit ends up exec'ing the binary by its real
+// name and main() takes the CLI branch instead of daemonMain.
+func isDaemonArg(args []string) bool {
+	return len(args) > 0 && args[0] == "agentd"
 }
 
 func hasHelpFlag(args []string) bool {
