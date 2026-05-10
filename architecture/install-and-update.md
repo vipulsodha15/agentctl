@@ -123,9 +123,12 @@ After `install.sh` runs successfully, the developer's machine has:
 
 - `${INSTALL_DIR}/agentctl` — the binary.
 - `~/.local/share/agentctl/image/` — the Docker build context
-  (`Dockerfile`, shim source, entrypoint, config templates) used by
-  `agentctl init` and `agentctl update` to build the session base
-  image locally. See container-and-image.md §1.2 and ADR 0014.
+  (`Dockerfile`, the Python shim source under `shim/`, entrypoint,
+  config templates) used by `agentctl init` and `agentctl update` to
+  build the session base image locally. The shim drives
+  `claude-agent-sdk` (Python) directly inside the container; there is
+  no separate `claude-code` CLI subprocess. See
+  container-and-image.md §1.2 and ADR 0014.
 - `~/.local/share/agentctl/builtin-skills/` — the project's curated
   baseline skills, replaced atomically on every `install.sh` run.
   Read-only to `agentd`; the developer's `agentctl skill` CLI cannot
@@ -202,7 +205,7 @@ flowchart TD
    ~/.local/share/agentctl/image/`. Streams Docker's build output to
    the terminal (with a phase header so the developer sees progress on
    each layer). On a fresh machine this is ~3–10 minutes (debian +
-   apt + node + python + npm + go shim build); on a re-run with cache
+   apt + node + python + pip install of claude-agent-sdk + shim deps); on a re-run with cache
    it is seconds. On failure: exit 2 with the captured tail of the
    build log and a remediation pointer (`agentctl init --repair`).
 3. **Pin image ID.** `docker inspect agentctl/session-base:local
@@ -469,7 +472,7 @@ for scripting).
 | `docker.api` | `agentd` can list containers under its label. | "agentd lacks Docker access; check group membership." |
 | `image.present` | Pinned image ID exists locally. | "image missing; run `init --repair` to rebuild." |
 | `image.built` | Image was built from the current build context (i.e., the build context's content hash matches what produced the pinned ID). | "image is stale relative to build context; run `agentctl update`." |
-| `image.build_context` | Build context dir at `~/.local/share/agentctl/image/` exists and contains Dockerfile + shim source. | "build context missing; re-run `install.sh`." |
+| `image.build_context` | Build context dir at `~/.local/share/agentctl/image/` exists and contains Dockerfile + Python shim source under `shim/`. | "build context missing; re-run `install.sh`." |
 | `skills.builtin` | Built-in skills dir present, each manifest parses, no name collisions within layer. | Per-skill errors. |
 | `skills.custom` | Custom skills dir present, each manifest parses, lists skills that override built-ins. | Per-skill errors + override notice. |
 | `mcp.registry` | mcp_registry rows are well-formed. | Per-row errors. |

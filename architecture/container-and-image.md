@@ -30,8 +30,12 @@ in; they are bind-mounted at session start (§2.4, ADR 0014).
 ```
 ~/.local/share/agentctl/image/
 ├── Dockerfile
-├── shim/                       # Go source for the runtime shim
-│   └── ...
+├── shim/                       # Python source for the runtime shim
+│   ├── __main__.py             # entrypoint; wires control sock ↔ claude-agent-sdk
+│   ├── control.py              # NDJSON framing on the bind-mounted Unix socket
+│   ├── runtime.py              # claude_agent_sdk integration
+│   ├── repos.py                # --repo cloning + repo-bases.json
+│   └── requirements.txt        # claude-agent-sdk, watchdog, ...
 ├── entrypoint                  # /usr/local/bin/agentctl-entrypoint
 └── config-templates/           # /etc/agentctl/templates/*
 ```
@@ -50,14 +54,9 @@ The Dockerfile is split into layers from "rarely changes" to
 "frequently changes" so rebuilds reuse cache aggressively:
 
 ```dockerfile
-# ---- Stage A: build the runtime shim from Go source ----
-FROM golang:1.23-bookworm AS shim-build
-WORKDIR /src
-COPY shim/ /src
-RUN go build -trimpath -ldflags="-s -w" -o /out/agent-runtime-shim ./...
-RUN sha256sum /out/agent-runtime-shim | awk '{print $1}' > /out/agent-runtime-shim.sha256
+# Single-stage build. The shim is Python, so no compile step is needed;
+# we COPY the source and `pip install` its dependencies.
 
-# ---- Stage B: the final session base image ----
 # Layer 1 — base OS + system packages (rarely changes)
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -65,24 +64,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config \
       && rm -rf /var/lib/apt/lists/*
 
-# Layer 2 — language runtimes (occasional)
+# Layer 2 — language runtimes the AGENT will use for coding work (occasional).
+# The agent runtime itself is Python-based via claude-agent-sdk (Layer 3);
+# Node and Python here are dev tooling for whatever projects the agent
+# touches inside /work.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
     rm -rf /var/lib/apt/lists/*
 
-# Layer 3 — agent runtime + shim (per-release)
-ARG AGENT_RUNTIME_VERSION
-RUN npm install -g @anthropic-ai/claude-code@${AGENT_RUNTIME_VERSION}
-COPY --from=shim-build /out/agent-runtime-shim /usr/local/bin/
-COPY --from=shim-build /out/agent-runtime-shim.sha256 /usr/local/share/agentctl/
+# Layer 3 — agent runtime SDK (per-release)
+# We use the Python claude-agent-sdk: the shim drives a model session
+# in-process and streams typed events back to agentd over the control
+# sock. No subprocess of a separate "claude-code" CLI; no parsing of
+# stdout. See architecture/agentd.md and ADR 0014.
+ARG CLAUDE_AGENT_SDK_VERSION
+RUN python3 -m venv /opt/agentctl/venv && \
+    /opt/agentctl/venv/bin/pip install --no-cache-dir \
+        "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
+        watchdog
+ENV PATH="/opt/agentctl/venv/bin:${PATH}"
 
-# Layer 4 — entrypoint and runtime config templates (per-release)
+# Layer 4 — runtime shim (Python source; per-release)
+COPY shim/ /opt/agentctl/shim/
+RUN /opt/agentctl/venv/bin/pip install --no-cache-dir -r /opt/agentctl/shim/requirements.txt
+
+# Layer 5 — entrypoint and runtime config templates (per-release)
 COPY entrypoint /usr/local/bin/agentctl-entrypoint
 COPY config-templates /etc/agentctl/templates/
 RUN useradd --create-home --uid 1000 --shell /bin/bash agent && \
     mkdir -p /work /skills /run/agentctl/control && \
-    chown -R agent:agent /work /skills /home/agent && \
+    chown -R agent:agent /work /skills /home/agent /opt/agentctl && \
     chmod 0755 /run/agentctl/control
 
 USER agent
@@ -95,13 +107,18 @@ Notes:
 - **No `COPY skills/` step.** `/skills` is created as an empty,
   agent-owned directory; it serves only as the bind-mount target for
   the per-session skills snapshot (§2.4).
-- The shim is compiled inside the build via stage A; the developer's
-  host does not need a Go toolchain.
-- `tini` as PID 1 ensures clean signal forwarding to the runtime;
-  without it, `docker stop`'s SIGTERM would be eaten by the shim's
-  child reaper.
-- Build args (`AGENT_RUNTIME_VERSION`) are pinned by the build context's
-  `Dockerfile`; the active value travels with the agentctl release.
+- **No Go build stage.** The shim is Python; no compile step. The
+  developer's host does not need a Go toolchain to build the image.
+- **`claude-agent-sdk` is the agent runtime in v1.** The shim drives
+  the SDK directly — no subprocess of a `claude-code` CLI, no
+  stdout parsing. Typed events from the SDK map cleanly to the
+  control-sock `runtime.event` frames defined in `api.md` §4.3.
+- `tini` as PID 1 ensures clean signal forwarding; without it,
+  `docker stop`'s SIGTERM would be eaten by the shim's child
+  reaper. The shim itself runs as `tini`'s child.
+- Build args (`CLAUDE_AGENT_SDK_VERSION`) are pinned by the build
+  context's `Dockerfile`; the active value travels with the agentctl
+  release.
 
 ### 1.4 What is **not** in the image
 
@@ -261,10 +278,9 @@ without inlining it in command output (R3 acceptance criterion).
 The image's `ENTRYPOINT` is `/usr/local/bin/agentctl-entrypoint`. It runs
 as `agent` (uid 1000) and:
 
-1. Reads `/run/agentctl/control/session.json` (bind-mounted? No — see
-   below; the shim reads `secrets.env` already exposed via env, plus a
-   `session.json` written into the control dir at create time, mode
-   `0640`).
+1. Reads `secrets.env` already exposed via `--env-file`, plus a
+   `session.json` written into the control dir at create time
+   (mode `0640`).
 2. For each repo in `repos`: `git clone <url> /work/<basename>`; record
    `git rev-parse HEAD` and current branch. Errors are captured but do
    not abort start; the shim emits `runtime.error{fatal:false}` and
@@ -276,37 +292,44 @@ as `agent` (uid 1000) and:
    headers). MCP entries whose `transport` or `kind` are not recognized
    by this image's runtime are dropped from the rendered config and
    reported as `mcp.skipped` events.
-5. Writes the runtime config file (`/home/agent/.config/agent/config.json`)
-   from the template `/etc/agentctl/templates/config.json.tmpl`,
-   emitting one config block per MCP keyed by transport (the runtime
-   accepts both Streamable HTTP and SSE entries).
-6. Starts the agent runtime as a child process:
+5. Hands control to the Python shim:
 
    ```bash
-   exec claude-code \
-       --print-mode stream \
-       --headless \
-       --dangerously-skip-permissions \
-       --model "${AGENTCTL_MODEL}" \
-       --config /home/agent/.config/agent/config.json
+   exec /opt/agentctl/venv/bin/python -m shim
    ```
 
-   (Flag names placeholders; the actual flags depend on the runtime
-   version the image pins. The constraint: permission prompting off and
-   the runtime emits structured stream events on stdout.)
+   (`tini` is PID 1 from the image ENTRYPOINT; the shim runs as
+   `tini`'s child via `exec`.) The shim is the long-running process
+   in the container for the rest of the session.
 
-7. Bridges runtime stdout → control sock as `runtime.event` frames.
-8. Listens for control-sock inbound: `agentd.message` writes a user
-   message to runtime stdin; `agentd.interrupt` sends SIGINT to the
-   runtime (the runtime cancels its model stream); `agentd.shutdown`
-   sends SIGTERM with a 30s grace, then SIGKILL.
-9. The shim watches `/work/<repo>/` (excluding `.git/objects`) and emits
-   throttled `repo.changed` events.
+6. Inside the shim (`shim/__main__.py`):
 
-If the runtime exits with a non-zero status, the shim emits
-`runtime.error{fatal:true, exit_code: N}` and exits with the same status.
-Docker reports the container as exited; `agentd` marks the session
-`stopped` (or `error` if exit was unclean).
+   - Configures `claude-agent-sdk` with `model=AGENTCTL_MODEL`,
+     `permission_mode=bypass` (R3 §15.1), the per-session MCP set,
+     `cwd=/work`, and the skills directory at `/skills/`.
+   - On each `agentd.message` frame received over the control sock,
+     drives an SDK session turn — typically by calling the SDK's
+     async query/stream interface — and translates each yielded SDK
+     event into the corresponding `runtime.event` frame:
+     - SDK assistant deltas → `runtime.event{kind="assistant.delta"}`
+     - Tool calls and results → `runtime.event{kind="tool.call|tool.result"}`
+     - Per-turn usage block → `runtime.event{kind="usage", model, input_tokens, output_tokens, ...}`
+     - End of turn → `runtime.event{kind="turn.end"}`
+   - Maintains the SDK's conversation history on the volume at
+     `/work/.history/` (the SDK's persistence target), so resume
+     after idle-stop reads that history back.
+
+7. Listens for control-sock inbound: `agentd.message` enqueues a turn
+   into the SDK; `agentd.interrupt` cancels the in-flight SDK stream
+   (the SDK exposes a cancel handle); `agentd.shutdown` initiates
+   graceful exit with a 30s grace, then SIGKILL.
+8. Watches `/work/<repo>/` (excluding `.git/objects`) via `watchdog`
+   and emits throttled `repo.changed` events on the control sock.
+
+If the shim exits with a non-zero status, agentd's read loop sees the
+control sock close. Docker reports the container as exited; `agentd`
+marks the session `stopped` (or `error` if exit was unclean per the
+shim's last `runtime.error` frame).
 
 ### 2.7 Working directory and user
 

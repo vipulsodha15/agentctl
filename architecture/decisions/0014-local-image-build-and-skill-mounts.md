@@ -105,11 +105,10 @@ Two tightly-coupled changes:
 ### Losses
 
 - **First `agentctl init` is slow.** A from-scratch Docker build
-  (debian-slim base + apt packages + Node + Python + npm install of
-  the agent runtime + Go compile of the shim) takes 3–10 minutes
-  depending on network. install.sh remains fast; init is the slow
-  step. We document this and stream Docker's build output so the
-  developer sees progress.
+  (debian-slim base + apt packages + Node + Python +
+  `pip install claude-agent-sdk`) takes 3–10 minutes depending on
+  network. install.sh remains fast; init is the slow step. We document
+  this and stream Docker's build output so the developer sees progress.
 - **No cryptographic signature on the image itself.** The image is
   a local artifact; we don't sign local builds. Trust derives from
   install.sh's verification of the inputs. A team that wants
