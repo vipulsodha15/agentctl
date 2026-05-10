@@ -23,7 +23,7 @@ func runDiff(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Streams the working-tree diff against the recorded base SHA per repo.")
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {

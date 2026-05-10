@@ -111,7 +111,7 @@ class Shim:
                 model=greet_data.get("model") or os.environ.get("AGENTCTL_MODEL", ""),
                 cwd="/work",
                 resume=self._sdk_session_id,
-                mcp_servers=greet_data.get("mcps") or {},
+                mcp_servers=_render_mcp_servers(greet_data.get("mcps")),
             ),
             emit_event=self._emit_event,
             emit_session_id=self._emit_session_id,
@@ -326,6 +326,34 @@ class Shim:
                 self._client.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _render_mcp_servers(mcps):
+    """Translate agentd.greet's MCP list into ClaudeAgentOptions.mcp_servers.
+
+    The wire format is a list of dicts with `name`, `url`, `transport`,
+    `kind`, optional `headers`. The SDK wants a dict keyed by name where
+    each value matches McpServerConfig (an SDK Union of Stdio/SSE/HTTP/SDK
+    server configs). Unknown transports are skipped.
+    """
+    if not mcps:
+        return {}
+    if isinstance(mcps, dict):
+        return mcps
+    out = {}
+    for m in mcps:
+        if not isinstance(m, dict):
+            continue
+        name = m.get("name")
+        transport = m.get("transport") or "http"
+        if not name or transport not in ("http", "sse"):
+            continue
+        cfg = {"type": transport, "url": m.get("url", "")}
+        headers = m.get("headers")
+        if isinstance(headers, dict) and headers:
+            cfg["headers"] = headers
+        out[name] = cfg
+    return out
 
 
 def main(argv: Optional[list[str]] = None) -> int:

@@ -131,3 +131,58 @@ func runHelp(_ context.Context, env *Env, _ []string) int {
 	fmt.Fprintln(env.Stdout, "Run `agentctl version` to print the build version.")
 	return ExitOK
 }
+
+// reorderArgs moves long/short flag tokens to the front of the slice so Go's
+// stdlib flag.Parse (which stops at the first positional) honors flags placed
+// after positional arguments. Knowledge-free heuristic:
+//
+//   - A token starting with "-" is treated as a flag.
+//   - "--flag=value" / "-f=v" is one token, kept together.
+//   - "--flag value" / "-f v" treats the next token as the flag's value
+//     unless `flag` is a bool — bools never consume the next token.
+//
+// Without a FlagSet to introspect we conservatively assume any flag whose
+// next token does not begin with "-" CONSUMES the next token. That matches
+// stdlib flag.Parse exactly when the arg looks like `--name value` and the
+// flag is non-bool. The two false positives this can produce are:
+//
+//  1. "--bool positional" → the positional is mistakenly attributed to the
+//     bool flag. Mitigated by writing bool flags as "--bool=true" or by
+//     placing positionals last (the historical convention).
+//  2. "--str -other" → "--str" gets no value; flag.Parse will then complain.
+//
+// Both are existing flag-package limitations; this helper just enables the
+// common "positional first, flags after" usage pattern that ALL other CLIs
+// support.
+func reorderArgs(args []string) []string {
+	flagsOnly := make([]string, 0, len(args))
+	positional := make([]string, 0, len(args))
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if len(a) > 1 && a[0] == '-' {
+			flagsOnly = append(flagsOnly, a)
+			if !containsRune(a, '=') && i+1 < len(args) && !startsWithDash(args[i+1]) {
+				flagsOnly = append(flagsOnly, args[i+1])
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		positional = append(positional, a)
+		i++
+	}
+	return append(flagsOnly, positional...)
+}
+
+func containsRune(s string, r rune) bool {
+	for _, c := range s {
+		if c == r {
+			return true
+		}
+	}
+	return false
+}
+
+func startsWithDash(s string) bool { return len(s) > 0 && s[0] == '-' }

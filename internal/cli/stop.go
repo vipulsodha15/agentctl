@@ -23,7 +23,7 @@ func runStop(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Removes the session container, its per-session bridge network, and marks the session terminated.")
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {

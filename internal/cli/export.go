@@ -27,7 +27,7 @@ func runExport(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "  agentctl export <session> --push <branch> [--repo NAME] [--message MSG]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {

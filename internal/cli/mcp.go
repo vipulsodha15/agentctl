@@ -72,7 +72,7 @@ func runMCPList(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp list [--json]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	c, code := dialAgentd(env)
@@ -123,7 +123,7 @@ func runMCPAdd(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {
@@ -167,7 +167,7 @@ func runMCPRemove(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp remove <name> [--force] [--yes]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {
@@ -210,7 +210,7 @@ func runMCPSetDefault(_ context.Context, env *Env, args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp set-default <name> on|off")
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 2 {
@@ -261,7 +261,7 @@ func runMCPUpdate(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp update <name> [--url ...] [--transport ...] [--kind ...] [--auth-config ...] [--description ...] [--default-enabled true|false]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {

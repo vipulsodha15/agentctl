@@ -41,7 +41,7 @@ func runDoctor(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 

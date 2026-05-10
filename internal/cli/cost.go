@@ -25,7 +25,7 @@ func runCost(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "  agentctl cost --since <range> --session <id>")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 

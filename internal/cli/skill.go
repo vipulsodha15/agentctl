@@ -69,7 +69,7 @@ func runSkillList(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl skill list [--builtin] [--custom] [--json]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	c, code := dialAgentd(env)
@@ -137,7 +137,7 @@ func runSkillAdd(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl skill add <path-or-tarball> [--force]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {
@@ -330,7 +330,7 @@ func runSkillImport(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl skill import [<source>] [--force] [--dry-run]")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	src := fs.Arg(0)

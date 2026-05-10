@@ -27,7 +27,7 @@ func runAttach(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
 	}
 	if fs.NArg() < 1 {
