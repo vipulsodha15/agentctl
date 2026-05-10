@@ -25,7 +25,9 @@ import threading
 import time
 from typing import Any, Optional
 
-from . import control, repos, runtime as rt
+import base64
+
+from . import control, git as gitops, repos, runtime as rt
 from .watcher import RepoWatcher
 
 
@@ -163,6 +165,12 @@ class Shim:
                 self._handle_interrupt(data)
             elif kind == control.KIND_SNAPSHOT_REQUEST:
                 self._handle_snapshot_request(data)
+            elif kind == control.KIND_DIFF_REQUEST:
+                self._handle_diff_request(data, fmt=data.get("format") or "unified", patch=False)
+            elif kind == control.KIND_EXPORT_PATCH_REQUEST:
+                self._handle_diff_request(data, fmt="unified", patch=True)
+            elif kind == control.KIND_EXPORT_PUSH_REQUEST:
+                self._handle_export_push_request(data)
             elif kind == control.KIND_SHUTDOWN:
                 self._stopping.set()
                 break
@@ -192,6 +200,98 @@ class Shim:
         self._safe_send(control.KIND_SNAPSHOT, {
             "request_id": request_id,
             "messages": messages,
+        })
+
+    def _handle_diff_request(self, data: dict, *, fmt: str, patch: bool) -> None:
+        request_id = data.get("request_id", "")
+        repo_name = data.get("repo") or ""
+        bases = gitops.load_repo_bases()
+        targets: list[gitops.RepoBase]
+        if repo_name:
+            sel = gitops.select_repo(bases, repo_name)
+            if sel is None:
+                self._safe_send(control.KIND_DIFF_END, {
+                    "request_id": request_id,
+                    "repo": repo_name,
+                    "exit_code": 64,
+                    "error": "repo not found",
+                })
+                return
+            targets = [sel]
+        else:
+            targets = bases
+        if not targets:
+            self._safe_send(control.KIND_DIFF_END, {
+                "request_id": request_id,
+                "repo": "",
+                "exit_code": 0,
+                "note": "no repos recorded",
+            })
+            return
+        for repo in targets:
+            try:
+                stream = (gitops.export_patch(repo) if patch
+                          else gitops.diff(repo, fmt=fmt))
+                for chunk in stream:
+                    self._safe_send(control.KIND_DIFF_CHUNK, {
+                        "request_id": request_id,
+                        "repo": repo.name,
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                    })
+                payload = {
+                    "request_id": request_id,
+                    "repo": repo.name,
+                    "exit_code": 0,
+                    "branch": repo.branch,
+                    "base_sha": repo.base_sha,
+                }
+                if repo.note:
+                    payload["note"] = repo.note
+                self._safe_send(control.KIND_DIFF_END, payload)
+            except Exception as exc:  # noqa: BLE001
+                self._safe_send(control.KIND_DIFF_END, {
+                    "request_id": request_id,
+                    "repo": repo.name,
+                    "exit_code": 1,
+                    "error": str(exc),
+                })
+
+    def _handle_export_push_request(self, data: dict) -> None:
+        request_id = data.get("request_id", "")
+        repo_name = data.get("repo") or ""
+        branch = data.get("branch") or ""
+        message = data.get("message") or ""
+        bases = gitops.load_repo_bases()
+        repo = gitops.select_repo(bases, repo_name) if repo_name else (bases[0] if bases else None)
+        if repo is None:
+            self._safe_send(control.KIND_EXPORT_PUSH_RESULT, {
+                "request_id": request_id,
+                "repo": repo_name,
+                "branch": branch,
+                "success": False,
+                "output": "",
+                "error": "repo not found",
+            })
+            return
+        try:
+            res = gitops.export_push(repo, branch, message)
+        except Exception as exc:  # noqa: BLE001
+            self._safe_send(control.KIND_EXPORT_PUSH_RESULT, {
+                "request_id": request_id,
+                "repo": repo.name,
+                "branch": branch,
+                "success": False,
+                "output": "",
+                "error": str(exc),
+            })
+            return
+        self._safe_send(control.KIND_EXPORT_PUSH_RESULT, {
+            "request_id": request_id,
+            "repo": repo.name,
+            "branch": res.branch,
+            "success": res.success,
+            "output": res.output,
+            "error": res.error,
         })
 
     def _heartbeat_loop(self) -> None:

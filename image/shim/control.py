@@ -29,6 +29,9 @@ KIND_SESSION_ID = "runtime.session_id"
 KIND_HEARTBEAT = "runtime.heartbeat"
 KIND_SNAPSHOT = "runtime.snapshot"
 KIND_REPO_CHANGED = "repo.changed"
+KIND_DIFF_CHUNK = "runtime.diff_chunk"
+KIND_DIFF_END = "runtime.diff_end"
+KIND_EXPORT_PUSH_RESULT = "runtime.export_push_result"
 
 KIND_GREET = "agentd.greet"
 KIND_MESSAGE = "agentd.message"
@@ -36,6 +39,9 @@ KIND_INTERRUPT = "agentd.interrupt"
 KIND_SNAPSHOT_REQUEST = "agentd.snapshot_request"
 KIND_SHUTDOWN = "agentd.shutdown"
 KIND_AGENTD_ERROR = "agentd.error"
+KIND_DIFF_REQUEST = "agentd.diff_request"
+KIND_EXPORT_PATCH_REQUEST = "agentd.export_patch_request"
+KIND_EXPORT_PUSH_REQUEST = "agentd.export_push_request"
 
 
 class FrameTooLarge(Exception):
