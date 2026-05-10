@@ -164,6 +164,65 @@ export interface WireEvent<T = unknown> {
   reason?: string;
 }
 
+// Cost / usage (R10) wire shapes — mirror internal/proto + internal/usage.
+
+export interface CostModelTotals {
+  model: string;
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  has_unknown_model?: boolean;
+}
+
+export interface CostTurnRow {
+  turn_id: string;
+  at: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd?: number | null;
+}
+
+export interface SessionCostTotals {
+  session_id: string;
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  has_unknown_model?: boolean;
+  by_model: CostModelTotals[];
+  timeline: CostTurnRow[];
+}
+
+export interface RangeSessionTotals {
+  session_id: string;
+  name?: string;
+  status?: string;
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  has_unknown_model?: boolean;
+}
+
+export interface RangeCostTotals {
+  start: string;
+  end: string;
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  has_unknown_model?: boolean;
+  by_session: RangeSessionTotals[];
+}
+
 export interface SnapshotData {
   session: SessionRow;
   conversation: ConversationMessage[];

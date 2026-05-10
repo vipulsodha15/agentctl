@@ -437,6 +437,7 @@ export function SessionDetail() {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const [tab, setTab] = useState<"conversation" | "changes">("conversation");
   const [endBusy, setEndBusy] = useState(false);
+  const [costRefreshKey, setCostRefreshKey] = useState(0);
 
   // Initial fetch for session metadata (name, status before snapshot lands).
   useEffect(() => {
@@ -483,6 +484,13 @@ export function SessionDetail() {
           (e as { kind: string }).kind === "error"
         ) {
           return;
+        }
+        if (
+          e.kind === "usage" ||
+          e.kind === "turn.end" ||
+          e.kind === "turn.cancelled"
+        ) {
+          setCostRefreshKey((k) => k + 1);
         }
         dispatch({ type: "event", e });
       },
@@ -574,7 +582,7 @@ export function SessionDetail() {
 
       <aside className="side">
         <McpPanel mcps={state.mcps} />
-        <CostPanel />
+        <CostPanel sessionId={id} refreshKey={costRefreshKey} />
       </aside>
     </section>
   );

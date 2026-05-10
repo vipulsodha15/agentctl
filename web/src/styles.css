@@ -403,3 +403,25 @@ form .checkbox-row {
   font-style: italic;
   padding: 12px 0;
 }
+
+.cost-mini {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.cost-mini th,
+.cost-mini td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px dashed var(--border);
+}
+.cost-mini th {
+  color: var(--fg-mute);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+.cost-mini tr:last-child td {
+  border-bottom: none;
+}

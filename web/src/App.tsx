@@ -4,6 +4,7 @@ import { SessionList } from "./routes/SessionList";
 import { SessionDetail } from "./routes/SessionDetail";
 import { NewSession } from "./routes/NewSession";
 import { Settings } from "./routes/Settings";
+import { Usage } from "./routes/Usage";
 
 export function App() {
   if (!hasToken()) {
@@ -32,6 +33,7 @@ export function App() {
             Sessions
           </NavLink>
           <NavLink to="/new">New session</NavLink>
+          <NavLink to="/usage">Usage</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
       </header>
@@ -41,6 +43,7 @@ export function App() {
           <Route path="/sessions" element={<SessionList />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />
           <Route path="/new" element={<NewSession />} />
+          <Route path="/usage" element={<Usage />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/sessions" replace />} />
         </Routes>
