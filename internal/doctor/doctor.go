@@ -59,17 +59,24 @@ type RunOptions struct {
 	DBPath       string
 	SocketPath   string
 	WebAddr      string
+	BuiltinDir   string
+	CustomDir    string
+	SessionsDir  string
 }
 
 func DefaultPaths(home string) RunOptions {
+	dataDir := filepath.Join(home, ".local", "share", "agentctl")
 	return RunOptions{
 		Home:         home,
 		ConfigPath:   filepath.Join(home, ".config", "agentctl", "config.toml"),
 		SecretsPath:  filepath.Join(home, ".config", "agentctl", "secrets.json"),
 		WebTokenPath: filepath.Join(home, ".config", "agentctl", "web_token"),
-		DBPath:       filepath.Join(home, ".local", "share", "agentctl", "agentd.db"),
-		SocketPath:   filepath.Join(home, ".local", "share", "agentctl", "agentd.sock"),
+		DBPath:       filepath.Join(dataDir, "agentd.db"),
+		SocketPath:   filepath.Join(dataDir, "agentd.sock"),
 		WebAddr:      "127.0.0.1:7777",
+		BuiltinDir:   filepath.Join(dataDir, "builtin-skills"),
+		CustomDir:    filepath.Join(dataDir, "custom-skills"),
+		SessionsDir:  filepath.Join(dataDir, "sessions"),
 	}
 }
 
@@ -85,10 +92,19 @@ func Run(opts RunOptions) Result {
 	docker := checkDockerReachable()
 	r.Add(docker)
 	if docker.Status == StatusOK {
+		r.Add(checkDockerAPI())
+		r.Add(checkImagePresent(opts.ConfigPath))
 		r.Add(checkNetworkPeerIsolation())
 	} else {
+		r.Add(Check{Name: "docker.api", Status: StatusSkip, Message: "skipped (docker unreachable)"})
+		r.Add(Check{Name: "image.present", Status: StatusSkip, Message: "skipped (docker unreachable)"})
 		r.Add(Check{Name: "network.peer_isolation", Status: StatusSkip, Message: "skipped (docker unreachable)"})
 	}
+	r.Add(checkSkillsBuiltin(opts.BuiltinDir))
+	r.Add(checkSkillsCustom(opts.CustomDir, opts.BuiltinDir))
+	r.Add(checkMCPRegistry(opts.DBPath))
+	r.Add(checkSecretsFresh(opts.SecretsPath, nil))
+	r.Add(checkVolumesDisk(opts.SessionsDir))
 	return r
 }
 
