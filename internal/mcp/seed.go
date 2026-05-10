@@ -1,0 +1,65 @@
+package mcp
+
+import (
+	_ "embed"
+	"errors"
+	"fmt"
+	"os"
+
+	toml "github.com/pelletier/go-toml/v2"
+)
+
+//go:embed registry.seed.toml
+var embeddedSeed []byte
+
+type SeedFile struct {
+	MCP []SeedEntry `toml:"mcp"`
+}
+
+type SeedEntry struct {
+	Name           string `toml:"name"`
+	URL            string `toml:"url"`
+	Transport      string `toml:"transport"`
+	Kind           string `toml:"kind"`
+	DefaultEnabled bool   `toml:"default_enabled"`
+	Description    string `toml:"description"`
+	AuthConfigJSON string `toml:"auth_config_json,omitempty"`
+}
+
+type SeedSource struct {
+	Path     string
+	FromDisk bool
+}
+
+func ResolveSeed(userPath, sitePath string) ([]byte, SeedSource, error) {
+	if userPath != "" {
+		if data, err := os.ReadFile(userPath); err == nil {
+			return data, SeedSource{Path: userPath, FromDisk: true}, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, SeedSource{}, fmt.Errorf("read user seed %s: %w", userPath, err)
+		}
+	}
+	if sitePath != "" {
+		if data, err := os.ReadFile(sitePath); err == nil {
+			return data, SeedSource{Path: sitePath, FromDisk: true}, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, SeedSource{}, fmt.Errorf("read site seed %s: %w", sitePath, err)
+		}
+	}
+	return embeddedSeed, SeedSource{Path: "embedded"}, nil
+}
+
+func ParseSeed(data []byte) ([]SeedEntry, error) {
+	var f SeedFile
+	if err := toml.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parse seed: %w", err)
+	}
+	for _, e := range f.MCP {
+		if e.Name == "" || e.URL == "" || e.Transport == "" || e.Kind == "" {
+			return nil, fmt.Errorf("seed entry missing required fields: %+v", e)
+		}
+	}
+	return f.MCP, nil
+}
+
+func EmbeddedSeed() []byte { return embeddedSeed }
