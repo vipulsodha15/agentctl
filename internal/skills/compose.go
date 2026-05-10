@@ -22,7 +22,7 @@ type Composer interface {
 }
 
 func (m *manager) Compose(dest string) (ComposeResult, error) {
-	if err := os.MkdirAll(dest, 0o700); err != nil {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return ComposeResult{}, err
 	}
 	written := map[string]string{}

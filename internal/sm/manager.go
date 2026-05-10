@@ -195,14 +195,26 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	reposJSON, _ := json.Marshal(reposState)
 
 	dir := filepath.Join(m.opts.SessionsDir, id)
-	if err := os.MkdirAll(filepath.Join(dir, "volume"), 0o700); err != nil {
+	volumeDir := filepath.Join(dir, "volume")
+	if err := os.MkdirAll(volumeDir, 0o700); err != nil {
 		return CreateResult{}, fmt.Errorf("session dir: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "control"), 0o700); err != nil {
+	// Container runs as uid 1000 and bind-mounts this dir at /work; needs write
+	// access. Chown to 1000:1000 so the agent user owns it. Best-effort: if the
+	// Chown fails (e.g. inside a user-namespace remap or rootless docker), the
+	// container may still work with relaxed perms; we fall back to 0777.
+	if err := os.Chown(volumeDir, 1000, 1000); err != nil {
+		_ = os.Chmod(volumeDir, 0o777)
+	}
+	controlDir := filepath.Join(dir, "control")
+	if err := os.MkdirAll(controlDir, 0o700); err != nil {
 		return CreateResult{}, fmt.Errorf("control dir: %w", err)
 	}
+	if err := os.Chown(controlDir, 1000, 1000); err != nil {
+		_ = os.Chmod(controlDir, 0o777)
+	}
 	skillsDir := filepath.Join(dir, "skills")
-	if err := os.MkdirAll(skillsDir, 0o700); err != nil {
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
 		return CreateResult{}, fmt.Errorf("skills dir: %w", err)
 	}
 	var skillsResult SkillsComposeResult

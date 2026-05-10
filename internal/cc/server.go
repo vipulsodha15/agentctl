@@ -112,6 +112,14 @@ func (s *server) Listen(sessionID, sockPath string) error {
 		_ = ln.Close()
 		return fmt.Errorf("cc: chmod sock: %w", err)
 	}
+	// Container runs as uid 1000 and connects through this bind-mounted
+	// socket; agentd typically runs as a higher uid (or root in test rigs).
+	// Chown to 1000:1000 so the agent user can connect. Best-effort: failure
+	// is non-fatal; if uid mapping makes Chown impossible (rootless docker
+	// with userns remap) we relax mode to 0666 instead.
+	if err := os.Chown(sockPath, 1000, 1000); err != nil {
+		_ = os.Chmod(sockPath, 0o666)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &listenerState{
