@@ -14,9 +14,11 @@ network posture are handled end-to-end.
   running as the same user. (See §3.)
 - The Docker daemon. agentctl trusts the Docker socket.
 - The `agentctl` and `agentd` binaries (signed by the project's release
-  process; verified by package manager).
-- The base image, by digest, after cosign verification (§install-and-update.md
-  §1.5).
+  process; signature verified by `install.sh` against an embedded public
+  key before the binary is written to disk — see install-and-update.md
+  §1.2).
+- The base image, by digest, after cosign verification
+  (container-and-image.md §1.5).
 
 ### 1.2 Half-trusted
 

@@ -804,7 +804,7 @@ See `architecture/decisions/0007-web-ui-auth.md`.
 - `agentctl update --report` prints the same per-session report without pulling.
 - A separate flag, `agentctl update --restart-stopped`, force-restarts already-stopped sessions to validate they still come up. (No effect on running sessions.)
 - `agentctl restart <session>` exists as the manual upgrade trigger for running sessions. It cancels in-flight turn (with confirmation), stops the container, recreates from the new pinned digest, preserves the volume, and reattaches.
-- `agentctl update` for the agentctl CLI and `agentd` daemon binaries is **out of scope** for v1; developers use whatever package manager installed them (`brew`, `apt`, GitHub release tarball). `agentctl init --repair` reinstalls the system service file when a binary upgrade has happened.
+- `agentctl update` for the agentctl CLI and `agentd` daemon binaries is **out of scope** for v1; developers re-run the canonical installer script (`curl -fsSL https://install.agentctl.dev/install.sh | bash`), which detects the existing install, verifies the new release's signature, and atomically replaces the binary in place. `agentctl init --repair` then re-stamps the system service file and restarts the daemon. A native `agentctl self-update` subcommand (no curl pipe) is a v2 candidate.
 - Skills ship inside the base image and follow the same update path. The skills manifest (R9) is re-fetched from the new container on attach.
 
 Rationale: developers own when their working agent flips to a new image. Auto-pulling mid-session would surprise mid-debugging users and complicate cost attribution.

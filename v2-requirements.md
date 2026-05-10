@@ -112,6 +112,6 @@ as v2 scoping begins.
 - Native Windows (currently WSL2 only).
 - Pre-warmed container pools.
 - Container pause/unpause as a third lifecycle state.
-- `agentctl` / `agentd` self-update.
+- `agentctl self-update` subcommand (in-binary self-update without curl-pipe; v1 ships re-run-`install.sh` as the upgrade path).
 - OS keychain integration for secrets at rest.
 - `agentctl audit <session>` and `agentctl export-state` for backup.

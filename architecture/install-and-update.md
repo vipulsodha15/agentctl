@@ -3,23 +3,130 @@
 ## 1. Distribution
 
 `agentctl` and `agentd` ship as a single binary (subcommand-based: the
-binary inspects argv[0] and routes to either CLI or daemon entry).
-Distributed via:
-
-- macOS: Homebrew tap (`brew install agentctl/tap/agentctl`), or
-  signed/notarized `.pkg`.
-- Linux: `.deb` and `.rpm` for systemd distros (Ubuntu 22.04+, Debian
-  bookworm+, Fedora 40+); generic `tar.gz` for "I'll put it on PATH
-  myself" users.
-
-Package post-install **does not** start the daemon or write secrets; it
-only lays the binary down on PATH and creates `/etc/agentctl/` (empty,
-mode `0755`) for the optional site override (§15.6). All user-state
-work (`~/.config/agentctl/`, `~/.local/share/agentctl/`, system-service
-units) happens in `agentctl init`, run by the developer the first time.
-
+binary inspects `argv[0]` and routes to either CLI or daemon entry).
 The Web UI SPA is embedded in the binary (`go:embed` / `include_bytes!`
-equivalent), no separate asset bundle.
+equivalent), so there is no separate asset bundle.
+
+### 1.1 Canonical install path: `install.sh`
+
+The supported install path is a one-line shell command, modeled on
+Claude Code's installer:
+
+```bash
+curl -fsSL https://install.agentctl.dev/install.sh | bash
+```
+
+A pinned version is also supported:
+
+```bash
+curl -fsSL https://install.agentctl.dev/install.sh | AGENTCTL_VERSION=v0.2.3 bash
+```
+
+The script is hosted at the URL above (CNAME to GitHub Pages or an S3
+static site backing the GitHub Releases binaries). It is the same
+script for macOS and Linux.
+
+### 1.2 What `install.sh` does
+
+1. Detect host: OS in {`linux`, `darwin`}, arch in {`amd64`, `arm64`}.
+   Refuse on anything else with a clear message.
+2. Resolve target version: `AGENTCTL_VERSION` env var, else "latest"
+   from the GitHub Releases API.
+3. Download `agentctl-<version>-<os>-<arch>.tar.gz` and the matching
+   `.sha256` and `.minisig` (or `.cosign.bundle`) from GitHub Releases.
+4. Verify the SHA256 and the signature against an embedded public key
+   baked into the script. Abort on mismatch — never run an unverified
+   binary.
+5. Extract to `${INSTALL_DIR:-$HOME/.local/bin}/agentctl`, `chmod +x`.
+6. If the install dir is not on `PATH`, print the exact `export PATH=…`
+   line for the user's shell.
+7. Write `~/.local/share/agentctl/install_metadata.json`
+   (version, install method, install timestamp, source URL) so
+   `agentctl doctor` and a future self-update path can introspect.
+8. Print:
+   ```
+   agentctl <version> installed.
+   Next: agentctl init
+   ```
+
+The script does **not**:
+- start `agentd`,
+- write secrets,
+- install the system-service unit,
+- prompt for anything.
+
+All of that is `agentctl init`'s job (§2). This separation keeps the
+installer non-interactive — safe to run from CI, dotfiles, provisioning
+tools — and keeps `init` the single place that touches user state.
+
+### 1.3 Environment variables honoured by `install.sh`
+
+| Var | Purpose | Default |
+|---|---|---|
+| `AGENTCTL_VERSION` | Pin to a specific release tag. | latest |
+| `INSTALL_DIR` | Where to drop the binary. | `$HOME/.local/bin` |
+| `AGENTCTL_INSTALL_NO_VERIFY` | Skip signature verification. Loud-warns; intended only for offline mirror setups. | unset (verification on) |
+| `AGENTCTL_DOWNLOAD_BASE` | Override the release host (private mirror, air-gapped install). | `https://github.com/<org>/agentctl/releases/download` |
+
+### 1.4 Idempotency and upgrade
+
+Re-running `install.sh` against an existing install:
+
+- If the resolved version matches the on-disk version, no-op (prints
+  "agentctl <v> already installed").
+- Otherwise: download new version, verify, atomically replace the
+  binary (`install.sh` writes to `agentctl.new`, then `mv` over the
+  old). The next invocation of `agentctl` picks up the new binary.
+- The system-service unit is **not** restarted by `install.sh`. The
+  developer runs `agentctl init --repair` (which restarts `agentd`)
+  after a binary upgrade to apply any unit-file changes and pick up
+  the new daemon. A future v1.1 can wire `agentctl self-update` as a
+  thin wrapper that does both.
+
+So "re-run `install.sh`" is the v1 self-update story. Native
+`agentctl self-update` (no curl pipe) remains a v2 candidate
+(`v2-requirements.md`).
+
+### 1.5 Uninstall
+
+```bash
+curl -fsSL https://install.agentctl.dev/install.sh | bash -s -- --uninstall
+```
+
+Removes `${INSTALL_DIR}/agentctl`, the system-service unit (`systemctl
+--user disable --now agentd` / `launchctl bootout`), and prints the
+paths to `~/.config/agentctl/` and `~/.local/share/agentctl/` for the
+developer to remove manually if they want a clean wipe. We do **not**
+auto-remove user data; volumes may contain working code.
+
+### 1.6 Why not native packages
+
+Native packages (Homebrew tap, `.deb`, `.rpm`, `.pkg`) were considered
+and dropped from v1:
+
+- Five distribution channels = five test matrices, five release
+  pipelines, and five places for the install story to drift.
+- A single signed-binary tarball pulled by a tiny shell script
+  is portable across every Linux distro and macOS version we
+  support, with no per-distro packaging metadata.
+- The signature-verified `install.sh` is the same security posture as
+  signed package metadata, without the package-manager indirection.
+
+If post-v1 demand exists for `brew install agentctl` (developer-tool
+ergonomics) we add the Homebrew tap as an additional channel; the
+binary doesn't change. Same for `.deb` / `.rpm` if a customer needs
+unattended provisioning via apt/dnf.
+
+### 1.7 What the install script lays down
+
+After `install.sh` runs successfully, the developer's machine has:
+
+- `${INSTALL_DIR}/agentctl` — the binary.
+- `~/.local/share/agentctl/install_metadata.json` — install
+  bookkeeping.
+
+That's it. No system-service unit, no config, no secrets, no DB —
+those land in `agentctl init` (§2).
 
 ## 2. `agentctl init` — full flow
 
@@ -207,18 +314,32 @@ autocomplete.
 
 ### 4.5 The agentctl CLI / agentd binary upgrade
 
-Out of scope for `agentctl update` in v1. The developer's package
-manager (Homebrew, apt) handles binary upgrades. Once a newer binary is
-installed:
+`agentctl update` covers only the **base image**, not the binary. To
+upgrade the binary, the developer re-runs `install.sh` (§1.4):
 
-- The package post-install does **not** restart `agentd`. The developer
-  runs `agentctl init --repair` (idempotent) which re-stamps the
-  system service unit and restarts.
-- If the new binary needs a schema migration, `agentd` applies it on
-  next start (data-model.md §3).
+```bash
+curl -fsSL https://install.agentctl.dev/install.sh | bash
+```
+
+The script detects an existing install, downloads the newer release,
+verifies the signature, and atomically replaces the binary. After the
+binary is replaced:
+
+- The new binary is on PATH the next time the developer invokes
+  `agentctl`.
+- The running `agentd` is **not** restarted by `install.sh`. The
+  developer runs `agentctl init --repair` (idempotent) which re-stamps
+  the system-service unit (in case it changed) and restarts the
+  daemon.
+- If the new binary ships a DB schema migration, `agentd` applies it
+  on next start (data-model.md §3).
 - If the binary is **older** than the on-disk DB schema (downgrade),
-  `agentd` refuses to start; the developer is told what version to
-  install.
+  `agentd` refuses to start with `error{code: "schema_too_new"}`; the
+  developer is told the minimum version to install.
+
+A native `agentctl self-update` subcommand that wraps "download new
+binary + verify + replace + restart" without curl-piping is a v2
+candidate (`v2-requirements.md`).
 
 ## 5. `agentctl doctor`
 
