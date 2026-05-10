@@ -67,6 +67,8 @@ func commands() []Command {
 		{Name: "restart", Group: groupSessions, Summary: "Recreate a session container from the currently pinned image.", Run: runRestart},
 		{Name: "interrupt", Group: groupSessions, Summary: "Cancel a session's in-flight turn.", Run: runInterrupt},
 		{Name: "logs", Group: groupSessions, Summary: "Tail daemon, session, or container logs.", Run: runLogs},
+		{Name: "diff", Group: groupSessions, Summary: "Stream the working-tree diff against the recorded base SHA.", Run: runDiff},
+		{Name: "export", Group: groupSessions, Summary: "Export a patch (--patch) or push to a branch (--push <branch>).", Run: runExport},
 
 		{Name: "mcp", Group: groupMCPs, Summary: "Manage the MCP registry (list/add/update/remove/set-default).", Run: runMCP},
 
