@@ -28,6 +28,7 @@ const (
 	mboxControlConn
 	mboxControlClosed
 	mboxShutdown
+	mboxStop
 )
 
 type sendItem struct {
@@ -47,6 +48,11 @@ type terminateItem struct {
 	reply chan error
 }
 
+type stopItem struct {
+	reason string
+	reply  chan error
+}
+
 type controlFrameItem struct {
 	frame ControlFrame
 }
@@ -60,6 +66,7 @@ type mboxItem struct {
 	send         *sendItem
 	interrupt    *interruptItem
 	terminate    *terminateItem
+	stop         *stopItem
 	controlFrame *controlFrameItem
 	controlConn  *controlConnItem
 }
@@ -167,6 +174,8 @@ func (a *actor) handle(item mboxItem) {
 		a.handleInterrupt(item.interrupt)
 	case mboxTerminate:
 		a.handleTerminate(item.terminate)
+	case mboxStop:
+		a.handleStop(item.stop)
 	case mboxControlFrame:
 		a.handleControlFrame(item.controlFrame.frame)
 	case mboxControlConn:
@@ -174,6 +183,54 @@ func (a *actor) handle(item mboxItem) {
 	case mboxControlClosed:
 		a.handleControlClosed()
 	}
+}
+
+func (a *actor) handleStop(s *stopItem) {
+	a.mu.Lock()
+	if a.summary.Status == "stopped" || a.summary.Status == "terminated" {
+		a.mu.Unlock()
+		s.reply <- nil
+		return
+	}
+	prevStatus := a.summary.Status
+	a.summary.Status = "stopped"
+	a.summary.InFlight = false
+	a.queue = a.queue[:0]
+	a.summary.QueueDepth = 0
+	a.inFlight = ""
+	a.currentTurn = ""
+	containerID := a.containerID
+	a.mu.Unlock()
+
+	a.broadcast(proto.EventSessionStopping, mustJSON(map[string]string{"reason": s.reason}))
+
+	if a.opts.Containers != nil && containerID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), a.opts.ShutdownGrace+5*time.Second)
+		_ = a.opts.Containers.Stop(ctx, containerID, a.opts.ShutdownGrace)
+		cancel()
+	}
+
+	a.mu.Lock()
+	if a.control != nil {
+		_ = a.control.Close()
+		a.control = nil
+	}
+	a.mu.Unlock()
+	if a.opts.Control != nil {
+		_ = a.opts.Control.Stop(a.opts.ID)
+	}
+
+	if a.opts.Store != nil {
+		now := a.opts.Now().Format(time.RFC3339Nano)
+		if _, err := a.opts.Store.DB().Exec(`UPDATE sessions SET status='stopped', container_id=NULL WHERE id=?`, a.opts.ID); err != nil {
+			a.opts.DaemonLogger.Warn("session.stop.db_update_failed", slog.String("session_id", a.opts.ID), slog.String("error", err.Error()))
+		}
+		_, _ = a.opts.Store.DB().Exec(`INSERT INTO session_lifecycle (session_id, at, event, detail_json) VALUES (?, ?, 'stopped', ?)`,
+			a.opts.ID, now, mustJSON(map[string]string{"reason": s.reason}))
+	}
+
+	a.broadcast(proto.EventSessionStopped, mustJSON(map[string]string{"reason": s.reason, "previous": prevStatus}))
+	s.reply <- nil
 }
 
 func (a *actor) handleSend(s *sendItem) {

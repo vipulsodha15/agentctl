@@ -31,6 +31,8 @@ type Manager interface {
 	Get(ctx context.Context, sessionID string) (proto.SessionDetail, error)
 	Terminate(ctx context.Context, sessionID string) error
 	Shutdown(ctx context.Context) error
+	Busy(sessionID string) (busy bool, ok bool)
+	Stop(ctx context.Context, sessionID string, reason string) error
 }
 
 type Stream = fan.Stream
@@ -589,6 +591,32 @@ func (m *manager) Terminate(ctx context.Context, sessionID string) error {
 		m.mu.Lock()
 		delete(m.actors, sessionID)
 		m.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *manager) Busy(sessionID string) (bool, bool) {
+	a := m.actorFor(sessionID)
+	if a == nil {
+		return false, false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	busy := a.inFlight != "" || len(a.queue) > 0
+	return busy, true
+}
+
+func (m *manager) Stop(ctx context.Context, sessionID, reason string) error {
+	a := m.actorFor(sessionID)
+	if a == nil {
+		return ErrSessionNotFound
+	}
+	resCh := make(chan error, 1)
+	a.mailbox <- mboxItem{kind: mboxStop, stop: &stopItem{reason: reason, reply: resCh}}
+	select {
+	case err := <-resCh:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
