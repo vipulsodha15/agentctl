@@ -14,6 +14,7 @@ import { MessageInput } from "../components/MessageInput";
 import { McpPanel } from "../components/McpPanel";
 import { StopButton } from "../components/StopButton";
 import { CostPanel } from "../components/CostPanel";
+import { ChangesPanel } from "../components/ChangesPanel";
 
 interface State {
   status: SessionStatus | "unknown";
@@ -568,7 +569,7 @@ export function SessionDetail() {
             warnings={state.warnings}
           />
         ) : (
-          <div className="empty">Diff lands in M5.</div>
+          <ChangesPanel sessionId={id} />
         )}
       </div>
 

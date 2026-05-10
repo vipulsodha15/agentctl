@@ -425,3 +425,51 @@ form .checkbox-row {
 .cost-mini tr:last-child td {
   border-bottom: none;
 }
+.changes-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+.changes-panel .row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.changes-panel .repos-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.changes-panel .repos-table th,
+.changes-panel .repos-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.changes-panel .diff-view {
+  max-height: 480px;
+  overflow: auto;
+  background: var(--bg-mute);
+  padding: 8px;
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
+.push-modal {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-mute);
+}
+.push-modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
