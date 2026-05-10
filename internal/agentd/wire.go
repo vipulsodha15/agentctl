@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/agentctl/agentctl/internal/cc"
 	"github.com/agentctl/agentctl/internal/cm"
 	"github.com/agentctl/agentctl/internal/mcp"
+	"github.com/agentctl/agentctl/internal/recovery"
 	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/sm"
 )
@@ -182,6 +184,56 @@ func (c *ccConnAdapter) Close() error {
 }
 
 var errAdapterClosed = errors.New("control adapter closed")
+
+type sweepAdapter struct {
+	mgr sm.Manager
+}
+
+func newSweepAdapter(mgr sm.Manager) *sweepAdapter {
+	return &sweepAdapter{mgr: mgr}
+}
+
+func (a *sweepAdapter) Busy(sessionID string) (bool, bool) {
+	return a.mgr.Busy(sessionID)
+}
+
+func (a *sweepAdapter) Stop(ctx context.Context, sessionID, reason string) error {
+	return a.mgr.Stop(ctx, sessionID, reason)
+}
+
+func (a *sweepAdapter) Interrupt(ctx context.Context, sessionID string, clearQueue bool) error {
+	_, err := a.mgr.Interrupt(ctx, sessionID, clearQueue)
+	return err
+}
+
+func parseDurationOrDefault(s string, fallback time.Duration, logger *slog.Logger, key string) time.Duration {
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		logger.Warn("config.duration_invalid",
+			slog.String("key", key),
+			slog.String("value", s),
+			slog.String("error", err.Error()))
+		return fallback
+	}
+	return d
+}
+
+func readoptSessions(_ context.Context, _ sm.Manager, _ *ccAdapter, logger *slog.Logger, adoptions []recovery.Adoption) {
+	for _, ad := range adoptions {
+		// TODO(M4-A): full live re-adoption requires synthesizing per-session
+		// actor state (summary, model, mcp set, repos) from sessions row plus
+		// re-Listening on the existing control sock with the saved
+		// session_token. Out of scope for this commit; reconcile already
+		// recorded the session as adopted in the DB and will mark it
+		// stopped on the next message attempt because no actor exists.
+		logger.Info("recovery.readopt_pending",
+			slog.String("session_id", ad.SessionID),
+			slog.String("container_id", ad.ContainerID))
+	}
+}
 
 type mcpAdapter struct{ inner mcp.Registry }
 
