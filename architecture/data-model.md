@@ -49,6 +49,7 @@ CREATE TABLE sessions (
     control_sock_path     TEXT,                              -- abs path; NULL after teardown
     skills_snapshot_path  TEXT,                              -- abs path to per-session skills snapshot (composed at start, mounted ro at /skills/); NULL after teardown
     skills_snapshot_hash  TEXT NOT NULL,                     -- sha256 of the snapshot tree at session create; reproducibility pin
+    sdk_session_id        TEXT,                              -- SDK-assigned session id (claude-agent-sdk); captured from runtime.session_id event on first turn; passed back as ClaudeAgentOptions.resume on idle-resume; NULL until first turn completes
     model               TEXT NOT NULL,                       -- e.g. "claude-sonnet-4-6"
     mem_limit_bytes     INTEGER NOT NULL,
     cpu_limit_cores     REAL NOT NULL,
@@ -195,8 +196,11 @@ Per-session directory: `~/.local/share/agentctl/sessions/<session_id>/`
 sessions/<session_id>/
 ├── volume/                    # bind-mounted into container at /work
 │   ├── <repo_basename>/       # one per --repo or in-session clone
-│   │   └── …                  # owned by the runtime
-│   ├── .history/              # runtime-owned conversation history
+│   │   └── …                  # owned by the agent
+│   ├── .claude/               # SDK-owned conversation history
+│   │   └── projects/-work/*.jsonl
+│   ├── .agentctl/             # shim-owned metadata
+│   │   └── repo-bases.json    # clone-time SHA + branch per repo, for R8 diff
 │   └── …                      # scratch files the agent creates
 ├── control/                   # bind-mounted at /run/agentctl/control/
 │   └── agentd.sock            # 0660; only this socket; read-write
@@ -238,14 +242,25 @@ runtime's expected layout:
 ```
 /work/
 ├── <repo_basename>/    # one per cloned repo
-├── .history/           # runtime conversation history (private to runtime)
+├── .claude/            # SDK-owned conversation history (claude-agent-sdk)
+│   └── projects/-work/<sdk_session_id>.jsonl
+├── .agentctl/          # shim-owned metadata (NOT the SDK's; never parsed by agentd directly)
+│   └── repo-bases.json # {repo: {base_sha, branch}}; written at clone time
 ├── .scratch/           # scratch space the agent uses for intermediate output
 └── …
 ```
 
-`agentd` does not parse `/work/.history`; it treats it as opaque. R8 diff
-generation runs inside the container (`git diff` against `.history/repo-bases.json`'s
-recorded SHAs) — see `container-and-image.md` §3.
+`agentd` does not parse either `/work/.claude/` or `/work/.agentctl/`;
+the SDK owns the former, the shim owns the latter. R8 diff generation
+runs inside the container (`git diff` against
+`/work/.agentctl/repo-bases.json`'s recorded SHAs) — see
+`container-and-image.md` §3.
+
+The SDK's `.claude/projects/-work/*.jsonl` is what enables idle-resume:
+when agentd recreates the container against the same volume, the
+shim passes `ClaudeAgentOptions.resume=<sdk_session_id>` (read from
+the session row) and the SDK reconstructs its history from these
+files. agentctl never reads them.
 
 ### 4.2 Disk pressure
 

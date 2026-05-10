@@ -69,9 +69,11 @@ Containers, sessions, MCPs, fan-out, Web UI.
 
 - Container manager (`cm`): create/start/stop/remove via Docker SDK,
   with all flags from container-and-image.md §2.
-- Base image v0 (no skills yet; just the runtime + shim).
-- Runtime shim: connects to control sock, says `runtime.hello`, accepts
-  `agentd.greet`, starts the runtime, bridges stdio to control sock.
+- Base image v0 (no skills yet; just the runtime SDK + shim).
+- Runtime shim (Python; uses `claude-agent-sdk`): connects to control
+  sock, says `runtime.hello`, accepts `agentd.greet`, configures the
+  SDK with model/MCPs/permission_mode=bypass, and translates SDK
+  events into `runtime.event` frames on the control sock.
 - Session manager actor: per-session mailbox, queue, in_flight,
   `SendMessage`, `Interrupt`, fan-out (in-memory).
 - CLI: `start`, `attach`, `detach`, `ls`, `stop`, `interrupt`,

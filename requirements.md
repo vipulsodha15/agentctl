@@ -406,7 +406,7 @@ Constraints every requirement and the technical design must respect:
 | Multiple messages in a session | Everything | Container memory + volume |
 | Client reconnect after disconnect | Everything | `agentd` event buffer + volume; client re-fetches snapshot then resumes stream |
 | Multiple clients attached at once | Everything; all clients see same stream | `agentd` fan-out (R4) |
-| Idle-stop and resume (R2) | Everything except in-memory tool state | Volume re-mounted into a fresh container; runtime resumes from history files |
+| Idle-stop and resume (R2) | Everything except in-memory tool state | Volume re-mounted into a fresh container; the shim passes `ClaudeAgentOptions.resume=<sdk_session_id>` and the SDK reads its own history back from `/work/.claude/projects/-work/<sdk_session_id>.jsonl` (which lives on the per-session volume via a symlink). |
 | `agentd` restart | All sessions, recoverable | DB + volumes; on startup, `agentd` reconciles container statuses with Docker, marks orphaned `running` rows as `stopped`, leaves volumes intact |
 | Host reboot | Same as `agentd` restart | System service starts `agentd` on boot |
 | Explicit End Session | Nothing | Container removed, volume deleted, row marked `terminated` |
@@ -419,7 +419,7 @@ Constraints every requirement and the technical design must respect:
 
 **Event buffer.**
 
-- `agentd` keeps the last N events per session (e.g., last 200 or last 5 minutes, whichever is larger) in memory or in a small on-disk ring. On client reconnect, the client provides the last event ID it saw and `agentd` replays anything newer. Events older than the buffer are reconstructed from the runtime's history files via the snapshot endpoint.
+- `agentd` keeps the last N events per session (e.g., last 200 or last 5 minutes, whichever is larger) in memory or in a small on-disk ring. On client reconnect, the client provides the last event ID it saw and `agentd` replays anything newer. Events older than the buffer are reconstructed from the SDK's conversation history (`/work/.claude/projects/-work/<sdk_session_id>.jsonl` on the volume) via the snapshot endpoint, which the shim serves by reading the SDK's own messages.
 
 **Acceptance criteria.**
 

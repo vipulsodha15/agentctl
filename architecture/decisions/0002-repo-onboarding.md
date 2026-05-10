@@ -32,7 +32,10 @@ rejected.
   both env (`GITHUB_TOKEN`) and the per-session git credential helper
   (`/work/.config/git/credentials`).
 - The shim records each cloned repo's branch and SHA to
-  `/work/.history/repo-bases.json` for diff-vs-base (R8).
+  `/work/.agentctl/repo-bases.json` for diff-vs-base (R8). (Distinct
+  from `/work/.claude/`, which is the SDK's conversation-history
+  directory; renamed from the original `/work/.history/` to avoid
+  confusion with the SDK's path.)
 
 ## Consequences
 
