@@ -91,8 +91,10 @@ state:
   - subscribers : list of fanout channels
   - last_activity_at : Time
   - control_conn : Option<Connection>
-  - event_seq, event_buffer (1k ring)
 ```
+
+No event ring, no per-session event sequence number, no replay buffer.
+Reconnects re-fetch a snapshot via the shim (api.md §2.4, ADR 0015).
 
 The actor processes one input at a time (single-threaded mailbox).
 Concurrency between sessions is parallel; concurrency within a session
@@ -133,8 +135,7 @@ This section is the canonical statement of how §15.4 works in code.
    `turn.start{turn_id=ULID}`, write `agentd.message` on control_out,
    set `in_flight = turn_id`.
 3. Actor receives `runtime.event` frames; rewrites each as a fan-out
-   event with a fresh `seq` and pushes into the buffer + DB events
-   table.
+   event and broadcasts to the current subscribers. No persistence.
 4. On `runtime.event{kind=turn.end}`: actor writes `usage` row, emits
    `turn.end`, clears `in_flight`, dequeues next if any.
 
@@ -179,27 +180,31 @@ skip; on hard-cutoff:
 ## 3. Event fan-out
 
 A simple per-session `BroadcastChannel<Event>` whose subscribers are
-attached clients. Each `AttachStream` request creates a subscription:
+attached clients. The fan-out is **stateless** — agentd keeps no replay
+buffer.
 
-- The handler writes a `session.snapshot` event from the actor's current
-  state.
-- Then registers as a subscriber and forwards events until the client
-  disconnects.
-- On disconnect: drop the subscription.
+Each `AttachStream` request:
 
-If `since_event` is set, the handler:
+1. The handler issues `agentd.snapshot_request` on the control sock,
+   awaits `runtime.snapshot` from the shim (which reads the SDK's JSONL
+   from `/work/.claude/projects/-work/<sdk_session_id>.jsonl`), and
+   writes one `session.snapshot` event to the subscriber containing the
+   conversation plus current operational state pulled from the actor.
+2. Registers as a subscriber and forwards live events until the client
+   disconnects.
+3. On disconnect: drop the subscription. No buffered backlog.
 
-1. Fetches all events with `seq > since_event.seq` from the in-memory
-   ring; if the ring's lowest seq is higher than `since_event.seq + 1`,
-   falls back to the `events` table (data-model.md §2). If even that's
-   too old, returns `error{buffer_overflow}`.
-2. Streams those, then the live tail.
+If the snapshot read fails (control sock down, JSONL missing), the
+handler returns `error{snapshot_failed}` and closes the stream; the
+client may retry.
 
-Slow subscriber backpressure: each subscription has a bounded buffer of
-256 events. If the buffer fills (slow client), the subscription is
-dropped with a `stream_end{reason: slow_consumer}`. The client must
-reconnect with `since_event` to catch up; this prevents a hung client
-from stalling fan-out for everyone.
+Slow subscriber handling: each broadcast write is non-blocking. If a
+subscriber's socket write fails or its small bounded send buffer (e.g.,
+64 frames) fills, the subscription is dropped with
+`stream_end{reason: slow_consumer}`. The client reconnects and gets a
+fresh snapshot — there is no incremental catch-up path. This prevents a
+hung client from stalling fan-out for the others without requiring
+agentd to maintain any per-subscriber backlog.
 
 ## 4. Backpressure & rate-limiting from container
 
@@ -224,10 +229,9 @@ safe to overlap.
 
 | Sweeper | Trigger | Action |
 |---|---|---|
-| `idle_stop` | every 60s | SELECT sessions WHERE status='running' AND in_flight=0 AND queue_depth=0 AND last_activity_at < now-`idle_timeout`. Stop each via session actor. |
+| `idle_stop` | every 60s | SELECT sessions WHERE status='running' AND last_activity_at < now-`idle_timeout`. For each, ask the session actor whether it is busy (in-flight or non-empty queue); skip if so, otherwise stop via the session actor. |
 | `hard_cutoff` | every 60s | SELECT sessions WHERE status IN ('running','stopped') AND last_activity_at < now-`max_idle`. If running, `Interrupt` then `Stop`. Mark a flag so subsequent resume is allowed but logged. |
 | `idem_cleanup` | every 5 min | DELETE FROM message_idempotency WHERE accepted_at < now-5m. |
-| `events_prune` | every hour | DELETE FROM events WHERE at < now-24h OR (session_id, seq) below per-session caps. VACUUM not run automatically. |
 | `tombstone_reap` | every 6h | rm -rf sessions/.tombstones/* older than 7 days. |
 
 Sweepers log every action they take to the daemon log; counts to the

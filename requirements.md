@@ -395,19 +395,19 @@ Constraints every requirement and the technical design must respect:
 **State model.**
 
 - **Authoritative state per session lives in two places:**
-  - The **session volume** holds the agent runtime's conversation history, the working directory, repo clones, and scratch files. It is the durable, replayable record.
-  - The **`agentd` DB row** holds metadata: ID, name, status, timestamps, container ID, volume path, MCP set, last-known cost (R10), and a small server-side **event buffer** (recent stream events, capped) for client reconnects.
-- The container's in-memory state is treated as ephemeral.
+  - The **session volume** holds the agent runtime's conversation history (the SDK's `/work/.claude/projects/-work/<sdk_session_id>.jsonl`), the working directory, repo clones, and scratch files. It is the durable, replayable record — and the **only** record. `agentd` keeps no parallel copy of the conversation.
+  - The **`agentd` DB row** holds metadata: ID, name, status, timestamps, container ID, volume path, MCP set, last-known cost (R10).
+- The container's in-memory state is treated as ephemeral. `agentd`'s in-memory state (queue depth, in-flight turn id, attached subscribers) is also ephemeral; on restart it is reconstructed from the DB row + the volume.
 
 **What persists across each scenario.**
 
 | Scenario | What persists | How |
 |---|---|---|
 | Multiple messages in a session | Everything | Container memory + volume |
-| Client reconnect after disconnect | Everything | `agentd` event buffer + volume; client re-fetches snapshot then resumes stream |
-| Multiple clients attached at once | Everything; all clients see same stream | `agentd` fan-out (R4) |
+| Client reconnect after disconnect | Everything | Volume; client re-fetches a snapshot from the SDK's history then live-tails. Re-rendering the conversation on reconnect is acceptable. |
+| Multiple clients attached at once | Everything; all clients see same stream | `agentd` fan-out to currently-attached subscribers (R4) |
 | Idle-stop and resume (R2) | Everything except in-memory tool state | Volume re-mounted into a fresh container; the shim passes `ClaudeAgentOptions.resume=<sdk_session_id>` and the SDK reads its own history back from `/work/.claude/projects/-work/<sdk_session_id>.jsonl` (which lives on the per-session volume via a symlink). |
-| `agentd` restart | All sessions, recoverable | DB + volumes; on startup, `agentd` reconciles container statuses with Docker, marks orphaned `running` rows as `stopped`, leaves volumes intact |
+| `agentd` restart | All sessions, recoverable | DB + volumes; on startup, `agentd` reconciles container statuses with Docker, marks orphaned `running` rows as `stopped`, leaves volumes intact. Attached clients reconnect and re-fetch a snapshot. |
 | Host reboot | Same as `agentd` restart | System service starts `agentd` on boot |
 | Explicit End Session | Nothing | Container removed, volume deleted, row marked `terminated` |
 
@@ -417,9 +417,12 @@ Constraints every requirement and the technical design must respect:
 2. For each, query Docker for the container ID. If it exists and is running, leave as `running`. If it exists and is stopped, mark `stopped`. If it does not exist, mark `stopped` with a flag indicating "container will be re-created on next message" (`agentd` re-creates on next inbound message because Docker wiped the container; the volume is still there).
 3. Replay no events. Clients reconnecting fetch the runtime's history from the volume on next attach.
 
-**Event buffer.**
+**Reconnect / replay model.**
 
-- `agentd` keeps the last N events per session (e.g., last 200 or last 5 minutes, whichever is larger) in memory or in a small on-disk ring. On client reconnect, the client provides the last event ID it saw and `agentd` replays anything newer. Events older than the buffer are reconstructed from the SDK's conversation history (`/work/.claude/projects/-work/<sdk_session_id>.jsonl` on the volume) via the snapshot endpoint, which the shim serves by reading the SDK's own messages.
+- `agentd` does **not** maintain a server-side replay buffer of past events. There is no event ring, no events table, no events file.
+- On every client attach (initial or reconnect), `agentd` issues a snapshot request to the runtime shim. The shim reads the SDK's conversation history from `/work/.claude/projects/-work/<sdk_session_id>.jsonl` and returns it. `agentd` sends the snapshot as the first frame on the attached stream, then live-tails subsequent events to that subscriber.
+- Re-rendering the conversation on reconnect is acceptable v1 UX. A client that disconnects mid-turn and reconnects sees the conversation up to the last completed turn from the snapshot, then live-tails the remainder of the in-flight turn from the moment of attach.
+- Clients dedupe on the wire by `event_id` if they care; events are at-least-once on the live stream.
 
 **Acceptance criteria.**
 
@@ -433,7 +436,7 @@ Constraints every requirement and the technical design must respect:
 
 - Volume corruption (e.g., partial write during sudden power loss) → `agentd` surfaces a recovery prompt; in v1 the safe action is "End Session and start a new one" rather than auto-repair.
 - DB corruption → `agentd` refuses to start until repaired by `agentctl doctor --repair-db`; volumes are not touched.
-- Event buffer overflow during long disconnect → on reconnect, the client fetches a fresh snapshot from the runtime's history rather than replaying events.
+- Snapshot read fails (shim unreachable, JSONL missing) → attach returns an error pointing the user to `agentctl logs <session>`; the client may retry.
 
 **Dependencies.** R2 (idle stop/resume mechanics), R4 (client streaming model).
 

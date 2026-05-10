@@ -26,8 +26,7 @@ These names are used by both the CLI socket RPC and the HTTP+WS surface.
 | `Detach` | Server-noted, client-driven (close stream). | client → server |
 | `TerminateSession` | End a session permanently. | client → server |
 | `RestartSession` | Stop+recreate the container; preserve volume. | client → server |
-| `AttachStream` | Subscribe to a session's event stream. | client → server (long-lived) |
-| `SnapshotSession` | Fetch the runtime's current conversation history (for replay-on-attach beyond the event buffer). | client → server |
+| `AttachStream` | Subscribe to a session's event stream. The first frame is always a `session.snapshot` containing the conversation (read from the SDK's JSONL via the shim) plus current operational state; subsequent frames are live events. | client → server (long-lived) |
 | `Diff` | Get diff against base SHA per repo. | client → server |
 | `ExportPatch` | Write a `.patch` for the session's working tree. | client → server |
 | `ExportPush` | `git push` the session's working tree to a branch. | client → server |
@@ -115,6 +114,7 @@ Error codes (stable; CLI exit-code map is in `agentd.md` §7):
 | `forbidden` | Origin check failure. |
 | `unavailable` | Reconciling, Docker down. |
 | `rate_limited` | Container event throttling kicked in. |
+| `snapshot_failed` | Shim could not read or return the conversation history (e.g., JSONL missing, control sock down). Client may retry. |
 | `internal` | Unexpected. |
 | `runtime_error` | Container reported failure. |
 | `version_mismatch` | Client `v` newer than server's max known. |
@@ -167,8 +167,7 @@ Response `data`:
   "status": "starting",
   "web_url": "http://127.0.0.1:7777/sessions/sess_01JFZ…",
   "attach": {
-    "stream_op": "AttachStream",
-    "since_event": null
+    "stream_op": "AttachStream"
   }
 }
 ```
@@ -227,37 +226,31 @@ Request `data`:
 
 ```json
 {
-  "session_id": "sess_01JFZ…",
-  "since_event": "evt_01JG…",          // optional resume cursor
-  "include_history": false             // if true, server pre-streams snapshot
+  "session_id": "sess_01JFZ…"
 }
 ```
 
-Response: a series of `stream_chunk` frames whose `data` is one event from
-§5; ends with `stream_end{reason: "client_disconnected" | "session_terminated"}`
-or an `error`.
+Response: a series of `stream_chunk` frames.
 
-If `since_event` is older than the buffer, the server replies with a single
-`error{code: "buffer_overflow"}` and the client falls back to
-`SnapshotSession` + `AttachStream{since_event: <last-snapshot-event>}`.
+1. **First frame** is always a `session.snapshot` event (§5) whose `data`
+   carries the conversation (reconstructed by the shim from the SDK's
+   `/work/.claude/projects/-work/<sdk_session_id>.jsonl`) plus current
+   operational state (queue depth, in-flight turn id if any, MCP statuses,
+   repos, etc.). agentd obtains the conversation by issuing
+   `agentd.snapshot_request` on the control sock and awaiting the shim's
+   `runtime.snapshot` reply.
+2. **Subsequent frames** are live events from §5, in transmission order,
+   for the duration of the subscription.
 
-#### `SnapshotSession`
+The stream ends with `stream_end{reason: "client_disconnected" |
+"session_terminated"}` or an `error`. If the snapshot read fails the
+server emits a single `error{code: "snapshot_failed"}` and the client may
+retry.
 
-Request `data`: `{ "session_id": "…" }`.
-
-Response `data`:
-
-```json
-{
-  "messages": [ /* runtime-formatted conversation, opaque to agentd */ ],
-  "tail_event_id": "evt_01JG…",
-  "fetched_at": "2026-05-09T12:00:00.000Z"
-}
-```
-
-`agentd` proxies this to the runtime via the control sock (§4) and caches
-for 30 s. Subsequent `AttachStream{since_event: tail_event_id}` resumes the
-live tail.
+There is no `since_event` cursor and no incremental replay. A reconnecting
+client always re-fetches a full snapshot then live-tails. Clients dedupe
+on the wire by `event_id` if they care; events are at-least-once on the
+live stream. See ADR 0015.
 
 #### `Diff`, `ExportPatch`, `ExportPush`
 
@@ -332,7 +325,6 @@ or the git-push output). `data.repo` (optional) scopes to one repo. See
 | `POST` | `/v1/sessions/{id}/messages` | `SendMessage` |
 | `POST` | `/v1/sessions/{id}/interrupt` | `Interrupt` |
 | `POST` | `/v1/sessions/{id}/restart` | `RestartSession` |
-| `GET` | `/v1/sessions/{id}/snapshot` | `SnapshotSession` |
 | `GET` | `/v1/sessions/{id}/diff` | `Diff` (octet-stream) |
 | `POST` | `/v1/sessions/{id}/export/patch` | `ExportPatch` (octet-stream) |
 | `POST` | `/v1/sessions/{id}/export/push` | `ExportPush` (json) |
@@ -463,7 +455,7 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 | `runtime.session_id` | Emitted once after the first SDK message of a session. Carries the SDK-assigned session id agentd persists as `sessions.sdk_session_id` for future `ClaudeAgentOptions.resume`. | `{ sdk_session_id }` |
 | `runtime.heartbeat` | Every 5 s. Used for liveness; absence for 30 s ⇒ session marked stopped. | `{}` |
 | `repo.changed` | Working tree changed (fs-watcher in shim). Fires throttled (max 2/s/repo). | `{ repo, files_changed, deletions, additions }` |
-| `runtime.snapshot` | Reply to an `agentd.snapshot_request`. | `{ messages: [...], tail_event_id }` |
+| `runtime.snapshot` | Reply to an `agentd.snapshot_request`. The shim reads the SDK's `/work/.claude/projects/-work/<sdk_session_id>.jsonl` and returns its contents (opaque to agentd). | `{ messages: [...] }` |
 
 **agentd → container:**
 
@@ -513,11 +505,12 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 
 These are the events any attached client sees. Every event is wrapped in
 the §2.2 `stream_chunk` frame (CLI socket) or a WebSocket text frame
-(browser). Each event has a stable `event_id` (ULID) and `seq` per session.
+(browser). Each event has a stable `event_id` (ULID); ordering is
+on-the-wire (the order agentd transmits them).
 
 | Kind | When | `data` |
 |---|---|---|
-| `session.snapshot` | First frame after `AttachStream`. | `{ session, queue_depth, in_flight, mcps_status, repos, last_seq }` |
+| `session.snapshot` | First frame after `AttachStream`. Carries the full conversation (read via the shim from the SDK's JSONL) plus current operational state. | `{ session, conversation, queue_depth, in_flight, mcps_status, repos }` |
 | `session.starting` | During create. | `{ phase: "image_pull"\|"network"\|"container"\|"shim_init"\|"repo_clone" }` |
 | `session.running` | Container ready. | `{}` |
 | `session.stopping` | Idle/manual stop. | `{ reason }` |
@@ -552,9 +545,10 @@ Clients **must** ignore unknown event kinds and unknown fields.
 - **`CreateSession`** is **not** idempotent in v1; the CLI reports the
   newly-created session id. Retrying after a network timeout can create
   two sessions; the CLI prints both ids and asks the user.
-- **Event ordering** is global per session: `seq` is monotonic across
-  every fan-out emission. Clients use `seq` (not timestamps) for ordering
-  on reconnect.
+- **Event ordering** is on-the-wire: events are delivered to a subscriber
+  in the order agentd transmits them. There is no resume cursor and no
+  cross-restart sequence number; on reconnect the client re-fetches a
+  snapshot and starts the live tail fresh.
 - **At-least-once vs exactly-once delivery on the WS:** at-least-once.
   Clients must dedupe by `event_id` if they care; the SPA does.
 

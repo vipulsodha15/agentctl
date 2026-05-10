@@ -282,9 +282,13 @@ sequenceDiagram
   participant DOC as Docker
   participant CT as Container
 
-  SW->>DB: SELECT sessions WHERE status='running' AND last_activity_at < now-15m AND in_flight=0 AND queue_depth=0
+  SW->>DB: SELECT sessions WHERE status='running' AND last_activity_at < now-15m
   DB-->>SW: candidates
   loop per candidate
+    SW->>AD: ask session actor: busy? (in-flight or queue non-empty)
+    alt busy
+      Note over SW,AD: skip this round
+    end
     SW->>AD: stop(session_id, reason=idle)
     AD->>FAN: session.stopping{reason=idle}
     AD->>DOC: docker stop -t 30 <container_id>
@@ -296,9 +300,10 @@ sequenceDiagram
   end
 ```
 
-Note: `in_flight` and `queue_depth` are computed live; if either is nonzero
-the sweeper skips. The hard-cutoff sweeper (24 h default) does **not** skip —
-it cancels the in-flight turn first, then stops.
+Note: `in_flight` and `queue_depth` are live state in the per-session actor's
+memory; the sweeper queries the actor directly rather than the DB. If either
+is nonzero the sweeper skips. The hard-cutoff sweeper (24 h default) does
+**not** skip — it cancels the in-flight turn first, then stops.
 
 ### 6.5 Idle-resume
 
@@ -487,11 +492,17 @@ each in a way that does not change requirement intent.
    only that client." We implement detach client-side (close socket); the
    server only sees a disconnect. No server-side state per attached client
    beyond the live websocket.
-4. **R6 event buffer size.** R6 says "last 200 or 5 minutes, whichever
-   larger." We implement: a per-session ring buffer in memory (1,000-event
-   cap, ~5 MB hard) plus a per-session events file on disk (`events.ndjson`
-   capped at 50 MB) so reconnect-after-long-disconnect still works without
-   asking the runtime to re-render.
+4. **R6 reconnect / replay model.** R6 originally specified a small
+   server-side event buffer (200 events or 5 minutes). The architecture
+   collapses this to **snapshot + live tail** with no buffer (ADR 0015):
+   the SDK's JSONL on the volume is the single durable record of the
+   conversation; on every attach the shim returns it as a snapshot frame,
+   then live events follow. Re-rendering on reconnect is acceptable v1
+   UX. The savings are one sqlite table, one on-disk events file, one
+   in-memory ring, one prune sweeper, and the cursor/buffer-overflow
+   protocol; the cost is that a client joining mid-turn sees the
+   conversation up to the last completed turn and then catches the
+   in-flight turn from the moment of attach (not from its first delta).
 5. **R8 working tree change visibility.** "Updates as the agent edits …
    pushed via the event stream." We expose `repo.changed` events the shim
    emits via a fsnotify watcher inside the container scoped to

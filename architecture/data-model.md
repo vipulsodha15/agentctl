@@ -57,14 +57,15 @@ CREATE TABLE sessions (
     mcp_status_json     TEXT,                                -- JSON {name: "ok"|"unreachable", reason?}
     repos_json          TEXT NOT NULL,                       -- JSON array of {name,url,base_sha,branch}
     session_token       TEXT NOT NULL,                       -- 256-bit random; control-sock auth (§api.md §4.4)
-    last_error          TEXT,                                -- short code; set on transitions to error/aborted
-    last_seq            INTEGER NOT NULL DEFAULT 0,          -- monotonic event seq emitted to clients
-    queue_depth         INTEGER NOT NULL DEFAULT 0,          -- live; updated on enqueue/dequeue
-    in_flight           INTEGER NOT NULL DEFAULT 0           -- 0|1; updated on turn start/end
-        CHECK (in_flight IN (0, 1))
+    last_error          TEXT                                 -- short code; set on transitions to error/aborted
 );
 CREATE INDEX idx_sessions_status_activity ON sessions(status, last_activity_at);
-CREATE INDEX idx_sessions_status_in_flight ON sessions(status, in_flight, queue_depth);
+
+-- Live state (queue depth, in-flight turn id, last emitted event seq, attached
+-- subscribers) lives in the per-session actor's memory only. Sweepers ask each
+-- running session actor whether it is busy rather than querying the DB. On
+-- agentd restart, in-memory state is reconstructed as empty; clients re-attach
+-- and re-fetch a snapshot.
 
 -- MCP registry: install-wide, edited via R5 surfaces.
 -- `transport` is freeform; v1 recognizes `http` (Streamable HTTP) and
@@ -106,22 +107,10 @@ CREATE TABLE usage (
 CREATE INDEX idx_usage_session_at ON usage(session_id, at);
 CREATE INDEX idx_usage_at ON usage(at);
 
--- Per-session event ring (durable backstop for the in-memory event buffer).
--- Rows older than (now() - 24h) and beyond row N for any session are
--- pruned by a daily sweeper. Clients prefer the in-memory buffer; this
--- table is fallback for reconnects within the same session lifetime.
-CREATE TABLE events (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    seq          INTEGER NOT NULL,
-    event_id     TEXT NOT NULL,                              -- ULID; matches the wire event id
-    kind         TEXT NOT NULL,
-    at           TEXT NOT NULL,
-    data_json    TEXT NOT NULL,
-    UNIQUE(session_id, seq)
-);
-CREATE INDEX idx_events_session_seq ON events(session_id, seq);
-CREATE INDEX idx_events_session_at ON events(session_id, at);
+-- No events table. Replay on client reconnect is served by reading the SDK's
+-- conversation history (`/work/.claude/projects/-work/<sdk_session_id>.jsonl`)
+-- via the runtime shim and emitting it as a single `session.snapshot` frame on
+-- attach. agentd keeps no parallel copy of conversation events. See ADR 0015.
 
 -- Idempotency cache for SendMessage. Rows expire after 5 m.
 CREATE TABLE message_idempotency (
@@ -145,14 +134,16 @@ CREATE TABLE session_lifecycle (
 CREATE INDEX idx_lifecycle_session_at ON session_lifecycle(session_id, at);
 ```
 
-### 2.1 Why the `events` table exists
+### 2.1 Why there is no `events` table
 
-R6 specifies a small server-side event buffer for replay on reconnect. We
-keep a hot in-memory ring (1,000 events / ~5 MB / per session) for
-fast-path reconnects, and a warm sqlite-backed fallback in `events`. After
-24 hours or 50,000 rows per session (whichever lower), entries are
-pruned. Clients that have been disconnected longer than the buffer fall
-back to `SnapshotSession`.
+R6's reconnect / replay model is **snapshot + live tail** — no incremental
+replay buffer. On every client attach (initial or reconnect), the server
+emits one `session.snapshot` frame that contains the conversation
+(reconstructed by the shim from the SDK's JSONL on the volume) plus
+current operational state, then live-tails subsequent events. Clients
+re-render on reconnect; the JSONL is the single durable record of the
+conversation. See ADR 0015 for the trade and ADR 0012 for the superseded
+two-tier design.
 
 ### 2.2 Why `mcp_set_json` is JSON, not a join table
 
@@ -211,8 +202,7 @@ sessions/<session_id>/
 ├── secrets.env                # 0600; injected via Docker --env-file at run; cleared after start
 ├── session.json               # 0600; metadata read by the runtime shim
 ├── agentd.log                 # 0640; per-session NDJSON; rotated by agentd
-├── agentd.log.1.gz, .2.gz, …  # rotated history (up to 7)
-└── events.ndjson              # 0640; rolling 50 MB cap; backstop for reconnects (see §2.1)
+└── agentd.log.1.gz, .2.gz, …  # rotated history (up to 7)
 ```
 
 The `skills/` snapshot is recreated fresh at every session start (it's
@@ -228,8 +218,8 @@ Key invariants:
   separate.
 - `secrets.env` is created with `0600` and deleted after the container is
   started (the env vars are inherited; the file is no longer needed).
-- `agentd.log` and `events.ndjson` are written by `agentd`, not the
-  container. The container writes only into `volume/`.
+- `agentd.log` is written by `agentd`, not the container. The container
+  writes only into `volume/`.
 - The session dir is removed atomically by `TerminateSession`: rename to
   `sessions/.tombstones/<id>-<ts>/` then `rm -rf` async. Failure to remove
   is non-fatal; doctor cleans tombstones on next start.
