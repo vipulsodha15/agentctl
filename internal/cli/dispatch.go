@@ -54,6 +54,7 @@ func commands() []Command {
 		{Name: "detach", Summary: "Help text: detach is a client-side action (Ctrl-D / Ctrl-C).", Run: runDetach},
 		{Name: "ls", Summary: "List sessions.", Run: runLs},
 		{Name: "stop", Summary: "Terminate a session and remove its container + volume.", Run: runStop},
+		{Name: "restart", Summary: "Recreate a session container from the currently pinned image.", Run: runRestart},
 		{Name: "interrupt", Summary: "Cancel a session's in-flight turn.", Run: runInterrupt},
 		{Name: "logs", Summary: "Tail daemon or session logs.", Run: runLogs},
 		{Name: "ui", Summary: "Open the local Web UI in a browser.", Run: runUI},

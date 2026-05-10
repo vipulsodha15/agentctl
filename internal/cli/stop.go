@@ -21,8 +21,7 @@ func runStop(_ context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl stop <session> [--force] [--yes]")
 		fs.PrintDefaults()
 		fmt.Fprintln(env.Stderr, "")
-		fmt.Fprintln(env.Stderr, "Removes the session container, its volume, and marks the session terminated.")
-		fmt.Fprintln(env.Stderr, "TODO(M4): also remove the per-session bridge network.")
+		fmt.Fprintln(env.Stderr, "Removes the session container, its per-session bridge network, and marks the session terminated.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage

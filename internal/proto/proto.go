@@ -25,6 +25,7 @@ const (
 	OpInterrupt           = "Interrupt"
 	OpAttachStream        = "AttachStream"
 	OpTerminateSession    = "TerminateSession"
+	OpRestartSession      = "RestartSession"
 	OpGetLogs             = "GetLogs"
 	OpListMCPs            = "ListMCPs"
 	OpAddMCP              = "AddMCP"
@@ -158,6 +159,16 @@ type TerminateSessionRequest struct {
 type TerminateSessionResponse struct {
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
+}
+
+type RestartSessionRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type RestartSessionResponse struct {
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"`
+	ImageID   string `json:"image_id"`
 }
 
 type GetLogsRequest struct {

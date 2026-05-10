@@ -105,6 +105,7 @@ func Run(ctx context.Context, opts Options) error {
 		CustomDir:  opts.Layout.CustomSkills,
 	})
 
+	configPath := opts.Layout.ConfigFile
 	managerOpts := sm.Options{
 		Store:        st,
 		SessionsDir:  opts.Layout.SessionsDir,
@@ -112,9 +113,16 @@ func Run(ctx context.Context, opts Options) error {
 		Logger:       smLog,
 		DefaultModel: cfg.Model.Default,
 		ImageID:      cfg.Image.PinnedID,
-		SecretsPath:  opts.Layout.SecretsFile,
-		MCPs:         mcpReg,
-		Skills:       newSkillsComposerAdapter(skillMgr),
+		PinnedImageID: func() string {
+			c, err := config.Load(configPath)
+			if err != nil {
+				return cfg.Image.PinnedID
+			}
+			return c.Image.PinnedID
+		},
+		SecretsPath: opts.Layout.SecretsFile,
+		MCPs:        mcpReg,
+		Skills:      newSkillsComposerAdapter(skillMgr),
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt

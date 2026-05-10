@@ -169,6 +169,8 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		s.handleInterrupt(cw, frame)
 	case proto.OpTerminateSession:
 		s.handleTerminate(cw, frame)
+	case proto.OpRestartSession:
+		s.handleRestart(cw, frame)
 	case proto.OpAttachStream:
 		go s.handleAttachStream(cw, frame)
 	case proto.OpGetLogs:
@@ -303,6 +305,29 @@ func (s *Server) handleInterrupt(cw *connWriter, frame proto.Frame) {
 	}
 	s.writeResponse(cw, frame.ID, proto.InterruptResponse{
 		Interrupted: res.Interrupted, ClearedQueueDepth: res.ClearedQueueDepth,
+	})
+}
+
+func (s *Server) handleRestart(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.RestartSessionRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	if req.SessionID == "" {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "session_id required")
+		return
+	}
+	res, err := s.manager.Restart(context.Background(), req.SessionID)
+	if err != nil {
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.RestartSessionResponse{
+		SessionID: res.SessionID, Status: res.Status, ImageID: res.ImageID,
 	})
 }
 
