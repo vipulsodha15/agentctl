@@ -1,6 +1,9 @@
 # ADR 0012 — Event buffer storage for client reconnects
 
-- **Status:** Accepted.
+- **Status:** Superseded by ADR 0015 (2026-05-10). The two-tier
+  in-memory + sqlite design described below is **not** built. v1 ships
+  with snapshot-on-attach + live tail and no replay buffer. This ADR is
+  retained for the historical reasoning.
 - **Date:** 2026-05-09.
 - **Deciders:** Architect.
 

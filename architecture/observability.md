@@ -166,7 +166,7 @@ Local-only. No outbound. Used for `agentctl doctor`, `agentctl ls
 | `agentd_runtime_throttled_seconds_total{session}` | counter | |
 | `agentd_docker_calls_total{op,result}` | counter | |
 | `agentd_db_writes_total{table}` | counter | |
-| `agentd_event_buffer_overflows_total` | counter | When clients fall back to snapshot. |
+| `agentd_snapshot_failed_total` | counter | When a client attach fails because the shim couldn't return the conversation snapshot. |
 | `agentd_mcp_probe_results_total{name,result}` | counter | |
 | `agentd_recovery_orphans_total{kind}` | counter | container/network/dir orphans found at boot. |
 
@@ -197,8 +197,8 @@ gated by a config flag.
   healthy.
 - "agentd has restarted 5 times in the last hour" — looks bad.
 - "12 idle stops in the last day, 0 hard cutoffs" — informational.
-- "3 event buffer overflows in last hour" — investigate slow client or
-  long disconnects.
+- "3 snapshot failures in last hour" — investigate shim health or
+  missing JSONL files on volumes.
 
 ## 6. Tracing
 

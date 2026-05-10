@@ -164,8 +164,7 @@ Recovery, network policy hardening, R8 diff/export, R10 cost rows.
 ### Scope
 
 - Recovery / reconciliation algorithm (overview.md §7).
-- Idle-stop sweeper, hard-cutoff sweeper, events_prune, idem_cleanup,
-  tombstone_reap.
+- Idle-stop sweeper, hard-cutoff sweeper, idem_cleanup, tombstone_reap.
 - Per-session Docker bridge networks with `enable_icc=false`
   (peer-isolation; no iptables manipulation in v1).
 - Peer-isolation self-test in `agentctl doctor`.
