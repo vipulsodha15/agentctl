@@ -18,3 +18,7 @@
 
 # Claude Code agent worktree metadata (tooling state, not source)
 .claude/
+
+# Python bytecode (shim source is run inside the image)
+__pycache__/
+*.pyc
