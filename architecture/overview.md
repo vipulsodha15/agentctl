@@ -97,12 +97,13 @@ graph TB
     fan -- "events" --> cli
     fan -- "events" --> ui
     sm -- "secrets injection<br/>at container create" --> secrets
-    Sess -- "egress only" --> perNet
-    perNet -- "allow" --> Anthropic[(Anthropic API)]
-    perNet -- "allow" --> MCPs[(Internal MCPs)]
-    perNet -- "allow PAT-auth" --> GitHub[(GitHub.com)]
-    perNet -. "DENY" .- Daemon
-    perNet -. "DENY peer" .- OtherSess[Other session containers]
+    Sess -- "egress (unrestricted in v1)" --> perNet
+    perNet --> Anthropic[(Anthropic API)]
+    perNet --> MCPs[(Internal MCPs)]
+    perNet -- "PAT-auth" --> GitHub[(GitHub.com)]
+    perNet -. "DENY peer (ICC=off)" .- OtherSess[Other session containers]
+    %% Note: v1 does NOT block egress to host loopback or the public internet at large.
+    %% Strict egress allowlisting is deferred to v2 (see v2-requirements.md §V2.1).
   end
 ```
 
@@ -117,8 +118,9 @@ sandboxes beyond Docker.
 | `agentctl` CLI ↔ `agentd` Unix socket | Trusted: same OS user. Socket file mode `0600`. |
 | Browser ↔ `agentd` HTTP/WS | Half-trusted: same machine, but any local process under the same user can reach `127.0.0.1:7777`. Bearer token + Origin check required (§15.7). |
 | Session container ↔ `agentd` control socket | Untrusted from `agentd`'s side. The container is the agent's blast radius (§15.1). Messages are validated, rate-limited, and never include host paths. |
-| Session container ↔ another session container | No trust, no path. Per-session Docker network blocks peer access (R7). |
-| Session container ↔ host loopback | No trust, no path. Network policy denies the Docker gateway IP for everything except Anthropic + configured MCP CIDRs. The control socket bind-mount is the only host-side surface. |
+| Session container ↔ another session container | No trust, no path. Per-session Docker network with `enable_icc=false` blocks peer access (R7). |
+| Session container ↔ host loopback | No trust. Network path is **not** blocked in v1; reachability is gated by `agentd`'s bearer-token auth on `/v1/*`. Container has no bind-mount to read the token. Strict network-layer blocking is deferred to v2. |
+| Session container ↔ public internet | No trust. v1 does not restrict outbound egress; the container can reach the developer's LAN and arbitrary public URLs. v2 may add an FQDN allowlist (`v2-requirements.md` §V2.1). |
 | `agentd` ↔ Docker daemon | `agentd` is trusted by the Docker daemon (membership in the `docker` group on Linux, same-user on macOS). This is the same trust the developer already grants `docker` CLI usage. |
 | `agentd` ↔ disk (`~/.config`, `~/.local/share`) | `agentd` enforces `0600`/`0700` perms. Anything else under those paths is a doctor-flagged anomaly. |
 
@@ -213,8 +215,7 @@ sequenceDiagram
   AD->>FS: mkdir sessions/<id>/{volume,control,log}
   AD->>FS: write sessions/<id>/session.json (model, mcps, repos)
   AD->>FS: write sessions/<id>/secrets.env (0600, on tmpfs if available)
-  AD->>DOC: docker network create agentctl-<id>
-  AD->>DOC: apply iptables egress policy (anth + MCP CIDRs)
+  AD->>DOC: docker network create agentctl-<id> (enable_icc=false)
   AD->>DOC: docker run (mounts, env, --memory, --cpus, network)
   DOC-->>CT: starts
   CT->>SHM: entrypoint
@@ -497,29 +498,31 @@ points the requirements left informal.
 
 ## 10. Top three risks and mitigations
 
-1. **Network-policy correctness.** R7 demands the container reach Anthropic
-   + configured MCPs but **not** the host loopback or peer containers.
-   Getting iptables rules wrong is silently easy and security-relevant.
-   *Mitigation:* `agentd doctor` runs a network-policy self-test on every
-   start (egress allowed to `api.anthropic.com:443`, blocked to
-   `<host-gw>:7777` and to a peer container's IP). Failed self-test marks
-   the session `error` rather than letting it run unsafely. See
-   `container-and-image.md` §4 and `security.md` §4.
-
-2. **Recovery edge cases.** The reconciliation algorithm (§7) is the
+1. **Recovery edge cases.** The reconciliation algorithm (§7) is the
    critical path for "no manual intervention after reboot" (R6).
    *Mitigation:* every state transition writes to sqlite **before** issuing
    the Docker call. On replay we always have a row that says "we were
    trying to do X." Plus a battery of fault-injection tests in the v1 test
    plan (kill agentd mid-create, mid-stop, etc.) listed in `phasing.md`.
 
-3. **Web UI auth bypass.** Local malware running as the same user can read
+2. **Web UI auth bypass.** Local malware running as the same user can read
    `web_token` and drive the UI. We've raised the bar (token + Origin) but
-   not eliminated the risk.
+   not eliminated the risk. With v1's no-egress-restriction posture, the
+   same malware could also drive a session to exfiltrate code through
+   ordinary outbound channels.
    *Mitigation:* document the trust boundary clearly (`security.md` §3),
    support fast token rotation (`init --reset-web-token`), and avoid
    widening UI capabilities beyond what the CLI already exposes — same
    trust model, same blast radius.
+
+3. **Unrestricted container egress.** v1 does not filter session-container
+   outbound traffic; a misbehaving agent can reach the developer's LAN
+   or post to arbitrary public URLs.
+   *Mitigation:* documented as the v1 posture (matches Codespaces,
+   Gitpod, devcontainers, Cursor agents). Per-session volume + filesystem
+   isolation + auth-gated admin API still hold. Strict allowlisting is a
+   v2 candidate (`v2-requirements.md` §V2.1); the leading approach is an
+   egress-proxy sidecar rather than host-firewall manipulation.
 
 ## 11. Open questions raised during architecture
 

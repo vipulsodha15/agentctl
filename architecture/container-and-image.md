@@ -123,9 +123,13 @@ they are named; where it doesn't, the Engine API field is named.
 - The container is attached to **only** this network. No `host`, no
   default `bridge`. ICC (inter-container communication) on the network is
   off — even if two containers somehow ended up on the same network they
-  couldn't talk.
+  couldn't talk. This is the sole network-level isolation v1 enforces;
+  it satisfies R7's peer-isolation requirement and costs nothing beyond
+  Docker config.
 - `enable_ip_masquerade` is on (default) so egress works through the host
-  NAT.
+  NAT. The container can reach the public internet, the developer's LAN,
+  and the host's loopback. Strict egress filtering is deferred to v2
+  (`v2-requirements.md` §V2.1).
 - IPv6 disabled at the network level for v1 (default Docker; we reaffirm
   it).
 
@@ -275,90 +279,29 @@ attaching to the container. Implementation:
 container. All git operations live in the shim where credentials are
 already wired.
 
-## 4. Network policy (realizing R7)
+## 4. Network posture (v1)
 
-The hard requirements:
+v1 ships with Docker-native isolation only. Two requirements are met:
 
-- **Allow** egress to Anthropic (`api.anthropic.com:443`).
-- **Allow** egress to configured internal MCP CIDRs and `github.com:443`
-  (for the GitHub MCP and `git push`).
-- **Deny** access to peer session containers.
-- **Deny** access to host loopback (where `agentd`'s Web UI lives) — the
-  control sock is the **only** allowed channel.
+- **Peer isolation.** Each session has its own bridge network with
+  `enable_icc=false` (§2.2). Two session containers cannot reach each
+  other by hostname or IP.
+- **No inbound exposure.** No ports are published from session
+  containers; nothing on the host or LAN can connect *into* a session.
 
-### 4.1 Mechanism
+What v1 does **not** restrict:
 
-We layer three controls:
+- Outbound egress to the public internet, the developer's LAN, or the
+  host's loopback. The container can `curl` arbitrary URLs.
+- Reaching `agentd`'s admin API on `127.0.0.1:7777` over the host
+  bridge gateway. This is gated by the bearer token in
+  `~/.config/agentctl/web_token`, which the container has no
+  bind-mount to read; without the token every `/v1/*` request returns
+  `401`.
 
-1. **Per-session Docker network with ICC off** (§2.2). This already
-   blocks peer containers on the same install — they cannot resolve or
-   reach each other.
-2. **iptables FORWARD rules** managed by `agentd`. On Linux, when
-   `agentd` creates a session network, it inserts ordered rules in a
-   custom chain `AGENTCTL-EGRESS` (jumped to from `DOCKER-USER`):
-
-   ```text
-   # Pseudocode for agentd's iptables installer.
-   iptables -N AGENTCTL-EGRESS                                    (idempotent)
-   iptables -I DOCKER-USER 1 -j AGENTCTL-EGRESS                   (idempotent)
-   iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-   # For each session network <net-name>:
-   iptables -A AGENTCTL-EGRESS -i <net-name> \
-            -d <host-bridge-ip>/32 -j DROP                         # Block host loopback path
-   iptables -A AGENTCTL-EGRESS -i <net-name> \
-            -d 127.0.0.0/8 -j DROP                                 # Defensive
-   for cidr in <RFC1918 ranges except configured-mcp-cidrs>:
-       iptables -A AGENTCTL-EGRESS -i <net-name> -d $cidr -j DROP
-   for cidr in <configured-mcp-cidrs>:
-       iptables -A AGENTCTL-EGRESS -i <net-name> -d $cidr -j ACCEPT
-   iptables -A AGENTCTL-EGRESS -i <net-name> -p tcp --dport 443 -j ACCEPT
-   iptables -A AGENTCTL-EGRESS -i <net-name> -p udp --dport 53 -j ACCEPT
-   iptables -A AGENTCTL-EGRESS -i <net-name> -j DROP
-   ```
-
-   On macOS, Docker Desktop runs Linux in a VM; iptables runs inside the
-   VM. `agentd` shells out to Docker's `dockerd` via `docker network`
-   labels and a `--internal=false` flag plus a custom Docker plugin? No —
-   we instead **use Docker's IPAM and a tighter trick**: each session
-   network is created with `--internal=true` (no external by default) and
-   we add a **userland egress proxy** sidecar pattern. Too complex for v1.
-
-   **macOS approach for v1 (simpler):** Docker Desktop on macOS isolates
-   networks effectively from the host (VM boundary). The host loopback
-   IS reachable from a container only via `host.docker.internal` (a
-   Docker-injected hostname). We **explicitly do not inject**
-   `--add-host=host.docker.internal:host-gateway`, and we set
-   `--add-host=host.docker.internal:127.0.0.1` so any inadvertent
-   reference resolves to the container's own loopback. Combined with
-   per-session networks and ICC=off, peer-to-peer is blocked. Egress
-   filtering on macOS is best-effort (we cannot install host-side
-   iptables); we document this gap in `security.md` §4.
-
-3. **Network self-test** (`agentd doctor`) verifies all four
-   constraints in §4 by spinning up an ephemeral diagnostic container on
-   a session network and checking each is enforced.
-
-### 4.2 MCP CIDRs
-
-`config.toml` has `[network.allowed_mcp_cidrs]`:
-
-```toml
-[network]
-allowed_mcp_cidrs = ["10.20.0.0/16", "192.168.42.0/24"]
-allow_github = true       # github.com IP pool resolved at start
-allow_anthropic = true    # api.anthropic.com IP pool resolved at start
-```
-
-Public MCPs (e.g., the GitHub MCP) have their effective CIDRs resolved
-at `agentd` startup via DNS (and refreshed every hour). Internal MCPs are
-configured by CIDR, not hostname, to keep the policy crisp.
-
-### 4.3 What's intentionally not blocked
-
-- DNS to the host's resolver (the bridge gateway IP on UDP/53 — actually
-  Docker's embedded resolver on `127.0.0.11` inside the container, which
-  forwards via the host). We allow it; without DNS, nothing works.
-- The control sock — by definition.
+Strict outbound egress allowlisting (Anthropic / GitHub / configured
+MCPs only) is deferred to v2. See `v2-requirements.md` §V2.1 for the
+goal and the previously proposed iptables-based design.
 
 ## 5. Container teardown
 

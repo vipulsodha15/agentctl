@@ -294,6 +294,11 @@ cache_read   = 0.08
 cache_write  = 1.00
 ```
 
+v1 has no `[network]` block: session containers run with Docker's
+default outbound posture (peer-isolated via `enable_icc=false`, but
+otherwise unrestricted egress). A future `[network]` block would land
+when v2 introduces egress filtering — see `v2-requirements.md` §V2.1.
+
 A change to `[pricing.tables]` increments `version` and applies only to
 **future** `usage` rows (R10). Historical rows keep their original
 `cost_usd` and `price_table_version`.

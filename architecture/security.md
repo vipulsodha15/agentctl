@@ -46,9 +46,10 @@ If the agent runtime is somehow malicious or controlled by a bad input:
 | `/work` | Yes, full control. The session volume is the blast cap. `agentctl stop` deletes it. |
 | Other sessions' `/work` | No. Volumes are not shared. |
 | Host filesystem outside the volume mount | No. Bind-mounts are limited to volume + control sock dir. |
-| Host loopback / `agentd` admin API | No. Network policy blocks the host bridge IP; the only host-side surface is the bind-mounted control sock, which has a verified `session_token`. |
+| Host loopback / `agentd` admin API | Network-reachable via the host bridge gateway, but **gated by the bearer token** in `web_token` which the container cannot read (no bind-mount). Unauthenticated requests return `401`. The control sock is also available to the container but verifies `session_token`. v2 may add network-layer blocking; v1 relies on auth. |
 | Other session containers | No. Per-session networks with ICC off. |
-| Public internet | Yes, **only** to Anthropic, configured MCP CIDRs, and GitHub. All other egress is dropped. |
+| Public internet | Yes, **without restriction** in v1. The container can reach Anthropic, GitHub, configured MCPs, and arbitrary other endpoints. v2 may add egress allowlisting (`v2-requirements.md` §V2.1). |
+| The developer's LAN / corporate intranet | Yes, in v1. Routable from the container. v2 may block RFC1918 except configured CIDRs. |
 | The developer's GitHub account | Yes, with the developer's PAT. The agent could push branches, open PRs (if PAT has scope). This is documented in §15.1's "developer is responsible for the consequences." |
 | Anthropic API spend | Yes — agent can spend up to whatever model+rate the configured key allows. R10 makes spend visible; budgets are post-v1. |
 | `agentd` itself | No. The control sock is the only inbound surface; agentd validates everything. |
@@ -188,57 +189,47 @@ on `127.0.0.1` could steal the cookie. Mitigation: SameSite=Strict
 helps for cross-site browser-driven attacks; doesn't help against
 malicious extensions. The same is true of any local web UI.
 
-## 4. Network policy details
+## 4. Network posture
 
-(Cross-reference: container-and-image.md §4. Restated here in the
-security frame.)
+(Cross-reference: container-and-image.md §4.)
 
-### 4.1 Goals
+### 4.1 What v1 enforces
 
 | Goal | Method |
 |---|---|
-| Container reaches Anthropic for API calls | iptables ACCEPT for resolved IPs, refreshed hourly. |
-| Container reaches configured internal MCPs | iptables ACCEPT for configured CIDRs. |
-| Container reaches GitHub (clone/push/MCP) | iptables ACCEPT for github.com IP pool, refreshed hourly. |
-| Container does **not** reach host loopback / Web UI | iptables DROP for the docker bridge IP and 127.0.0.0/8. |
-| Container does **not** reach peer containers | Per-session network with ICC off. |
-| Container's only host-side surface is the control sock | Single bind-mount; nothing else. |
+| Container does **not** reach peer containers | Per-session Docker bridge network with `enable_icc=false`. Costs nothing beyond Docker config. |
+| `agentd` admin API is not driveable from a session container | Bearer-token auth on every `/v1/*` request. The token lives in `~/.config/agentctl/web_token` (`0600`) which the container has no bind-mount to read. |
+| `agentd` accepts no remote connections | Binds CLI socket and HTTP/WS to `127.0.0.1` and `::1` only. |
+| Control sock auth | Shim presents `session_token`; agentd verifies before greeting. |
 
-### 4.2 Linux implementation
+### 4.2 What v1 does **not** enforce
 
-`agentd` manages a custom iptables chain `AGENTCTL-EGRESS` jumped to
-from `DOCKER-USER`. Rules per session network in §container-and-image.md
-§4.1.
+The container has Docker's default outbound network posture:
 
-The chain is rebuilt on `agentd` start (so a host reboot or a missed
-session-stop cleanup is corrected automatically). Doctor's
-`network.policy` self-test verifies enforcement.
+- **Public internet:** unrestricted. The container can reach Anthropic,
+  GitHub, configured MCPs, and arbitrary other URLs.
+- **Developer LAN / internal services:** routable from the container.
+  Nothing in v1 blocks reaching the dev's NAS, router admin, or
+  internal corp services.
+- **Host loopback:** reachable network-wise via the bridge gateway IP.
+  Gated by bearer-token auth on `agentd`, not at the network layer.
 
-### 4.3 macOS implementation
+This matches the posture of comparable tools (GitHub Codespaces,
+Gitpod, devcontainers, Cursor background agents). The threat model
+trade-off is documented in `v2-requirements.md` §V2.1 along with the
+previously considered iptables-based design.
 
-Docker Desktop on macOS runs Linux in a VM. Host-side iptables doesn't
-help; the relevant iptables instance is inside the VM, where
-`com.docker.backend` runs.
+### 4.3 What we explicitly do not try to do in v1
 
-For v1 we accept a documented gap:
+- Allowlist or deny outbound by hostname, IP, or CIDR.
+- Manipulate iptables / nftables on the host.
+- Run an egress proxy.
+- Probe macOS Docker Desktop's VM-internal networking.
 
-- Per-session networks + ICC off do work (Docker handles them inside
-  the VM identically to Linux native).
-- Egress filtering (allow only Anth + MCPs + GitHub) is **best
-  effort**: containers cannot reach host loopback because Docker
-  Desktop's networking already separates host and VM, but they can
-  reach arbitrary public internet from inside the VM.
-
-We document this in `agentctl doctor`'s output: on macOS,
-`network.policy` warns rather than failing. Hardening macOS to feature
-parity with Linux requires a Docker plugin and is out of scope for v1.
-
-### 4.4 What we don't try to block
-
-- DNS to Docker's embedded resolver (127.0.0.11 inside the container).
-  Without it, the runtime can't resolve Anthropic, MCPs, or GitHub.
-- Established/related connections (so responses get back).
-- The control sock — by definition.
+If a v2 customer threat model demands egress filtering, the leading
+candidate is an egress-proxy sidecar (FQDN allowlist) rather than
+host-firewall manipulation, because the latter requires privileged
+helpers a user-level `agentd` does not have.
 
 ## 5. Container hardening
 

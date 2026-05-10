@@ -241,7 +241,7 @@ for scripting).
 | `image.signed` | cosign verify ok against pinned digest. | "signature mismatch; possible registry compromise." |
 | `mcp.registry` | mcp_registry rows are well-formed. | Per-row errors. |
 | `secrets.fresh` | Anthropic key + GitHub PAT still validate. | Suggests `--reset-token`. |
-| `network.policy` | Self-test container on a fresh session network: egress to anth ok; egress to peer denied; egress to host gw:7777 denied. | Per-rule pass/fail. |
+| `network.peer_isolation` | Spin up two ephemeral diagnostic containers on two session networks; verify each is unable to reach the other. (Egress filtering is not enforced in v1; see `v2-requirements.md` §V2.1.) | Per-test pass/fail. |
 | `volumes.disk` | < 80% partition usage and < 100 sessions. | Lists biggest sessions. |
 
 ### 5.2 Subcommands
@@ -254,20 +254,17 @@ for scripting).
   case: "DB corruption → refuse to start until repaired").
 - `agentctl doctor --json` — machine-readable output for scripting.
 
-### 5.3 Self-test container
+### 5.3 Peer-isolation self-test
 
-For `network.policy`, doctor spins up a small test container on a
-brand-new ephemeral session network with the same iptables rules as a
-real session. It runs an embedded probe binary that reports back via
-the control sock:
+For `network.peer_isolation`, doctor spins up two small probe
+containers on two distinct ephemeral session networks (matching the
+real session network config: `enable_icc=false`). Probe A tries to
+reach probe B on its bridge IP and expects a connect timeout. Both
+probes report back via their bind-mounted control socks.
 
-- `curl -s -m 3 https://api.anthropic.com/` → expect 4xx (auth-required) — proves reachability.
-- `curl -s -m 3 http://<host-bridge>:7777/` → expect timeout — proves blocked.
-- `curl -s -m 3 http://<peer-net-ip>:80/` (synthesizes a peer-like target) → expect timeout.
-
-If the test fails, doctor surfaces the offending check and refuses to
-declare the install healthy. This is the same self-test agentd runs at
-each `Health=ok` boundary on Linux (container-and-image.md §4.1).
+If the test fails, doctor surfaces it and refuses to declare the
+install healthy. v1 does **not** test outbound egress restrictions
+because v1 does not enforce them — see `v2-requirements.md` §V2.1.
 
 ## 6. Failure-mode reference
 
@@ -284,6 +281,7 @@ Cross-references R1 error cases with implementation behavior.
 | Image pull fails (network) | Print remediation, exit 2 | 2 | init step 2 |
 | Image signature mismatch | Print signature info, exit 2 | 2 | init step 3 |
 | `agentd` healthy but failing checks (`Health.ok=false`) | Print structured error pointing to `agentctl doctor` | 4 | start step (R1) |
+| Peer-isolation self-test fails | Surface offending pair; refuse `doctor` healthy | 5 | doctor `network.peer_isolation` |
 | DB schema newer than binary | Refuse to start; print upgrade instructions | n/a | agentd boot |
 | DB integrity check fails | `agentctl doctor --repair-db` required | 5 | agentd boot |
 

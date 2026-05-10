@@ -258,17 +258,17 @@ agentctl 0.1.0 — environment OK
   image.signed          ok    cosign verified
   mcp.registry          ok    2 entries
   secrets.fresh         ok    Anthropic + GitHub valid
-  network.policy        ok    egress→anth allowed; peer→denied; host-loopback→denied
+  network.peer_isolation ok   probe A → probe B: connect timeout (expected)
   volumes.disk          ok    14% used, 4 sessions
 ```
 
 Failures look like:
 
 ```text
-  network.policy        FAIL  egress→anth allowed (ok)
-                              peer→denied (ok)
-                              host-loopback→ALLOWED (expected denied)
-                        → run `agentctl init --repair` to reinstall iptables rules.
+  network.peer_isolation FAIL  probe A reached probe B (expected timeout)
+                         → check Docker bridge config; ensure
+                           `com.docker.network.bridge.enable_icc=false`
+                           on per-session networks.
 ```
 
 Exit code is non-zero with the failed-check name in

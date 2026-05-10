@@ -57,7 +57,7 @@ graph LR
 | `log` | Initialize structured logger; spawn per-session log writer. | Process + per-session |
 | `rec` | Run the reconciliation algorithm (`overview.md` §7) at startup. | Once at boot |
 | `mcp` | CRUD over the `mcp_registry` table. Cache for read; write-through. | Process |
-| `cm` | Wrap Docker SDK calls (`create`, `start`, `stop`, `kill`, `rm`, `ps`, networks, iptables on Linux). | Process |
+| `cm` | Wrap Docker SDK calls (`create`, `start`, `stop`, `kill`, `rm`, `ps`, network create/remove). | Process |
 | `sm` | Owns the per-session **actor**: queue, in-flight state, control-sock connection. | Per session |
 | `cc` | Listen on each session's control socket; deliver frames to that session's actor. | Per session |
 | `fan` | Broadcast queue of events to attached clients. Reads come from session actor; writes fan out to N subscribers. | Per session |
@@ -229,7 +229,6 @@ safe to overlap.
 | `idem_cleanup` | every 5 min | DELETE FROM message_idempotency WHERE accepted_at < now-5m. |
 | `events_prune` | every hour | DELETE FROM events WHERE at < now-24h OR (session_id, seq) below per-session caps. VACUUM not run automatically. |
 | `tombstone_reap` | every 6h | rm -rf sessions/.tombstones/* older than 7 days. |
-| `mcp_dns_refresh` | every hour | Resolve `api.anthropic.com` and `github.com` IP pools; update iptables rules in place. |
 
 Sweepers log every action they take to the daemon log; counts to the
 metrics module.

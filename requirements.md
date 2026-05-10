@@ -442,30 +442,26 @@ Constraints every requirement and the technical design must respect:
 - **Filesystem.** Each session has a dedicated container with its own root filesystem and a private volume mounted at `/work`. No volume is shared across sessions.
 - **Processes.** Default Docker process namespacing; sessions cannot see each other's PIDs.
 - **Secrets.** Env vars are set on the container at creation. The host-side `secrets.json` is never bind-mounted into containers. One session's container has no access to another's env block.
-- **Network.** Each session container runs on a per-session Docker network configured to allow:
-  - egress to the public internet (for the Anthropic API);
-  - egress to the configured internal MCP network range;
-  - **no** access to other session containers (no shared bridge);
-  - **no** access to the host loopback (where `agentd`'s Web UI lives) other than over the dedicated control channel `agentd` itself opens to the container.
+- **Network.** Each session container runs on its own per-session Docker bridge network with inter-container communication disabled (`enable_icc=false`). This prevents one session container from reaching another by hostname or IP. Egress to the public internet is **not** restricted in v1 — the container can reach Anthropic, GitHub, configured MCPs, and anywhere else its DNS can resolve. `agentd`'s admin API on `127.0.0.1` is reachable network-wise from the container, but is gated by a per-install bearer token the container has no filesystem path to read (see R3 secrets handling). Strict outbound egress filtering is deferred to v2 (`v2-requirements.md` §V2.1).
 - **Resource caps.** Each container is created with `--memory` and `--cpus` flags from defaults (§5) overridable per session by `agentctl start --mem-limit ... --cpu-limit ...`.
 
 **Trust boundary.**
 
-- The container is treated as a hostile process from `agentd`'s perspective in this sense: `agentd` does not expose its admin API to any session container. The only inbound surface from a container to `agentd` is the dedicated session event channel.
+- The container is treated as a hostile process from `agentd`'s perspective in this sense: `agentd`'s admin API requires a bearer token (`web_token`) the container has no path to read; the only inbound surface from a container to `agentd` is the dedicated session event channel.
 - `agentd` validates and rate-limits messages from a container so a misbehaving runtime cannot flood the host.
-- Per §15.1, tool prompting is disabled inside the container, so the **container's isolation as defined here is the sole safety boundary** for what the agent can and cannot affect. Anything reachable from inside `/work` and the configured network policy is fair game; nothing else is.
+- Per §15.1, tool prompting is disabled inside the container, so the **container's filesystem isolation, resource caps, and `agentd`'s auth-gated admin API are the safety boundary** for what the agent can and cannot affect. Anything reachable from inside `/work`, plus anywhere the container's network can route to (Docker's default egress posture), is fair game in v1. Strict outbound filtering is v2 (`v2-requirements.md` §V2.1).
 
 **Acceptance criteria.**
 
 - A file written in session A's `/work` is not visible in session B's `/work`.
 - An env var set in session A is not readable in session B.
-- A container in session A cannot reach a container in session B by hostname or IP.
+- A container in session A cannot reach a container in session B by hostname or IP (enforced by per-session Docker bridge with ICC disabled).
 - Memory exhaustion in one session results in that container being OOM-killed by Docker (and surfaced as a session error per R2), not host-wide degradation.
 - CPU saturation in one session does not prevent another session from making progress on a multi-core host.
 
 **Error and edge cases.**
 
-- A session attempts to bind a port intending to communicate with another session → fails by network policy; surfaced as a tool error.
+- A session attempts to reach another session container by hostname or IP → fails because the per-session Docker network has ICC disabled; surfaced as a tool error.
 - A user sets resource caps so low the runtime cannot start → fail fast with a clear message.
 
 **Dependencies.** R2 (container lifecycle), R3 (env var injection).
@@ -862,6 +858,7 @@ Explicit deferrals so scope doesn't drift:
 - **Telemetry/analytics** sent to any service.
 - **Pre-warmed container pools** to push start latency below cold-image times.
 - **Container pause/unpause** as a third lifecycle state alongside running/stopped.
+- **Strict outbound network egress filtering** for session containers (allowlist of Anthropic / GitHub / MCPs only). Deferred to v2; see `v2-requirements.md` §V2.1.
 
 ---
 
