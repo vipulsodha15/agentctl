@@ -1,0 +1,3 @@
+# Reserved for /etc/agentctl/templates/ in M2+. The Dockerfile copies this
+# directory into the image so subsequent milestones can drop runtime config
+# templates here without changing the build context layout.

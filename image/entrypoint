@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Real M2 entrypoint will exec the runtime shim. M1 image just sanity-checks
+# the build context and stays alive for control-sock smoke tests.
+
+if [[ "${AGENTCTL_DEBUG:-}" == "1" ]]; then
+  set -x
+fi
+
+exec /opt/agentctl/venv/bin/python3 -m shim "$@"

@@ -1,0 +1,17 @@
+# Built binaries (built by go build / install.sh; never committed)
+/agentctl
+/agentd
+/dist/
+/bin/
+
+# Local databases / sockets that creep in if the dev runs the daemon from the repo root
+*.db
+*.db-shm
+*.db-wal
+*.sock
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
