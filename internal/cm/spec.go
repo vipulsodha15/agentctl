@@ -5,15 +5,21 @@ import (
 )
 
 type Spec struct {
-	SessionID string
-	ImageID   string
-	Name      string
-	Labels    map[string]string
-	EnvFile   string
-	Mounts    []Mount
-	MemBytes  int64
-	CPUs      float64
-	NetworkID string
+	SessionID      string
+	ImageID        string
+	Name           string
+	Labels         map[string]string
+	EnvFile        string
+	Mounts         []Mount
+	MemBytes       int64
+	CPUs           float64
+	NetworkID      string
+	ReadOnlyRootFS bool
+	CapDrop        []string
+	SecurityOpts   []string
+	PidsLimit      int64
+	Tmpfs          map[string]string
+	MemorySwap     int64
 }
 
 type MountType string

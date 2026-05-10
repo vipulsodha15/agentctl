@@ -2,7 +2,14 @@ package sm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -282,6 +289,7 @@ func TestProvisionTearsDownOnStartFailure(t *testing.T) {
 type fakeContainerManager struct {
 	mu              sync.Mutex
 	calls           []string
+	specs           []ContainerSpec
 	startErr        error
 	createErr       error
 	listenSeen      bool
@@ -295,6 +303,7 @@ func newFakeContainerManager() *fakeContainerManager {
 func (f *fakeContainerManager) Create(_ context.Context, spec ContainerSpec) (ContainerHandle, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, "create")
+	f.specs = append(f.specs, spec)
 	f.mu.Unlock()
 	if f.createErr != nil {
 		return ContainerHandle{}, f.createErr
@@ -323,6 +332,139 @@ func (f *fakeContainerManager) Remove(_ context.Context, _ string, _ bool) error
 	f.calls = append(f.calls, "remove")
 	f.mu.Unlock()
 	return nil
+}
+
+type fakeSkillsComposer struct {
+	mu     sync.Mutex
+	skills map[string][]byte
+}
+
+func newFakeSkillsComposer() *fakeSkillsComposer {
+	return &fakeSkillsComposer{skills: map[string][]byte{}}
+}
+
+func (f *fakeSkillsComposer) addSkill(name, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.skills[name] = []byte(body)
+}
+
+func (f *fakeSkillsComposer) Compose(dest string) (SkillsComposeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := os.MkdirAll(dest, 0o700); err != nil {
+		return SkillsComposeResult{}, err
+	}
+	names := make([]string, 0, len(f.skills))
+	for n := range f.skills {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		dir := filepath.Join(dest, n)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return SkillsComposeResult{}, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), f.skills[n], 0o644); err != nil {
+			return SkillsComposeResult{}, err
+		}
+	}
+	h := sha256.New()
+	for _, n := range names {
+		_, _ = io.WriteString(h, n+"\x00")
+		_, _ = h.Write(f.skills[n])
+		_, _ = h.Write([]byte{0})
+	}
+	return SkillsComposeResult{
+		Path:   dest,
+		Hash:   hex.EncodeToString(h.Sum(nil)),
+		Skills: names,
+	}, nil
+}
+
+func TestSkillsSnapshotFrozenAtCreate(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeControl()
+	cm := newFakeContainerManager()
+	fc.bound = cm
+	composer := newFakeSkillsComposer()
+	composer.addSkill("alpha", "alpha-v1")
+	composer.addSkill("beta", "beta-v1")
+
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Containers:      cm,
+		Control:         fc,
+		Skills:          composer,
+		DefaultModel:    "claude-sonnet-4-6",
+		ImageID:         "sha256:abc",
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	first, err := mgr.Create(ctx, CreateRequest{Name: "first"})
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	firstSkills := readSkillNames(t, filepath.Join(dir, first.SessionID, "skills"))
+	if !reflect.DeepEqual(firstSkills, []string{"alpha", "beta"}) {
+		t.Fatalf("first session skills: got %v want [alpha beta]", firstSkills)
+	}
+
+	composer.addSkill("gamma", "gamma-v1")
+
+	second, err := mgr.Create(ctx, CreateRequest{Name: "second"})
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	secondSkills := readSkillNames(t, filepath.Join(dir, second.SessionID, "skills"))
+	if !reflect.DeepEqual(secondSkills, []string{"alpha", "beta", "gamma"}) {
+		t.Fatalf("second session skills: got %v want [alpha beta gamma]", secondSkills)
+	}
+
+	frozen := readSkillNames(t, filepath.Join(dir, first.SessionID, "skills"))
+	if !reflect.DeepEqual(frozen, []string{"alpha", "beta"}) {
+		t.Fatalf("first session snapshot drifted: got %v want [alpha beta]", frozen)
+	}
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if !reflect.DeepEqual(cm.specs[0].Mounts, mountsWithSkills(filepath.Join(dir, first.SessionID))) {
+		t.Errorf("first spec mounts missing /skills entry: %+v", cm.specs[0].Mounts)
+	}
+	if !cm.specs[0].ReadOnlyRootFS {
+		t.Errorf("expected ReadOnlyRootFS=true on container spec")
+	}
+	if cm.specs[0].PidsLimit != 512 {
+		t.Errorf("expected PidsLimit=512, got %d", cm.specs[0].PidsLimit)
+	}
+	if !reflect.DeepEqual(cm.specs[0].CapDrop, []string{"ALL"}) {
+		t.Errorf("expected CapDrop=[ALL], got %v", cm.specs[0].CapDrop)
+	}
+}
+
+func mountsWithSkills(sessionDir string) []ContainerMount {
+	return []ContainerMount{
+		{Type: MountBind, Source: filepath.Join(sessionDir, "volume"), Target: "/work"},
+		{Type: MountBind, Source: filepath.Join(sessionDir, "control"), Target: "/run/agentctl/control"},
+		{Type: MountBind, Source: filepath.Join(sessionDir, "skills"), Target: "/skills", ReadOnly: true},
+	}
+}
+
+func readSkillNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read skills dir %s: %v", dir, err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestTerminate(t *testing.T) {

@@ -286,6 +286,38 @@ func TestEnvFileMalformed(t *testing.T) {
 	}
 }
 
+func TestHardeningFieldsPropagate(t *testing.T) {
+	spec, _ := sampleSpec(t)
+	spec.ReadOnlyRootFS = true
+	spec.CapDrop = []string{"ALL"}
+	spec.SecurityOpts = []string{"no-new-privileges"}
+	spec.PidsLimit = 512
+	spec.Tmpfs = map[string]string{"/home/agent": "rw,size=64m"}
+	spec.MemorySwap = spec.MemBytes
+	req, err := BuildCreateRequest(spec)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !req.ReadOnlyRootFS {
+		t.Errorf("ReadOnlyRootFS not propagated")
+	}
+	if !reflect.DeepEqual(req.CapDrop, []string{"ALL"}) {
+		t.Errorf("CapDrop: got %v want [ALL]", req.CapDrop)
+	}
+	if !reflect.DeepEqual(req.SecurityOpt, []string{"no-new-privileges"}) {
+		t.Errorf("SecurityOpt: got %v", req.SecurityOpt)
+	}
+	if req.PidsLimit != 512 {
+		t.Errorf("PidsLimit: got %d want 512", req.PidsLimit)
+	}
+	if got := req.Tmpfs["/home/agent"]; got != "rw,size=64m" {
+		t.Errorf("Tmpfs[/home/agent]: got %q", got)
+	}
+	if req.MemorySwapBytes != spec.MemBytes {
+		t.Errorf("MemorySwapBytes: got %d want %d", req.MemorySwapBytes, spec.MemBytes)
+	}
+}
+
 func TestCustomNetworkOverridesDefault(t *testing.T) {
 	spec, _ := sampleSpec(t)
 	spec.NetworkID = "agentctl-01HABCDE"

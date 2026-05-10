@@ -114,6 +114,7 @@ func Run(ctx context.Context, opts Options) error {
 		ImageID:      cfg.Image.PinnedID,
 		SecretsPath:  opts.Layout.SecretsFile,
 		MCPs:         mcpReg,
+		Skills:       newSkillsComposerAdapter(skillMgr),
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt

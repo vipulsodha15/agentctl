@@ -40,15 +40,21 @@ func (a *cmAdapter) Create(ctx context.Context, spec sm.ContainerSpec) (sm.Conta
 		})
 	}
 	c, err := a.inner.Create(ctx, cm.Spec{
-		SessionID: spec.SessionID,
-		ImageID:   spec.ImageID,
-		Name:      spec.Name,
-		Labels:    spec.Labels,
-		EnvFile:   spec.EnvFile,
-		Mounts:    mounts,
-		MemBytes:  spec.MemBytes,
-		CPUs:      spec.CPUs,
-		NetworkID: spec.NetworkID,
+		SessionID:      spec.SessionID,
+		ImageID:        spec.ImageID,
+		Name:           spec.Name,
+		Labels:         spec.Labels,
+		EnvFile:        spec.EnvFile,
+		Mounts:         mounts,
+		MemBytes:       spec.MemBytes,
+		CPUs:           spec.CPUs,
+		NetworkID:      spec.NetworkID,
+		ReadOnlyRootFS: spec.ReadOnlyRootFS,
+		CapDrop:        spec.CapDrop,
+		SecurityOpts:   spec.SecurityOpts,
+		PidsLimit:      spec.PidsLimit,
+		Tmpfs:          spec.Tmpfs,
+		MemorySwap:     spec.MemorySwap,
 	})
 	if err != nil {
 		return sm.ContainerHandle{}, err
@@ -279,6 +285,25 @@ func (a *mcpAdapter) Update(ctx context.Context, name string, body []byte) ([]by
 
 func (a *mcpAdapter) Remove(ctx context.Context, name string, force bool) error {
 	return a.inner.Remove(ctx, name, force)
+}
+
+type skillsComposerAdapter struct{ inner skills.Manager }
+
+func newSkillsComposerAdapter(s skills.Manager) *skillsComposerAdapter {
+	return &skillsComposerAdapter{inner: s}
+}
+
+func (a *skillsComposerAdapter) Compose(dest string) (sm.SkillsComposeResult, error) {
+	r, err := a.inner.Compose(dest)
+	if err != nil {
+		return sm.SkillsComposeResult{}, err
+	}
+	return sm.SkillsComposeResult{
+		Path:       r.Path,
+		Hash:       r.Hash,
+		Skills:     r.Skills,
+		Collisions: r.Collisions,
+	}, nil
 }
 
 type skillsAdapter struct{ inner skills.Manager }

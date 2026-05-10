@@ -135,6 +135,10 @@ func BuildCreateRequest(spec Spec) (CreateRequest, error) {
 		return CreateRequest{}, err
 	}
 	nanoCPUs := int64(spec.CPUs * float64(billion))
+	memSwap := spec.MemorySwap
+	if memSwap == 0 {
+		memSwap = spec.MemBytes
+	}
 	req := CreateRequest{
 		Name:            spec.Name,
 		Image:           spec.ImageID,
@@ -144,16 +148,32 @@ func BuildCreateRequest(spec Spec) (CreateRequest, error) {
 		User:            "1000:1000",
 		Mounts:          append([]Mount(nil), spec.Mounts...),
 		MemoryBytes:     spec.MemBytes,
-		MemorySwapBytes: spec.MemBytes,
+		MemorySwapBytes: memSwap,
 		NanoCPUs:        nanoCPUs,
 		NetworkMode:     spec.NetworkID,
 		RestartPolicy:   "no",
 		AutoRemove:      false,
+		ReadOnlyRootFS:  spec.ReadOnlyRootFS,
+		CapDrop:         append([]string(nil), spec.CapDrop...),
+		SecurityOpt:     append([]string(nil), spec.SecurityOpts...),
+		PidsLimit:       spec.PidsLimit,
+		Tmpfs:           copyStringMap(spec.Tmpfs),
 	}
 	if req.NetworkMode == "" {
 		req.NetworkMode = "bridge"
 	}
 	return req, nil
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func readEnvFile(path string) ([]string, error) {

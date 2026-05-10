@@ -188,8 +188,19 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	if err := os.MkdirAll(filepath.Join(dir, "control"), 0o700); err != nil {
 		return CreateResult{}, fmt.Errorf("control dir: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "skills"), 0o700); err != nil {
+	skillsDir := filepath.Join(dir, "skills")
+	if err := os.MkdirAll(skillsDir, 0o700); err != nil {
 		return CreateResult{}, fmt.Errorf("skills dir: %w", err)
+	}
+	var skillsResult SkillsComposeResult
+	if m.opts.Skills != nil {
+		res, cerr := m.opts.Skills.Compose(skillsDir)
+		if cerr != nil {
+			return CreateResult{}, fmt.Errorf("skills compose: %w", cerr)
+		}
+		skillsResult = res
+	} else {
+		skillsResult.Path = skillsDir
 	}
 
 	sessionToken, err := generateToken()
@@ -247,7 +258,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
              VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, defaultName(req.Name, id), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 			imageID, filepath.Join(dir, "volume"), filepath.Join(dir, "control", "agentd.sock"),
-			filepath.Join(dir, "skills"), "",
+			skillsResult.Path, skillsResult.Hash,
 			model, mem, cpus, string(mcpJSON), string(reposJSON), sessionToken,
 		); err != nil {
 			_ = logger.Close()
@@ -299,6 +310,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		Repos:           reposState,
 		ResolvedMCPs:    resolvedEntries,
 		GitHubPAT:       pat,
+		SkillCollisions: skillsResult.Collisions,
 	})
 	m.mu.Lock()
 	m.actors[id] = a
@@ -316,6 +328,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		EnvFile:      envFile,
 		VolumeDir:    filepath.Join(dir, "volume"),
 		ControlDir:   filepath.Join(dir, "control"),
+		SkillsDir:    skillsResult.Path,
 		SockPath:     sockPath,
 		MemBytes:     mem,
 		CPUs:         cpus,
@@ -335,6 +348,7 @@ type provisionInputs struct {
 	EnvFile      string
 	VolumeDir    string
 	ControlDir   string
+	SkillsDir    string
 	SockPath     string
 	MemBytes     int64
 	CPUs         float64
@@ -378,18 +392,30 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		"agentctl.created_at": now.Format(time.RFC3339),
 		"agentctl.user":       user,
 	}
+	mounts := []ContainerMount{
+		{Type: MountBind, Source: in.VolumeDir, Target: "/work"},
+		{Type: MountBind, Source: in.ControlDir, Target: "/run/agentctl/control"},
+	}
+	if in.SkillsDir != "" {
+		mounts = append(mounts, ContainerMount{
+			Type: MountBind, Source: in.SkillsDir, Target: "/skills", ReadOnly: true,
+		})
+	}
 	spec := ContainerSpec{
-		SessionID: in.SessionID,
-		ImageID:   in.ImageID,
-		Name:      "agentctl-" + suffix(in.SessionID),
-		Labels:    labels,
-		EnvFile:   in.EnvFile,
-		Mounts: []ContainerMount{
-			{Type: MountBind, Source: in.VolumeDir, Target: "/work"},
-			{Type: MountBind, Source: in.ControlDir, Target: "/run/agentctl/control"},
-		},
-		MemBytes: in.MemBytes,
-		CPUs:     in.CPUs,
+		SessionID:      in.SessionID,
+		ImageID:        in.ImageID,
+		Name:           "agentctl-" + suffix(in.SessionID),
+		Labels:         labels,
+		EnvFile:        in.EnvFile,
+		Mounts:         mounts,
+		MemBytes:       in.MemBytes,
+		CPUs:           in.CPUs,
+		MemorySwap:     in.MemBytes,
+		ReadOnlyRootFS: true,
+		CapDrop:        []string{"ALL"},
+		SecurityOpts:   []string{"no-new-privileges"},
+		PidsLimit:      512,
+		Tmpfs:          map[string]string{"/home/agent": "rw,size=64m,mode=0700,uid=1000,gid=1000"},
 	}
 
 	handle, err := m.opts.Containers.Create(ctx, spec)

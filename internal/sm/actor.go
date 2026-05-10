@@ -96,6 +96,7 @@ type actorOptions struct {
 	Repos           []proto.RepoState
 	ResolvedMCPs    []mcp.Entry
 	GitHubPAT       string
+	SkillCollisions []string
 }
 
 type actor struct {
@@ -104,31 +105,34 @@ type actor struct {
 	wg      sync.WaitGroup
 	stopCh  chan struct{}
 
-	mu                 sync.RWMutex
-	summary            proto.SessionSummary
-	queue              []queuedMessage
-	inFlight           string
-	currentTurn        string
-	mcpStatus          map[string]string
-	mcpFailures        []proto.MCPUnreachableData
-	mcpFailuresEmitted bool
-	repos              []proto.RepoState
-	control            ControlConn
-	terminated         bool
-	pendingSnap        map[string]chan ControlFrame
-	containerID        string
-	lastError          string
+	mu                     sync.RWMutex
+	summary                proto.SessionSummary
+	queue                  []queuedMessage
+	inFlight               string
+	currentTurn            string
+	mcpStatus              map[string]string
+	mcpFailures            []proto.MCPUnreachableData
+	mcpFailuresEmitted     bool
+	skillCollisions        []string
+	skillCollisionsEmitted bool
+	repos                  []proto.RepoState
+	control                ControlConn
+	terminated             bool
+	pendingSnap            map[string]chan ControlFrame
+	containerID            string
+	lastError              string
 }
 
 func newActor(opts actorOptions) *actor {
 	return &actor{
-		opts:        opts,
-		mailbox:     make(chan mboxItem, mailboxSize),
-		stopCh:      make(chan struct{}),
-		summary:     opts.Summary,
-		mcpStatus:   map[string]string{},
-		repos:       opts.Repos,
-		pendingSnap: map[string]chan ControlFrame{},
+		opts:            opts,
+		mailbox:         make(chan mboxItem, mailboxSize),
+		stopCh:          make(chan struct{}),
+		summary:         opts.Summary,
+		mcpStatus:       map[string]string{},
+		skillCollisions: append([]string(nil), opts.SkillCollisions...),
+		repos:           opts.Repos,
+		pendingSnap:     map[string]chan ControlFrame{},
 	}
 }
 
@@ -622,15 +626,25 @@ func (a *actor) applyMCPStatus(statuses map[string]string, failures []proto.MCPU
 // snapshotEvent right after the snapshot is sent.
 func (a *actor) emitDeferredAttachEvents() {
 	a.mu.Lock()
-	if a.mcpFailuresEmitted {
-		a.mu.Unlock()
-		return
-	}
+	mcpFirst := !a.mcpFailuresEmitted
 	a.mcpFailuresEmitted = true
 	failures := append([]proto.MCPUnreachableData(nil), a.mcpFailures...)
+	skillFirst := !a.skillCollisionsEmitted
+	a.skillCollisionsEmitted = true
+	collisions := append([]string(nil), a.skillCollisions...)
 	a.mu.Unlock()
-	for _, f := range failures {
-		a.broadcast(proto.EventMCPUnreachable, mustJSON(f))
+	if mcpFirst {
+		for _, f := range failures {
+			a.broadcast(proto.EventMCPUnreachable, mustJSON(f))
+		}
+	}
+	if skillFirst {
+		for _, name := range collisions {
+			a.broadcast(proto.EventSkillCollision, mustJSON(proto.SkillCollisionData{
+				Name:      name,
+				Overrides: "builtin",
+			}))
+		}
 	}
 }
 
