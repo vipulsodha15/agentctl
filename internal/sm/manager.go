@@ -8,12 +8,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/agentctl/agentctl/internal/fan"
 	agentlog "github.com/agentctl/agentctl/internal/log"
 	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/ulidgen"
 )
@@ -83,6 +86,9 @@ type Options struct {
 	Logger          *slog.Logger
 	Now             func() time.Time
 	DefaultModel    string
+	ImageID         string
+	SecretsPath     string
+	User            string
 	WebURL          func(sessionID string) string
 	IdempotencyTTL  time.Duration
 	SnapshotTimeout time.Duration
@@ -194,9 +200,6 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	if err := writeFileSecure(filepath.Join(dir, "session.json"), metaBytes); err != nil {
 		return CreateResult{}, err
 	}
-	if err := writeFileSecure(filepath.Join(dir, "secrets.env"), []byte("")); err != nil {
-		return CreateResult{}, err
-	}
 
 	logger, err := agentlog.NewSessionLogger(agentlog.SessionLogOptions{Dir: dir})
 	if err != nil {
@@ -205,7 +208,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 
 	imageID := req.ImageID
 	if imageID == "" {
-		imageID = "sha256:pending"
+		imageID = m.opts.ImageID
 	}
 	mem := req.MemLimitBytes
 	if mem == 0 {
@@ -214,6 +217,17 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	cpus := req.CPULimitCores
 	if cpus == 0 {
 		cpus = 2.0
+	}
+
+	envFile := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envFile, m.opts.SecretsPath, secretsEnvInputs{
+		SessionID:    id,
+		SessionName:  defaultName(req.Name, id),
+		Model:        model,
+		SessionToken: sessionToken,
+	}); err != nil {
+		_ = logger.Close()
+		return CreateResult{}, err
 	}
 
 	if m.store != nil {
@@ -250,6 +264,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		CPULimitCores:  cpus,
 	}
 
+	sockPath := filepath.Join(dir, "control", "agentd.sock")
 	a := newActor(actorOptions{
 		ID:              id,
 		Summary:         summary,
@@ -263,7 +278,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		ShutdownGrace:   m.opts.ShutdownGrace,
 		Containers:      m.opts.Containers,
 		Control:         m.opts.Control,
-		ControlSockPath: filepath.Join(dir, "control", "agentd.sock"),
+		ControlSockPath: sockPath,
 		SessionToken:    sessionToken,
 		Store:           m.store,
 		Repos:           reposState,
@@ -275,7 +290,188 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 
 	a.broadcast(proto.EventSessionStarting, mustJSON(map[string]any{"phase": "container"}))
 
+	if err := m.provisionContainer(ctx, a, provisionInputs{
+		SessionID:    id,
+		Name:         defaultName(req.Name, id),
+		ImageID:      imageID,
+		EnvFile:      envFile,
+		VolumeDir:    filepath.Join(dir, "volume"),
+		ControlDir:   filepath.Join(dir, "control"),
+		SockPath:     sockPath,
+		MemBytes:     mem,
+		CPUs:         cpus,
+		SessionToken: sessionToken,
+	}); err != nil {
+		m.logger.Warn("session.provision_failed", slog.String("session_id", id), slog.String("error", err.Error()))
+		return CreateResult{SessionID: id, Status: summary.Status, Summary: summary}, err
+	}
+
 	return CreateResult{SessionID: id, Status: "starting", Summary: summary}, nil
+}
+
+type provisionInputs struct {
+	SessionID    string
+	Name         string
+	ImageID      string
+	EnvFile      string
+	VolumeDir    string
+	ControlDir   string
+	SockPath     string
+	MemBytes     int64
+	CPUs         float64
+	SessionToken string
+}
+
+// provisionContainer runs the Create -> Listen -> Start sequence from
+// overview.md §6.2. When the container manager is absent (the no-Docker
+// happy path: tests, or a host whose docker socket is unreachable) the
+// actor still runs and tests can drive it via InjectControlConn; the
+// session is just marked error with last_error="docker_unavailable" so
+// `agentctl status` surfaces the cause.
+func (m *manager) provisionContainer(ctx context.Context, a *actor, in provisionInputs) error {
+	if m.opts.Containers == nil {
+		const reason = "docker_unavailable"
+		m.markSessionError(ctx, in.SessionID, reason)
+		a.markError(reason)
+		return nil
+	}
+	if m.opts.Control == nil {
+		const reason = "control_server_unavailable"
+		m.markSessionError(ctx, in.SessionID, reason)
+		a.markError(reason)
+		return nil
+	}
+	if in.ImageID == "" || strings.HasPrefix(in.ImageID, "sha256:pending") {
+		const reason = "image_not_pinned"
+		m.markSessionError(ctx, in.SessionID, reason)
+		a.markError(reason)
+		return fmt.Errorf("no image pinned; run `agentctl init` or `agentctl update`")
+	}
+
+	user := m.opts.User
+	if user == "" {
+		user = os.Getenv("USER")
+	}
+	now := m.now()
+	labels := map[string]string{
+		"agentctl.session":    in.SessionID,
+		"agentctl.image_id":   in.ImageID,
+		"agentctl.created_at": now.Format(time.RFC3339),
+		"agentctl.user":       user,
+	}
+	spec := ContainerSpec{
+		SessionID: in.SessionID,
+		ImageID:   in.ImageID,
+		Name:      "agentctl-" + suffix(in.SessionID),
+		Labels:    labels,
+		EnvFile:   in.EnvFile,
+		Mounts: []ContainerMount{
+			{Type: MountBind, Source: in.VolumeDir, Target: "/work"},
+			{Type: MountBind, Source: in.ControlDir, Target: "/run/agentctl/control"},
+		},
+		MemBytes: in.MemBytes,
+		CPUs:     in.CPUs,
+	}
+
+	handle, err := m.opts.Containers.Create(ctx, spec)
+	if err != nil {
+		m.markSessionError(ctx, in.SessionID, "container_create_failed: "+err.Error())
+		a.markError("container_create_failed")
+		return fmt.Errorf("container create: %w", err)
+	}
+
+	handler := func(conn ControlConn) { a.InjectControlConn(conn) }
+	if err := m.opts.Control.Listen(in.SessionID, in.SockPath, in.SessionToken, handler); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = m.opts.Containers.Stop(stopCtx, handle.ID, time.Second)
+		_ = m.opts.Containers.Remove(stopCtx, handle.ID, true)
+		cancel()
+		m.markSessionError(ctx, in.SessionID, "control_listen_failed: "+err.Error())
+		a.markError("control_listen_failed")
+		return fmt.Errorf("control listen: %w", err)
+	}
+
+	if err := m.opts.Containers.Start(ctx, handle.ID); err != nil {
+		_ = m.opts.Control.Stop(in.SessionID)
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = m.opts.Containers.Stop(stopCtx, handle.ID, time.Second)
+		_ = m.opts.Containers.Remove(stopCtx, handle.ID, true)
+		cancel()
+		m.markSessionError(ctx, in.SessionID, "container_start_failed: "+err.Error())
+		a.markError("container_start_failed")
+		return fmt.Errorf("container start: %w", err)
+	}
+
+	a.setContainerID(handle.ID)
+	if m.store != nil {
+		if _, err := m.store.DB().ExecContext(ctx,
+			`UPDATE sessions SET container_id=? WHERE id=?`,
+			handle.ID, in.SessionID); err != nil {
+			m.logger.Warn("session.container_id_update_failed", slog.String("session_id", in.SessionID), slog.String("error", err.Error()))
+		}
+	}
+	return nil
+}
+
+func (m *manager) markSessionError(ctx context.Context, sessionID, reason string) {
+	if m.store == nil {
+		return
+	}
+	if _, err := m.store.DB().ExecContext(ctx,
+		`UPDATE sessions SET status='error', last_error=? WHERE id=?`,
+		reason, sessionID); err != nil {
+		m.logger.Warn("session.error_update_failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+}
+
+func suffix(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[len(id)-8:]
+}
+
+type secretsEnvInputs struct {
+	SessionID    string
+	SessionName  string
+	Model        string
+	SessionToken string
+}
+
+func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
+	pairs := map[string]string{
+		"SESSION_ID":             in.SessionID,
+		"SESSION_NAME":           in.SessionName,
+		"AGENTCTL_MODEL":         in.Model,
+		"AGENTCTL_SESSION_TOKEN": in.SessionToken,
+	}
+	if secretsPath != "" {
+		if sec, err := secrets.Load(secretsPath); err == nil {
+			if sec.AnthropicAPIKey != "" {
+				pairs["ANTHROPIC_API_KEY"] = sec.AnthropicAPIKey
+			}
+			if sec.GitHubPAT != "" {
+				pairs["GITHUB_TOKEN"] = sec.GitHubPAT
+			}
+		}
+	}
+	keys := make([]string, 0, len(pairs))
+	for k := range pairs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := pairs[k]
+		if v == "" {
+			continue
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(v)
+		b.WriteString("\n")
+	}
+	return writeFileSecure(path, []byte(b.String()))
 }
 
 func (m *manager) Send(ctx context.Context, req SendRequest) (SendResult, error) {

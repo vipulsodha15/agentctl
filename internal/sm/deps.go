@@ -15,6 +15,13 @@ type ContainerManager interface {
 	Remove(ctx context.Context, id string, force bool) error
 }
 
+type MountType string
+
+const (
+	MountBind   MountType = "bind"
+	MountVolume MountType = "volume"
+)
+
 type ContainerSpec struct {
 	SessionID string
 	ImageID   string
@@ -28,6 +35,7 @@ type ContainerSpec struct {
 }
 
 type ContainerMount struct {
+	Type     MountType
 	Source   string
 	Target   string
 	ReadOnly bool

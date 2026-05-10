@@ -9,6 +9,8 @@ import (
 	"syscall"
 
 	"github.com/agentctl/agentctl/internal/api"
+	"github.com/agentctl/agentctl/internal/cc"
+	"github.com/agentctl/agentctl/internal/cm"
 	"github.com/agentctl/agentctl/internal/config"
 	"github.com/agentctl/agentctl/internal/fan"
 	"github.com/agentctl/agentctl/internal/log"
@@ -67,17 +69,38 @@ func Run(ctx context.Context, opts Options) error {
 
 	hub := fan.NewHub()
 	smLog := log.New(log.Options{Component: log.ComponentSessions})
-	manager := sm.New(sm.Options{
+
+	var (
+		cmAdapt *cmAdapter
+		ccAdapt *ccAdapter
+	)
+	dockerCli, dockerErr := cm.NewDockerSDKClient()
+	if dockerErr != nil {
+		logger.Warn("docker.unavailable", slog.String("error", dockerErr.Error()))
+	} else {
+		cmAdapt = newCmAdapter(cm.NewManager(dockerCli))
+		ccLog := log.New(log.Options{Component: log.ComponentContainer})
+		ccSrv := cc.New(cc.Options{Logger: ccLog})
+		ccAdapt = newCcAdapter(ccSrv)
+		ccSrv.AdoptInjector(ccAdapt, ccAdapt)
+	}
+
+	managerOpts := sm.Options{
 		Store:        st,
 		SessionsDir:  opts.Layout.SessionsDir,
 		Hub:          hub,
 		Logger:       smLog,
 		DefaultModel: cfg.Model.Default,
-		// TODO(M2-A integration): wire cm.NewManager() and cc.NewServer() once
-		// M2-A's branch is rebased in. Until then sessions can be created and
-		// drive the actor logic but no container is started; control frames
-		// arrive via direct InjectControlConn in tests.
-	})
+		ImageID:      cfg.Image.PinnedID,
+		SecretsPath:  opts.Layout.SecretsFile,
+	}
+	if cmAdapt != nil {
+		managerOpts.Containers = cmAdapt
+	}
+	if ccAdapt != nil {
+		managerOpts.Control = ccAdapt
+	}
+	manager := sm.New(managerOpts)
 	defer func() { _ = manager.Shutdown(ctx) }()
 
 	logStream := &log.SessionLogStreamer{SessionsDir: opts.Layout.SessionsDir}

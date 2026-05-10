@@ -204,6 +204,127 @@ func TestIdempotencyDoesNotRequireStore(t *testing.T) {
 	}
 }
 
+func TestProvisionOrderCreateListenStart(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeControl()
+	cm := newFakeContainerManager()
+	fc.bound = cm
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Containers:      cm,
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		ImageID:         "sha256:abc",
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	res, err := mgr.Create(ctx, CreateRequest{Name: "p"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if res.SessionID == "" {
+		t.Fatal("expected session id")
+	}
+	cm.mu.Lock()
+	calls := append([]string(nil), cm.calls...)
+	cm.mu.Unlock()
+	fc.mu.Lock()
+	listened := fc.listened
+	fc.mu.Unlock()
+	if len(calls) != 2 || calls[0] != "create" || calls[1] != "start" {
+		t.Fatalf("unexpected cm call order: %v", calls)
+	}
+	if !listened {
+		t.Fatal("control listen not invoked")
+	}
+	// Listen must run between create and start.
+	if cm.startSeenListen != true {
+		t.Fatal("expected listen to be called before start")
+	}
+}
+
+func TestProvisionTearsDownOnStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeControl()
+	cm := newFakeContainerManager()
+	fc.bound = cm
+	cm.startErr = errFakeClosed
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Containers:      cm,
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		ImageID:         "sha256:abc",
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	if _, err := mgr.Create(ctx, CreateRequest{Name: "p"}); err == nil {
+		t.Fatal("expected start error to surface")
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	gotStop, gotRemove := false, false
+	for _, c := range cm.calls {
+		if c == "stop" {
+			gotStop = true
+		}
+		if c == "remove" {
+			gotRemove = true
+		}
+	}
+	if !gotStop || !gotRemove {
+		t.Fatalf("expected stop+remove on failure, got calls=%v", cm.calls)
+	}
+}
+
+type fakeContainerManager struct {
+	mu              sync.Mutex
+	calls           []string
+	startErr        error
+	createErr       error
+	listenSeen      bool
+	startSeenListen bool
+}
+
+func newFakeContainerManager() *fakeContainerManager {
+	return &fakeContainerManager{}
+}
+
+func (f *fakeContainerManager) Create(_ context.Context, spec ContainerSpec) (ContainerHandle, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, "create")
+	f.mu.Unlock()
+	if f.createErr != nil {
+		return ContainerHandle{}, f.createErr
+	}
+	return ContainerHandle{ID: "c-" + spec.SessionID, Image: spec.ImageID}, nil
+}
+
+func (f *fakeContainerManager) Start(_ context.Context, _ string) error {
+	f.mu.Lock()
+	f.startSeenListen = f.listenSeen
+	f.calls = append(f.calls, "start")
+	err := f.startErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeContainerManager) Stop(_ context.Context, _ string, _ time.Duration) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "stop")
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeContainerManager) Remove(_ context.Context, _ string, _ bool) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "remove")
+	f.mu.Unlock()
+	return nil
+}
+
 func TestTerminate(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()
@@ -250,6 +371,8 @@ type fakeControl struct {
 	mu       sync.Mutex
 	handlers map[string]ControlHandler
 	conns    map[string]*fakeConn
+	listened bool
+	bound    *fakeContainerManager
 }
 
 func newFakeControl() *fakeControl {
@@ -258,8 +381,15 @@ func newFakeControl() *fakeControl {
 
 func (f *fakeControl) Listen(sessionID, _, _ string, h ControlHandler) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.handlers[sessionID] = h
+	f.listened = true
+	bound := f.bound
+	f.mu.Unlock()
+	if bound != nil {
+		bound.mu.Lock()
+		bound.listenSeen = true
+		bound.mu.Unlock()
+	}
 	return nil
 }
 

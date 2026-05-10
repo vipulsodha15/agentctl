@@ -104,6 +104,8 @@ type actor struct {
 	control     ControlConn
 	terminated  bool
 	pendingSnap map[string]chan ControlFrame
+	containerID string
+	lastError   string
 }
 
 func newActor(opts actorOptions) *actor {
@@ -470,6 +472,8 @@ func (a *actor) snapshotDetail() proto.SessionDetail {
 	d := proto.SessionDetail{
 		SessionSummary: a.summary,
 		MCPStatus:      copyStrMap(a.mcpStatus),
+		ContainerID:    a.containerID,
+		LastError:      a.lastError,
 	}
 	d.QueueDepth = len(a.queue)
 	d.InFlight = a.inFlight != ""
@@ -524,4 +528,19 @@ func copyStrMap(m map[string]string) map[string]string {
 // to the actor; production wiring uses ControlServer.Listen with a callback.
 func (a *actor) InjectControlConn(conn ControlConn) {
 	a.mailbox <- mboxItem{kind: mboxControlConn, controlConn: &controlConnItem{conn: conn}}
+}
+
+func (a *actor) markError(reason string) {
+	a.mu.Lock()
+	a.summary.Status = "error"
+	a.lastError = reason
+	a.mu.Unlock()
+	body, _ := json.Marshal(map[string]string{"reason": reason})
+	a.broadcast(proto.EventSessionError, body)
+}
+
+func (a *actor) setContainerID(id string) {
+	a.mu.Lock()
+	a.containerID = id
+	a.mu.Unlock()
 }
