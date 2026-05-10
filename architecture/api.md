@@ -456,7 +456,7 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 
 | Kind | When | `data` |
 |---|---|---|
-| `runtime.hello` | Sent first by the shim. | `{ shim_version, runtime_version, pid, capabilities[] }` |
+| `runtime.hello` | Sent first by the shim. | `{ shim_version, sdk_version, sdk: "claude-agent-sdk-python", pid, capabilities[] }` |
 | `runtime.ready` | Repos cloned, runtime initialized, ready for first message. | `{ repos: [{ name, url, base_sha, branch }], skills: [{ name, description }], started_at }` |
 | `runtime.event` | Stream events from the runtime: `assistant.delta`, `assistant.message`, `tool.call`, `tool.result`, `usage`, `turn.start`, `turn.end`, `turn.cancelled`. Each is opaque to agentd except `usage` (R10) and `turn.*` (queue / interrupt logic). | varies; documented in §5 |
 | `runtime.error` | Terminal error. agentd marks the session `error`. | `{ code, message, fatal }` |
