@@ -201,10 +201,15 @@ as `agent` (uid 1000) and:
    leaves the repo placeholder absent.
 3. Connects to `/run/agentctl/control/agentd.sock` and sends
    `runtime.hello` with `session_token` (verified by agentd).
-4. Receives `agentd.greet` with the resolved MCP set + headers.
+4. Receives `agentd.greet` with the resolved MCP set (each entry carries
+   `url`, `transport` (`http`/`sse`/…), `kind`, and any auth-derived
+   headers). MCP entries whose `transport` or `kind` are not recognized
+   by this image's runtime are dropped from the rendered config and
+   reported as `mcp.skipped` events.
 5. Writes the runtime config file (`/home/agent/.config/agent/config.json`)
    from the template `/etc/agentctl/templates/config.json.tmpl`,
-   substituting MCP URLs and any per-session settings.
+   emitting one config block per MCP keyed by transport (the runtime
+   accepts both Streamable HTTP and SSE entries).
 6. Starts the agent runtime as a child process:
 
    ```bash

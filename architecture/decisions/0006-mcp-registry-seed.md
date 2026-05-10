@@ -38,10 +38,19 @@ Format: TOML (consistent with `config.toml`):
 [[mcp]]
 name = "github"
 url = "https://api.githubcopilot.com/mcp/"
+transport = "http"      # freeform; v1 knows "http" and "sse"
 kind = "github_pat"     # freeform; v1 knows "none" and "github_pat"
 default_enabled = true
 description = "GitHub MCP server."
 # auth_config = { ... }  # optional, kind-specific JSON; v1 kinds need none
+
+[[mcp]]
+name = "team-events"
+url = "https://mcp.example.com/events"
+transport = "sse"
+kind = "none"
+default_enabled = false
+description = "Team event stream over SSE."
 ```
 
 No network fetch happens during `init`. Reasons:

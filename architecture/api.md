@@ -266,9 +266,11 @@ or the git-push output). `data.repo` (optional) scopes to one repo. See
 #### Registry CRUD
 
 ```json
-// AddMCP — `kind` is freeform; v1 known values: "none", "github_pat".
+// AddMCP — `transport` is freeform; v1 known values: "http", "sse".
+//          `kind` is freeform; v1 known values: "none", "github_pat".
 //          `auth_config` is kind-specific JSON (omit/null for v1 kinds).
-{ "name": "team-x", "url": "https://…", "kind": "none", "auth_config": null,
+{ "name": "team-x", "url": "https://…", "transport": "http",
+  "kind": "none", "auth_config": null,
   "default_enabled": true, "description": "…" }
 // UpdateMCP — same shape, all fields optional except name
 // RemoveMCP — { "name": "team-x", "force": false }
@@ -443,7 +445,7 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 
 | Kind | When | `data` |
 |---|---|---|
-| `agentd.greet` | First reply to `runtime.hello`. | `{ session_id, env: {…}, model, mcps: [{ name, url, kind, auth_config?, headers? }], repos: [...], limits, log_level }` |
+| `agentd.greet` | First reply to `runtime.hello`. | `{ session_id, env: {…}, model, mcps: [{ name, url, transport, kind, auth_config?, headers? }], repos: [...], limits, log_level }` |
 | `agentd.message` | Deliver a queued user message. | `{ message_id, content, idempotency_key }` |
 | `agentd.interrupt` | Cancel current turn. | `{ reason: "user" \| "hard_cutoff" \| "shutdown" }` |
 | `agentd.snapshot_request` | Ask the runtime to dump current history. | `{ request_id }` |
@@ -499,7 +501,8 @@ the §2.2 `stream_chunk` frame (CLI socket) or a WebSocket text frame
 | `session.resumed` | After idle-stop. | `{}` |
 | `session.terminated` | After explicit stop. | `{}` |
 | `session.error` | Terminal error. | `{ code, message }` |
-| `mcp.unreachable` | Probe failed. | `{ name, error }` |
+| `mcp.unreachable` | Probe failed. | `{ name, transport, error }` |
+| `mcp.skipped` | MCP omitted from runtime config because its `transport` or `kind` is unknown to this image. | `{ name, transport, kind, reason }` |
 | `turn.start` | Runtime began a turn. | `{ turn_id, message_id, model }` |
 | `turn.end` | Runtime finished. | `{ turn_id, status: "ok"\|"cancelled" }` |
 | `turn.cancelled` | Interrupt acknowledged. | `{ turn_id, reason }` |

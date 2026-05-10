@@ -61,15 +61,19 @@ CREATE INDEX idx_sessions_status_activity ON sessions(status, last_activity_at);
 CREATE INDEX idx_sessions_status_in_flight ON sessions(status, in_flight, queue_depth);
 
 -- MCP registry: install-wide, edited via R5 surfaces.
--- `kind` is freeform; v1 recognizes `none` (no auth) and `github_pat`
--- (uses the developer's GitHub PAT). Future kinds (e.g., `oauth_device`,
--- `bearer`) add without a schema migration. Unknown kinds are accepted
--- and surfaced in the registry; they only become functional once the
--- agentd build understands how to wire their `auth_config_json`.
+-- `transport` is freeform; v1 recognizes `http` (Streamable HTTP) and
+-- `sse` (Server-Sent Events). Future transports (e.g., `stdio` with a
+-- companion command spec, `websocket`) add without a schema migration.
+-- `kind` is also freeform; v1 recognizes `none` (no auth) and
+-- `github_pat` (uses the developer's GitHub PAT). Future kinds (e.g.,
+-- `oauth_device`, `bearer`) add without a schema migration. Unknown
+-- transports or kinds are accepted into the registry but agentd skips
+-- them at session start with a `mcp.skipped` event explaining why.
 CREATE TABLE mcp_registry (
     name              TEXT PRIMARY KEY,
     url               TEXT NOT NULL,
-    kind              TEXT NOT NULL,                          -- v1: none|github_pat. Freeform; agentd warns on unknown.
+    transport         TEXT NOT NULL,                          -- v1: http|sse. Freeform; agentd skips unknown at session start.
+    kind              TEXT NOT NULL,                          -- v1: none|github_pat. Freeform; agentd skips unknown at session start.
     auth_config_json  TEXT,                                   -- kind-specific JSON; NULL for kinds that need none
     default_enabled   INTEGER NOT NULL DEFAULT 0
                         CHECK (default_enabled IN (0,1)),

@@ -318,18 +318,21 @@ Constraints every requirement and the technical design must respect:
 |---|---|---|
 | `name` | text, primary key | Short slug (e.g., `github`, `jira`). |
 | `url` | text | MCP server URL. |
-| `kind` | text | Freeform identifier for the auth/wire style. v1 recognizes `none` (no auth) and `github_pat` (uses the developer's PAT). New kinds can be added without a schema migration; agentd warns on a kind it does not understand and disables that MCP for new sessions until upgraded. |
+| `transport` | text | Wire transport. v1 recognizes `http` (Streamable HTTP) and `sse` (Server-Sent Events). Freeform — new transports add without a schema migration; an MCP with an unrecognized transport is skipped at session start with a clear event. |
+| `kind` | text | Freeform identifier for the auth style. v1 recognizes `none` (no auth) and `github_pat` (uses the developer's PAT). New kinds can be added without a schema migration; an MCP with an unrecognized kind is skipped at session start. |
 | `auth_config_json` | text, optional | Kind-specific structured config (e.g., header overrides, OAuth client id for future kinds). v1's two kinds need none. |
 | `default_enabled` | bool | Whether this MCP is checked by default in the New Session form. |
 | `description` | text, optional | Free text shown in UI. |
 | `created_at` | timestamp | |
 
+`transport` and `kind` are independent: any combination is valid (e.g., a `sse` server with `github_pat` auth, an `http` server with `none`). Auth credentials are carried as request headers regardless of transport, so adding a new transport in the future does not require touching the auth layer.
+
 **Initial seed at `init`.** `agentd` seeds the registry with the team's known internal MCPs (URLs come from a shipped config file or the install template — see §15.6) and the GitHub MCP entry.
 
 **Web UI surface — Settings → MCPs.**
 
-- Table of registered MCPs with name, URL, kind, default-enabled toggle.
-- "Add MCP" form: name, URL, kind (free-text combo box; v1 known values `none` (default) and `github_pat`), optional `auth_config` JSON, description.
+- Table of registered MCPs with name, URL, transport, kind, default-enabled toggle.
+- "Add MCP" form: name, URL, transport (radio/dropdown; v1 known values `http` (default) and `sse`), kind (free-text combo box; v1 known values `none` (default) and `github_pat`), optional `auth_config` JSON, description.
 - Edit and remove buttons per row.
 - Changes apply only to *future* sessions; running sessions are unaffected and the UI says so.
 
@@ -338,7 +341,7 @@ Constraints every requirement and the technical design must respect:
 | Command | Behavior |
 |---|---|
 | `agentctl mcp list` | Tabular list of all registry entries. |
-| `agentctl mcp add <name> --url <url> [--kind <kind>] [--auth-config <json>] [--default-enabled]` | Insert a new entry. `--kind` accepts any string; v1 recognizes `none` (default) and `github_pat`. |
+| `agentctl mcp add <name> --url <url> [--transport <t>] [--kind <kind>] [--auth-config <json>] [--default-enabled]` | Insert a new entry. `--transport` accepts any string; v1 recognizes `http` (default) and `sse`. `--kind` accepts any string; v1 recognizes `none` (default) and `github_pat`. |
 | `agentctl mcp remove <name>` | Delete an entry (with confirmation). |
 | `agentctl mcp set-default <name> on\|off` | Toggle default-enabled. |
 
@@ -756,16 +759,18 @@ Format example:
 [[mcp]]
 name = "github"
 url = "https://api.githubcopilot.com/mcp/"
+transport = "http"
 kind = "github_pat"
 default_enabled = true
 description = "GitHub MCP server (uses developer PAT)."
 
 [[mcp]]
 name = "internal-jira"
-url = "https://mcp.internal.example.com/jira"
+url = "https://mcp.internal.example.com/jira/sse"
+transport = "sse"
 kind = "none"
 default_enabled = false
-description = "Team Jira MCP."
+description = "Team Jira MCP (SSE transport)."
 ```
 
 See `architecture/decisions/0006-mcp-registry-seed.md`.

@@ -96,7 +96,7 @@ slightly more chatty per-session bookkeeping:
   `session.error`, `session.queue_depth_changed`,
   `session.in_flight_changed`, `turn.start`, `turn.end`,
   `turn.cancelled`.
-- MCP probes: `mcp.probe.ok`, `mcp.probe.unreachable`.
+- MCP probes: `mcp.probe.ok`, `mcp.probe.unreachable`, `mcp.skipped` (unknown transport or kind).
 - Control-channel I/O **metadata** (kind, seq, byte count) — never
   bodies. Disabled at level `info`; enabled at `debug` only.
 - Repo events: `repo.cloned`, `repo.changed`, `repo.export.pushed`,
