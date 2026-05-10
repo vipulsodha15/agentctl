@@ -2,28 +2,62 @@
 
 ## 1. Base image
 
-The base image is the unit of "what the agent has at its fingertips."
-Updates ship a new image; sessions adopt the new image on next
-stop+resume cycle (§15.8).
+The base image is the **runtime + dev tooling** the agent runs inside.
+It is **built locally on the developer's machine** by `agentctl init`
+(and rebuilt by `agentctl update`); there is no OCI registry pull and
+no publisher-side image distribution in v1. Skills are **not** baked
+in; they are bind-mounted at session start (§2.4, ADR 0014).
 
 ### 1.1 Image identity and pinning
 
-- **Repository:** `agentctl/session-base` (placeholder; team replaces in
-  registry seed). Always pulled by digest in v1.
-- **Tag scheme:** `vN.YYYY-MM-DD` (e.g. `v1.2026-05-01`). Tags are mutable
-  for convenience; what's authoritative is the digest stored in
-  `config.toml` `[image].pinned_digest`.
-- **Distribution:** any OCI-compliant registry. `agentctl init` pulls
-  the configured ref and writes `pinned_digest`.
-- **Local caching:** Docker's content store. We do not garbage-collect
-  old images automatically; `agentctl update --gc` (post-v1) would.
+- **Local tag:** `agentctl/session-base:local`. Single tag, machine-local.
+- **Pin:** the image's content-addressable ID
+  (`docker inspect agentctl/session-base:local --format '{{.Id}}'`)
+  is stored in `config.toml` `[image].pinned_id`. The previous ID
+  is retained as `[image].previous_id` for rollback.
+- **Local caching:** Docker's content store. Old image IDs accumulate
+  there until `docker image prune` (manual; `agentctl update --gc` is
+  post-v1).
+- **No remote registry, no cosign verification of the image.** Trust
+  derives from `install.sh` having signature-verified the build context
+  (Dockerfile + shim source + entrypoint) before laying it down at
+  `~/.local/share/agentctl/image/`.
 
-### 1.2 Layered build plan
+### 1.2 Build context location
 
-The Dockerfile is split into layers from "rarely changes" to "frequently
-changes" so updates ship small diffs:
+`install.sh` lays down the build context at:
+
+```
+~/.local/share/agentctl/image/
+├── Dockerfile
+├── shim/                       # Go source for the runtime shim
+│   └── ...
+├── entrypoint                  # /usr/local/bin/agentctl-entrypoint
+└── config-templates/           # /etc/agentctl/templates/*
+```
+
+Owner: same OS user as `agentd`. Mode `0755` on directories, `0644`
+on files. A site-wide install (`INSTALL_DIR=/usr/local/bin`) places
+this at `/usr/local/share/agentctl/image/` instead.
+
+The `agentd` build context **does not contain skills** — those live
+under sibling directories (`builtin-skills/`, `custom-skills/`) and
+are mounted, not COPYed.
+
+### 1.3 Layered build plan
+
+The Dockerfile is split into layers from "rarely changes" to
+"frequently changes" so rebuilds reuse cache aggressively:
 
 ```dockerfile
+# ---- Stage A: build the runtime shim from Go source ----
+FROM golang:1.23-bookworm AS shim-build
+WORKDIR /src
+COPY shim/ /src
+RUN go build -trimpath -ldflags="-s -w" -o /out/agent-runtime-shim ./...
+RUN sha256sum /out/agent-runtime-shim | awk '{print $1}' > /out/agent-runtime-shim.sha256
+
+# ---- Stage B: the final session base image ----
 # Layer 1 — base OS + system packages (rarely changes)
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -43,16 +77,12 @@ RUN npm install -g @anthropic-ai/claude-code@${AGENT_RUNTIME_VERSION}
 COPY --from=shim-build /out/agent-runtime-shim /usr/local/bin/
 COPY --from=shim-build /out/agent-runtime-shim.sha256 /usr/local/share/agentctl/
 
-# Layer 4 — skills (per-release, frequent)
-COPY skills/ /skills/
-RUN chmod -R a-w /skills/
-
-# Layer 5 — entrypoint and runtime config templates (per-release)
+# Layer 4 — entrypoint and runtime config templates (per-release)
 COPY entrypoint /usr/local/bin/agentctl-entrypoint
 COPY config-templates /etc/agentctl/templates/
 RUN useradd --create-home --uid 1000 --shell /bin/bash agent && \
-    mkdir -p /work /run/agentctl/control && \
-    chown -R agent:agent /work /home/agent && \
+    mkdir -p /work /skills /run/agentctl/control && \
+    chown -R agent:agent /work /skills /home/agent && \
     chmod 0755 /run/agentctl/control
 
 USER agent
@@ -60,24 +90,18 @@ WORKDIR /work
 ENTRYPOINT ["/usr/sbin/tini", "--", "/usr/local/bin/agentctl-entrypoint"]
 ```
 
-Why these splits:
+Notes:
 
-- Layer 4 (skills) changes most often. Keeping it late minimizes pull
-  size when only skills update.
-- The runtime shim lives in layer 3 with the runtime since they ship
-  together (`api.md` §4.6).
-- `tini` as PID 1 ensures clean signal forwarding to the runtime; without
-  it, `docker stop`'s SIGTERM would be eaten by the shim's child reaper.
-
-### 1.3 Skills packaging
-
-- Skills are directories under `/skills/<skill-name>/` containing a
-  `manifest.json` (name, description, args schema) plus the skill's
-  implementation files.
-- The runtime auto-loads everything in `/skills/`. `/help` (R9) reads the
-  manifests to render descriptions.
-- The container makes `/skills` read-only after the COPY (`chmod -R
-  a-w`); the agent cannot modify or add skills at runtime (R9 OOS).
+- **No `COPY skills/` step.** `/skills` is created as an empty,
+  agent-owned directory; it serves only as the bind-mount target for
+  the per-session skills snapshot (§2.4).
+- The shim is compiled inside the build via stage A; the developer's
+  host does not need a Go toolchain.
+- `tini` as PID 1 ensures clean signal forwarding to the runtime;
+  without it, `docker stop`'s SIGTERM would be eaten by the shim's
+  child reaper.
+- Build args (`AGENT_RUNTIME_VERSION`) are pinned by the build context's
+  `Dockerfile`; the active value travels with the agentctl release.
 
 ### 1.4 What is **not** in the image
 
@@ -87,16 +111,32 @@ Why these splits:
 - No model configuration. `AGENTCTL_MODEL` is injected.
 - No host paths. The image has no awareness of the developer's
   filesystem.
+- **No skills.** Built-in and custom skills are composed by `agentd` at
+  session start and bind-mounted at `/skills/` (§2.4).
 
-### 1.5 Image distribution and supply chain
+### 1.5 Trust and supply chain
 
-- We sign the image with cosign (keyless, OIDC). `agentctl init` and
-  `agentctl update` verify signature against the configured public key in
-  `config.toml` `[image].cosign_identity`. Sig-verify failure aborts the
-  pull.
-- SBOM (CycloneDX) shipped as an OCI artifact alongside the image; not
-  consumed by v1, present for auditability.
-- Image tags and digests are emitted in `agentctl ls --verbose` and the
+- The Dockerfile, shim source, entrypoint, and config templates ship
+  inside the same release tarball as the agentctl binary. `install.sh`
+  verifies the tarball's signature against an embedded public key
+  before extracting any of it (install-and-update.md §1.2).
+- The locally-built image inherits trust from those signature-verified
+  inputs. We do **not** sign the resulting local image; signing a build
+  artifact whose entire input chain is already verified would add
+  ceremony without improving the trust story.
+- External inputs the build relies on:
+  - `debian:bookworm-slim` from Docker Hub (authenticated by Docker's
+    content trust if enabled; otherwise standard Docker pull semantics).
+  - apt packages from official Debian repositories.
+  - Node.js from `deb.nodesource.com`.
+  - The agent runtime npm package from npm's registry.
+  - `golang:1.23-bookworm` from Docker Hub (used only in stage A).
+
+  These are standard supply-chain risks we do not attempt to eliminate
+  in v1; reproducible-build hardening (pinned package digests, vendored
+  dependencies, restricted pull sources) is a v2 concern.
+- The local image ID is recorded on every session row
+  (`sessions.image_id`) and surfaced in `agentctl ls --verbose` and the
   Web UI session detail.
 
 ## 2. Container creation parameters
@@ -111,7 +151,7 @@ they are named; where it doesn't, the Engine API field is named.
   recognizability). Labeled, so the canonical filter is by label.
 - **Labels:**
   - `agentctl.session=<full_session_id>`
-  - `agentctl.image_digest=<sha256:…>`
+  - `agentctl.image_id=<sha256:…>`
   - `agentctl.created_at=<RFC3339>`
   - `agentctl.user=<os_user>` (informational)
 
@@ -123,9 +163,13 @@ they are named; where it doesn't, the Engine API field is named.
 - The container is attached to **only** this network. No `host`, no
   default `bridge`. ICC (inter-container communication) on the network is
   off — even if two containers somehow ended up on the same network they
-  couldn't talk.
+  couldn't talk. This is the sole network-level isolation v1 enforces;
+  it satisfies R7's peer-isolation requirement and costs nothing beyond
+  Docker config.
 - `enable_ip_masquerade` is on (default) so egress works through the host
-  NAT.
+  NAT. The container can reach the public internet, the developer's LAN,
+  and the host's loopback. Strict egress filtering is deferred to v2
+  (`v2-requirements.md` §V2.1).
 - IPv6 disabled at the network level for v1 (default Docker; we reaffirm
   it).
 
@@ -153,9 +197,35 @@ The runtime can resolve external DNS names via the host's resolver
 |---|---|---|---|
 | `~/.local/share/agentctl/sessions/<id>/volume/` | `/work` | `rw` | The session volume. Owned by uid 1000 to match the `agent` user. |
 | `~/.local/share/agentctl/sessions/<id>/control/` | `/run/agentctl/control/` | `rw` | Control socket dir. Only path that touches host loopback equivalent. |
+| `~/.local/share/agentctl/sessions/<id>/skills/` | `/skills/` | `ro` | Per-session skills snapshot composed at start by `agentd` from the install's built-in skills + the developer's custom skills. Frozen for the session's lifetime; live reload is v2. |
 
 No other host paths. In particular: not `/var/run/docker.sock`, not
-`~/.config/agentctl`, not `/etc/passwd`, not the secrets file.
+`~/.config/agentctl`, not `/etc/passwd`, not the secrets file. The
+host-side `~/.local/share/agentctl/builtin-skills/` and `custom-skills/`
+directories are **not** mounted directly — only the per-session
+snapshot is.
+
+#### Skills snapshot composition
+
+At session start, `agentd`:
+
+1. Creates `sessions/<id>/skills/` (empty).
+2. Walks `~/.local/share/agentctl/builtin-skills/` and copies each
+   skill subdirectory into the snapshot (cp `-r`; on COW filesystems
+   this is fast via reflink when available).
+3. Walks `~/.local/share/agentctl/custom-skills/` and copies each
+   skill subdirectory into the snapshot. On name collision with a
+   built-in: the custom version replaces the built-in in the snapshot,
+   and `agentd` emits a `skill.collision { name, overrides:
+   "builtin" }` event so attached clients can surface it.
+4. Computes the sha256 of the snapshot tree (sorted file list +
+   contents) and stores it on the session row as
+   `skills_snapshot_hash`. The snapshot path is stored as
+   `skills_snapshot_path`.
+5. Bind-mounts the snapshot read-only into the container at `/skills/`.
+
+Cleanup: the snapshot is removed when the session is `TerminateSession`'d
+(part of the per-session-dir teardown described in data-model.md §4).
 
 ### 2.5 Environment variables
 
@@ -201,10 +271,15 @@ as `agent` (uid 1000) and:
    leaves the repo placeholder absent.
 3. Connects to `/run/agentctl/control/agentd.sock` and sends
    `runtime.hello` with `session_token` (verified by agentd).
-4. Receives `agentd.greet` with the resolved MCP set + headers.
+4. Receives `agentd.greet` with the resolved MCP set (each entry carries
+   `url`, `transport` (`http`/`sse`/…), `kind`, and any auth-derived
+   headers). MCP entries whose `transport` or `kind` are not recognized
+   by this image's runtime are dropped from the rendered config and
+   reported as `mcp.skipped` events.
 5. Writes the runtime config file (`/home/agent/.config/agent/config.json`)
    from the template `/etc/agentctl/templates/config.json.tmpl`,
-   substituting MCP URLs and any per-session settings.
+   emitting one config block per MCP keyed by transport (the runtime
+   accepts both Streamable HTTP and SSE entries).
 6. Starts the agent runtime as a child process:
 
    ```bash
@@ -270,90 +345,29 @@ attaching to the container. Implementation:
 container. All git operations live in the shim where credentials are
 already wired.
 
-## 4. Network policy (realizing R7)
+## 4. Network posture (v1)
 
-The hard requirements:
+v1 ships with Docker-native isolation only. Two requirements are met:
 
-- **Allow** egress to Anthropic (`api.anthropic.com:443`).
-- **Allow** egress to configured internal MCP CIDRs and `github.com:443`
-  (for the GitHub MCP and `git push`).
-- **Deny** access to peer session containers.
-- **Deny** access to host loopback (where `agentd`'s Web UI lives) — the
-  control sock is the **only** allowed channel.
+- **Peer isolation.** Each session has its own bridge network with
+  `enable_icc=false` (§2.2). Two session containers cannot reach each
+  other by hostname or IP.
+- **No inbound exposure.** No ports are published from session
+  containers; nothing on the host or LAN can connect *into* a session.
 
-### 4.1 Mechanism
+What v1 does **not** restrict:
 
-We layer three controls:
+- Outbound egress to the public internet, the developer's LAN, or the
+  host's loopback. The container can `curl` arbitrary URLs.
+- Reaching `agentd`'s admin API on `127.0.0.1:7777` over the host
+  bridge gateway. This is gated by the bearer token in
+  `~/.config/agentctl/web_token`, which the container has no
+  bind-mount to read; without the token every `/v1/*` request returns
+  `401`.
 
-1. **Per-session Docker network with ICC off** (§2.2). This already
-   blocks peer containers on the same install — they cannot resolve or
-   reach each other.
-2. **iptables FORWARD rules** managed by `agentd`. On Linux, when
-   `agentd` creates a session network, it inserts ordered rules in a
-   custom chain `AGENTCTL-EGRESS` (jumped to from `DOCKER-USER`):
-
-   ```text
-   # Pseudocode for agentd's iptables installer.
-   iptables -N AGENTCTL-EGRESS                                    (idempotent)
-   iptables -I DOCKER-USER 1 -j AGENTCTL-EGRESS                   (idempotent)
-   iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-   # For each session network <net-name>:
-   iptables -A AGENTCTL-EGRESS -i <net-name> \
-            -d <host-bridge-ip>/32 -j DROP                         # Block host loopback path
-   iptables -A AGENTCTL-EGRESS -i <net-name> \
-            -d 127.0.0.0/8 -j DROP                                 # Defensive
-   for cidr in <RFC1918 ranges except configured-mcp-cidrs>:
-       iptables -A AGENTCTL-EGRESS -i <net-name> -d $cidr -j DROP
-   for cidr in <configured-mcp-cidrs>:
-       iptables -A AGENTCTL-EGRESS -i <net-name> -d $cidr -j ACCEPT
-   iptables -A AGENTCTL-EGRESS -i <net-name> -p tcp --dport 443 -j ACCEPT
-   iptables -A AGENTCTL-EGRESS -i <net-name> -p udp --dport 53 -j ACCEPT
-   iptables -A AGENTCTL-EGRESS -i <net-name> -j DROP
-   ```
-
-   On macOS, Docker Desktop runs Linux in a VM; iptables runs inside the
-   VM. `agentd` shells out to Docker's `dockerd` via `docker network`
-   labels and a `--internal=false` flag plus a custom Docker plugin? No —
-   we instead **use Docker's IPAM and a tighter trick**: each session
-   network is created with `--internal=true` (no external by default) and
-   we add a **userland egress proxy** sidecar pattern. Too complex for v1.
-
-   **macOS approach for v1 (simpler):** Docker Desktop on macOS isolates
-   networks effectively from the host (VM boundary). The host loopback
-   IS reachable from a container only via `host.docker.internal` (a
-   Docker-injected hostname). We **explicitly do not inject**
-   `--add-host=host.docker.internal:host-gateway`, and we set
-   `--add-host=host.docker.internal:127.0.0.1` so any inadvertent
-   reference resolves to the container's own loopback. Combined with
-   per-session networks and ICC=off, peer-to-peer is blocked. Egress
-   filtering on macOS is best-effort (we cannot install host-side
-   iptables); we document this gap in `security.md` §4.
-
-3. **Network self-test** (`agentd doctor`) verifies all four
-   constraints in §4 by spinning up an ephemeral diagnostic container on
-   a session network and checking each is enforced.
-
-### 4.2 MCP CIDRs
-
-`config.toml` has `[network.allowed_mcp_cidrs]`:
-
-```toml
-[network]
-allowed_mcp_cidrs = ["10.20.0.0/16", "192.168.42.0/24"]
-allow_github = true       # github.com IP pool resolved at start
-allow_anthropic = true    # api.anthropic.com IP pool resolved at start
-```
-
-Public MCPs (e.g., the GitHub MCP) have their effective CIDRs resolved
-at `agentd` startup via DNS (and refreshed every hour). Internal MCPs are
-configured by CIDR, not hostname, to keep the policy crisp.
-
-### 4.3 What's intentionally not blocked
-
-- DNS to the host's resolver (the bridge gateway IP on UDP/53 — actually
-  Docker's embedded resolver on `127.0.0.11` inside the container, which
-  forwards via the host). We allow it; without DNS, nothing works.
-- The control sock — by definition.
+Strict outbound egress allowlisting (Anthropic / GitHub / configured
+MCPs only) is deferred to v2. See `v2-requirements.md` §V2.1 for the
+goal and the previously proposed iptables-based design.
 
 ## 5. Container teardown
 

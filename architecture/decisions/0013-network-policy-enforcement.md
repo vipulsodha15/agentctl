@@ -1,8 +1,16 @@
 # ADR 0013 — Per-session network policy enforcement
 
-- **Status:** Accepted.
+- **Status:** Superseded.
 - **Date:** 2026-05-09.
-- **Deciders:** Architect.
+- **Superseded:** 2026-05-10 — strict outbound network filtering removed
+  from v1 scope; deferred to v2. See `v2-requirements.md` §V2.1.
+- **Deciders:** Architect (original); product owner (deferral).
+
+> **Note:** the design captured below was **not** adopted in v1. v1
+> ships with Docker-native peer isolation only (per-session bridge with
+> `enable_icc=false`) and no host-firewall manipulation. The original
+> design is retained for historical context and as a starting point for
+> v2 egress-restriction work.
 
 ## Context
 

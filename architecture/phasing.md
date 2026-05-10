@@ -26,13 +26,15 @@ in §6 maps every requirement to its landing milestone.
   - serves `/healthz` and a stub `Health` over the CLI socket,
   - logs to journald (Linux) and a file (macOS) per observability.md §2.
 - `agentctl` CLI binary that:
-  - implements `init` with Docker check, token validation, perm
-    fix-ups, registry seed apply, system-service install, foreground
-    fallback,
+  - implements `init` with Docker check, **local image build**
+    (`docker build` against `~/.local/share/agentctl/image/`), token
+    validation, perm fix-ups, registry seed apply, system-service
+    install, foreground fallback,
+  - implements `agentctl update` (re-build image, repin id),
   - implements `agentctl config get|set`,
   - implements `agentctl doctor` (subset: `bin.versions`, `fs.perms`,
     `db.integrity`, `service.active`, `agentd.health`,
-    `docker.reachable`).
+    `docker.reachable`, `image.built`, `image.build_context`).
 - systemd `--user` unit and launchd plist.
 
 ### Out of scope (M1)
@@ -136,7 +138,7 @@ Recovery, network policy hardening, R8 diff/export, R10 cost rows.
 - `Interrupt` from any one client cancels the in-flight turn.
 - Adding an MCP via either client is reflected in the other within
   seconds.
-- `/help` lists baked-in skills in both clients.
+- `/help` lists the per-session skills snapshot (built-in + custom) in both clients.
 - `Origin` mismatch is rejected with `403`.
 
 ### Acceptance criteria covered
@@ -160,13 +162,18 @@ Recovery, network policy hardening, R8 diff/export, R10 cost rows.
 ### Scope
 
 - Recovery / reconciliation algorithm (overview.md §7).
-- Idle-stop sweeper, hard-cutoff sweeper, mcp_dns_refresh,
-  events_prune, idem_cleanup, tombstone_reap.
-- Per-session network creation + iptables chain on Linux; documented
-  best-effort on macOS.
-- Network self-test in `agentctl doctor`.
-- Image v1: skills baked in, cosign-signed, `--read-only` rootfs,
-  capability drops, pids-limit.
+- Idle-stop sweeper, hard-cutoff sweeper, events_prune, idem_cleanup,
+  tombstone_reap.
+- Per-session Docker bridge networks with `enable_icc=false`
+  (peer-isolation; no iptables manipulation in v1).
+- Peer-isolation self-test in `agentctl doctor`.
+- Image v1 (locally built per ADR 0014): no skills layer; `--read-only`
+  rootfs, capability drops, pids-limit. Built from the bundled
+  Dockerfile via `agentctl init` / `agentctl update`. Skills
+  bind-mounted at session start.
+- `agentctl skill {list,new,add,edit,remove,validate,show,export}` CLI
+  surface (R9). Per-session skills-snapshot composition + bind-mount
+  + `skills_snapshot_hash` recording.
 - Backpressure + rate limits on control channel.
 - Image update path: `agentctl update`, `update --report`, `restart
   <session>`, `update --rollback`, `update --restart-stopped`.
@@ -180,7 +187,8 @@ R10 cost, R8 diff/export.
 - `kill -9 agentd` then restart: all sessions resumable; reconciler
   cleans orphaned containers/networks.
 - Reboot during a session: same behavior on next login.
-- Network self-test passes on Linux; warns appropriately on macOS.
+- Peer-isolation self-test passes (two probes on two session networks
+  cannot reach each other).
 - Idle-stop fires on a session whose `last_activity_at` ages past 15m
   (test by setting `idle_timeout = "10s"` and observing).
 - Hard-cutoff fires on a session whose `last_activity_at` ages past
@@ -198,14 +206,12 @@ R10 cost, R8 diff/export.
 
 ### Risks
 
-- **iptables rule correctness.** *Mitigation:* network self-test runs
-  in CI on every change; integration tests also probe peer-deny.
 - **Reconcile edge cases.** *Mitigation:* fault-injection test suite
   (kill agentd at every annotated state transition; verify the
   expected outcome).
-- **Docker Desktop network behavior on macOS.** *Mitigation:*
-  documented gap; doctor warns; we don't claim Linux-grade isolation
-  on macOS.
+- **Per-session network cleanup.** A session that fails to tear down
+  cleanly leaves a Docker network behind. *Mitigation:* the reconciler
+  removes orphan networks on every boot (overview.md §7).
 
 ## M5 — Cost, diff/export, doctor polish
 
@@ -274,7 +280,7 @@ criteria; "full" = all.
 | M1 | Unit tests on schema migrations, config, secrets file perms; smoke test for `init` on Linux/macOS runners. |
 | M2 | Container creation integration tests against real Docker on Linux; mock-Docker on macOS. Actor mailbox unit tests. |
 | M3 | E2E browser tests (Playwright) hitting localhost; multi-client fan-out tests; CSRF tests. |
-| M4 | Reconcile fault-injection harness; iptables self-test in Linux CI; image build + cosign sign in release CI. |
+| M4 | Reconcile fault-injection harness; peer-isolation self-test in Linux + macOS CI; local image build smoke test on multiple distros (Ubuntu 22.04/24.04, Debian 12, Fedora 40, macOS Docker Desktop) in release CI. |
 | M5 | Cost computation parity tests; diff/export E2E; `agentctl doctor --fix` E2E. |
 
 ## 8. Cuttable scope (if we slip)
@@ -282,13 +288,11 @@ criteria; "full" = all.
 If a milestone overruns, here's what we'd defer to v1.1 in priority
 order:
 
-1. macOS-only network policy parity (already best-effort; document the
-   gap loudly).
-2. `agentctl logs --container` (Docker logs proxy is convenient but
+1. `agentctl logs --container` (Docker logs proxy is convenient but
    not on the critical path).
-3. `agentctl update --rollback` (rollback by editing config.toml and
+2. `agentctl update --rollback` (rollback by editing config.toml and
    `restart` works).
-4. `agentctl doctor --fix` for non-trivial repairs (the read-only
+3. `agentctl doctor --fix` for non-trivial repairs (the read-only
    doctor still works; user runs `init --repair`).
 
 Items we will **not** cut (would block v1):
