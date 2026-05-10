@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentctl Web UI</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 4rem auto; max-width: 36rem; color: #222; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  .placeholder { color: #777; font-style: italic; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  var hash = window.location.hash || "";
+  var token = "";
+  if (hash.indexOf("#t=") === 0) {
+    token = decodeURIComponent(hash.substring(3));
+  } else if (hash.indexOf("#token=") === 0) {
+    token = decodeURIComponent(hash.substring(7));
+  }
+  if (token) {
+    document.cookie = "agentctl_token=" + token + "; Path=/; SameSite=Strict";
+    history.replaceState(null, "", window.location.pathname);
+  }
+})();
+</script>
+<h1>agentctl Web UI</h1>
+<p class="placeholder">SPA build pending &mdash; this placeholder is replaced by the M3-C bundle.</p>
+<p>Open this UI by running <code>agentctl ui</code> from a terminal so the bearer token is delivered via the URL fragment.</p>
+</body>
+</html>
