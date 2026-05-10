@@ -7,6 +7,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
@@ -101,6 +102,52 @@ func (d *dockerSDK) Info(ctx context.Context) (Info, error) {
 		return Info{OK: false, Error: err.Error()}, nil
 	}
 	return Info{OK: true, Version: info.ServerVersion}, nil
+}
+
+func (d *dockerSDK) NetworkCreate(ctx context.Context, req NetworkCreateRequest) (NetworkRef, error) {
+	opts := types.NetworkCreate{
+		Driver:     req.Driver,
+		Labels:     req.Labels,
+		Options:    req.Options,
+		EnableIPv6: req.EnableIPv6,
+	}
+	resp, err := d.cli.NetworkCreate(ctx, req.Name, opts)
+	if err != nil {
+		return NetworkRef{}, err
+	}
+	label := ""
+	if req.Labels != nil {
+		label = req.Labels["agentctl.session"]
+	}
+	return NetworkRef{ID: resp.ID, Name: req.Name, Label: label}, nil
+}
+
+func (d *dockerSDK) NetworkRemove(ctx context.Context, networkID string) error {
+	return d.cli.NetworkRemove(ctx, networkID)
+}
+
+func (d *dockerSDK) NetworkList(ctx context.Context, labelKey, labelValue string) ([]NetworkRef, error) {
+	args := filters.NewArgs()
+	if labelKey != "" {
+		if labelValue != "" {
+			args.Add("label", labelKey+"="+labelValue)
+		} else {
+			args.Add("label", labelKey)
+		}
+	}
+	nets, err := d.cli.NetworkList(ctx, types.NetworkListOptions{Filters: args})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NetworkRef, 0, len(nets))
+	for _, n := range nets {
+		ref := NetworkRef{ID: n.ID, Name: n.Name}
+		if n.Labels != nil {
+			ref.Label = n.Labels["agentctl.session"]
+		}
+		out = append(out, ref)
+	}
+	return out, nil
 }
 
 func statusFromInspect(js types.ContainerJSON) Status {

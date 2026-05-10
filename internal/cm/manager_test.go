@@ -23,6 +23,15 @@ type fakeDocker struct {
 	inspectErr    error
 	infoResult    Info
 	infoErr       error
+
+	netCreateReq    *NetworkCreateRequest
+	netCreateID     string
+	netCreateErr    error
+	netRemoveCalls  []string
+	netListResult   []NetworkRef
+	netListLabelKey string
+	netListLabelVal string
+	netListErr      error
 }
 
 type stopCall struct {
@@ -78,6 +87,34 @@ func (f *fakeDocker) Inspect(_ context.Context, _ string) (Status, error) {
 
 func (f *fakeDocker) Info(_ context.Context) (Info, error) {
 	return f.infoResult, f.infoErr
+}
+
+func (f *fakeDocker) NetworkCreate(_ context.Context, req NetworkCreateRequest) (NetworkRef, error) {
+	clone := req
+	f.netCreateReq = &clone
+	if f.netCreateErr != nil {
+		return NetworkRef{}, f.netCreateErr
+	}
+	id := f.netCreateID
+	if id == "" {
+		id = "net-id"
+	}
+	label := ""
+	if req.Labels != nil {
+		label = req.Labels["agentctl.session"]
+	}
+	return NetworkRef{ID: id, Name: req.Name, Label: label}, nil
+}
+
+func (f *fakeDocker) NetworkRemove(_ context.Context, id string) error {
+	f.netRemoveCalls = append(f.netRemoveCalls, id)
+	return nil
+}
+
+func (f *fakeDocker) NetworkList(_ context.Context, key, value string) ([]NetworkRef, error) {
+	f.netListLabelKey = key
+	f.netListLabelVal = value
+	return append([]NetworkRef(nil), f.netListResult...), f.netListErr
 }
 
 func sampleSpec(t *testing.T) (Spec, string) {

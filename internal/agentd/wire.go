@@ -74,6 +74,18 @@ func (a *cmAdapter) Remove(ctx context.Context, id string, force bool) error {
 	return a.inner.Remove(ctx, id, force)
 }
 
+func (a *cmAdapter) NetworkCreate(ctx context.Context, sessionID, name string) (sm.NetworkRef, error) {
+	ref, err := a.inner.NetworkCreate(ctx, sessionID, name)
+	if err != nil {
+		return sm.NetworkRef{}, err
+	}
+	return sm.NetworkRef{ID: ref.ID, Name: ref.Name, Label: ref.Label}, nil
+}
+
+func (a *cmAdapter) NetworkRemove(ctx context.Context, networkID string) error {
+	return a.inner.NetworkRemove(ctx, networkID)
+}
+
 type ccSession struct {
 	sessionToken string
 	handler      sm.ControlHandler

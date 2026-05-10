@@ -13,6 +13,14 @@ type ContainerManager interface {
 	Start(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string, grace time.Duration) error
 	Remove(ctx context.Context, id string, force bool) error
+	NetworkCreate(ctx context.Context, sessionID, name string) (NetworkRef, error)
+	NetworkRemove(ctx context.Context, networkID string) error
+}
+
+type NetworkRef struct {
+	ID    string
+	Name  string
+	Label string
 }
 
 type MountType string

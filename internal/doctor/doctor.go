@@ -82,7 +82,13 @@ func Run(opts RunOptions) Result {
 	r.Add(checkImageBuilt(opts.ConfigPath))
 	r.Add(checkServiceActive(opts.Home))
 	r.Add(checkAgentdHealth(opts.SocketPath, opts.WebAddr))
-	r.Add(checkDockerReachable())
+	docker := checkDockerReachable()
+	r.Add(docker)
+	if docker.Status == StatusOK {
+		r.Add(checkNetworkPeerIsolation())
+	} else {
+		r.Add(Check{Name: "network.peer_isolation", Status: StatusSkip, Message: "skipped (docker unreachable)"})
+	}
 	return r
 }
 

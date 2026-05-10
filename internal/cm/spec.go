@@ -57,3 +57,17 @@ type Info struct {
 	Version string
 	Error   string
 }
+
+type NetworkRef struct {
+	ID    string
+	Name  string
+	Label string
+}
+
+type NetworkCreateRequest struct {
+	Name       string
+	Driver     string
+	Labels     map[string]string
+	Options    map[string]string
+	EnableIPv6 bool
+}

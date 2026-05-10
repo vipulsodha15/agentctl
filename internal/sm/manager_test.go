@@ -239,7 +239,7 @@ func TestProvisionOrderCreateListenStart(t *testing.T) {
 	fc.mu.Lock()
 	listened := fc.listened
 	fc.mu.Unlock()
-	if len(calls) != 2 || calls[0] != "create" || calls[1] != "start" {
+	if len(calls) != 3 || calls[0] != "net_create" || calls[1] != "create" || calls[2] != "start" {
 		t.Fatalf("unexpected cm call order: %v", calls)
 	}
 	if !listened {
@@ -248,6 +248,9 @@ func TestProvisionOrderCreateListenStart(t *testing.T) {
 	// Listen must run between create and start.
 	if cm.startSeenListen != true {
 		t.Fatal("expected listen to be called before start")
+	}
+	if len(cm.networks) != 1 || cm.networks[0].Label != res.SessionID {
+		t.Fatalf("expected one network labelled with session id, got %+v", cm.networks)
 	}
 }
 
@@ -292,8 +295,10 @@ type fakeContainerManager struct {
 	specs           []ContainerSpec
 	startErr        error
 	createErr       error
+	netCreateErr    error
 	listenSeen      bool
 	startSeenListen bool
+	networks        []NetworkRef
 }
 
 func newFakeContainerManager() *fakeContainerManager {
@@ -465,6 +470,25 @@ func readSkillNames(t *testing.T, dir string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func (f *fakeContainerManager) NetworkCreate(_ context.Context, sessionID, name string) (NetworkRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "net_create")
+	if f.netCreateErr != nil {
+		return NetworkRef{}, f.netCreateErr
+	}
+	ref := NetworkRef{ID: "net-" + sessionID, Name: name, Label: sessionID}
+	f.networks = append(f.networks, ref)
+	return ref, nil
+}
+
+func (f *fakeContainerManager) NetworkRemove(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "net_remove:"+id)
+	return nil
 }
 
 func TestTerminate(t *testing.T) {
@@ -662,3 +686,76 @@ var errFakeClosed = &errString{"fake conn closed"}
 type errString struct{ s string }
 
 func (e *errString) Error() string { return e.s }
+
+func TestRestartSessionNotFound(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	if _, err := mgr.Restart(context.Background(), "missing"); err == nil {
+		t.Fatal("expected ErrSessionNotFound")
+	}
+}
+
+func TestRestartReusesNetworkAndUsesPinnedID(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeControl()
+	cm := newFakeContainerManager()
+	fc.bound = cm
+	pinned := "sha256:abc"
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Containers:      cm,
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		ImageID:         pinned,
+		PinnedImageID:   func() string { return pinned },
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	res, err := mgr.Create(ctx, CreateRequest{Name: "p"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	cm.mu.Lock()
+	cm.calls = nil
+	cm.mu.Unlock()
+
+	rr, err := mgr.Restart(ctx, res.SessionID)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if rr.ImageID != pinned {
+		t.Errorf("ImageID: got %q want %q", rr.ImageID, pinned)
+	}
+	cm.mu.Lock()
+	calls := append([]string(nil), cm.calls...)
+	netCount := len(cm.networks)
+	cm.mu.Unlock()
+	gotCreate := false
+	for _, c := range calls {
+		if c == "net_create" {
+			t.Errorf("Restart must reuse network, not create new one: %v", calls)
+		}
+		if c == "create" {
+			gotCreate = true
+		}
+	}
+	if !gotCreate {
+		t.Errorf("expected container create on restart: %v", calls)
+	}
+	if netCount != 1 {
+		t.Errorf("expected exactly one network after restart, got %d", netCount)
+	}
+}
+
+func TestRestartRefusesWhenImageNotPinned(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	_ = fc
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Restart(ctx, r.SessionID); err == nil {
+		t.Fatal("expected error when no pinned image")
+	}
+}

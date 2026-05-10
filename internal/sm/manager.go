@@ -29,6 +29,7 @@ type Manager interface {
 	Attach(ctx context.Context, sessionID string) (Stream, error)
 	List(ctx context.Context) ([]proto.SessionSummary, error)
 	Get(ctx context.Context, sessionID string) (proto.SessionDetail, error)
+	Restart(ctx context.Context, sessionID string) (RestartResult, error)
 	Terminate(ctx context.Context, sessionID string) error
 	Shutdown(ctx context.Context) error
 	Busy(sessionID string) (busy bool, ok bool)
@@ -73,6 +74,12 @@ type InterruptResult struct {
 	ClearedQueueDepth int
 }
 
+type RestartResult struct {
+	SessionID string
+	Status    string
+	ImageID   string
+}
+
 var (
 	ErrSessionNotFound   = errors.New("session not found")
 	ErrAlreadyTerminated = errors.New("session already terminated")
@@ -92,6 +99,7 @@ type Options struct {
 	Now             func() time.Time
 	DefaultModel    string
 	ImageID         string
+	PinnedImageID   func() string
 	SecretsPath     string
 	User            string
 	WebURL          func(sessionID string) string
@@ -353,6 +361,8 @@ type provisionInputs struct {
 	MemBytes     int64
 	CPUs         float64
 	SessionToken string
+	NetworkID    string
+	NetworkName  string
 }
 
 // provisionContainer runs the Create -> Listen -> Start sequence from
@@ -392,6 +402,29 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		"agentctl.created_at": now.Format(time.RFC3339),
 		"agentctl.user":       user,
 	}
+	short := suffix(in.SessionID)
+	netID := in.NetworkID
+	netName := in.NetworkName
+	createdNetwork := false
+	if netID == "" {
+		ref, err := m.opts.Containers.NetworkCreate(ctx, in.SessionID, "agentctl-"+short)
+		if err != nil {
+			m.markSessionError(ctx, in.SessionID, "network_create_failed: "+err.Error())
+			a.markError("network_create_failed")
+			return fmt.Errorf("network create: %w", err)
+		}
+		netID = ref.ID
+		netName = ref.Name
+		createdNetwork = true
+		a.setNetwork(netID, netName)
+		if m.store != nil {
+			if _, err := m.store.DB().ExecContext(ctx,
+				`UPDATE sessions SET network_id=? WHERE id=?`,
+				netID, in.SessionID); err != nil {
+				m.logger.Warn("session.network_id_update_failed", slog.String("session_id", in.SessionID), slog.String("error", err.Error()))
+			}
+		}
+	}
 	mounts := []ContainerMount{
 		{Type: MountBind, Source: in.VolumeDir, Target: "/work"},
 		{Type: MountBind, Source: in.ControlDir, Target: "/run/agentctl/control"},
@@ -404,13 +437,14 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 	spec := ContainerSpec{
 		SessionID:      in.SessionID,
 		ImageID:        in.ImageID,
-		Name:           "agentctl-" + suffix(in.SessionID),
+		Name:           "agentctl-" + short,
 		Labels:         labels,
 		EnvFile:        in.EnvFile,
 		Mounts:         mounts,
 		MemBytes:       in.MemBytes,
 		CPUs:           in.CPUs,
 		MemorySwap:     in.MemBytes,
+		NetworkID:      netName,
 		ReadOnlyRootFS: true,
 		CapDrop:        []string{"ALL"},
 		SecurityOpts:   []string{"no-new-privileges"},
@@ -420,6 +454,11 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 
 	handle, err := m.opts.Containers.Create(ctx, spec)
 	if err != nil {
+		if createdNetwork {
+			removeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = m.opts.Containers.NetworkRemove(removeCtx, netID)
+			cancel()
+		}
 		m.markSessionError(ctx, in.SessionID, "container_create_failed: "+err.Error())
 		a.markError("container_create_failed")
 		return fmt.Errorf("container create: %w", err)
@@ -430,6 +469,9 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = m.opts.Containers.Stop(stopCtx, handle.ID, time.Second)
 		_ = m.opts.Containers.Remove(stopCtx, handle.ID, true)
+		if createdNetwork {
+			_ = m.opts.Containers.NetworkRemove(stopCtx, netID)
+		}
 		cancel()
 		m.markSessionError(ctx, in.SessionID, "control_listen_failed: "+err.Error())
 		a.markError("control_listen_failed")
@@ -441,6 +483,9 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = m.opts.Containers.Stop(stopCtx, handle.ID, time.Second)
 		_ = m.opts.Containers.Remove(stopCtx, handle.ID, true)
+		if createdNetwork {
+			_ = m.opts.Containers.NetworkRemove(stopCtx, netID)
+		}
 		cancel()
 		m.markSessionError(ctx, in.SessionID, "container_start_failed: "+err.Error())
 		a.markError("container_start_failed")
@@ -604,6 +649,74 @@ func (m *manager) Get(_ context.Context, sessionID string) (proto.SessionDetail,
 		return proto.SessionDetail{}, ErrSessionNotFound
 	}
 	return a.snapshotDetail(), nil
+}
+
+func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult, error) {
+	a := m.actorFor(sessionID)
+	if a == nil {
+		return RestartResult{}, ErrSessionNotFound
+	}
+	imageID := m.currentImageID()
+	if imageID == "" || strings.HasPrefix(imageID, "sha256:pending") {
+		return RestartResult{}, fmt.Errorf("no image pinned; run `agentctl update`")
+	}
+	if _, err := m.Interrupt(ctx, sessionID, false); err != nil && !errors.Is(err, ErrNoInFlight) {
+		m.logger.Warn("session.restart.interrupt_failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+	containerID, networkID, networkName := a.snapshotIDs()
+	if m.opts.Containers != nil && containerID != "" {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		_ = m.opts.Containers.Stop(stopCtx, containerID, 30*time.Second)
+		_ = m.opts.Containers.Remove(stopCtx, containerID, true)
+		cancel()
+	}
+	if m.opts.Control != nil {
+		_ = m.opts.Control.Stop(sessionID)
+	}
+	a.markRestarting(imageID)
+
+	dir := filepath.Join(m.opts.SessionsDir, sessionID)
+	envFile := filepath.Join(dir, "secrets.env")
+	sockPath := filepath.Join(dir, "control", "agentd.sock")
+	summary := a.snapshotSummary()
+	in := provisionInputs{
+		SessionID:    sessionID,
+		Name:         summary.Name,
+		ImageID:      imageID,
+		EnvFile:      envFile,
+		VolumeDir:    filepath.Join(dir, "volume"),
+		ControlDir:   filepath.Join(dir, "control"),
+		SockPath:     sockPath,
+		MemBytes:     summary.MemLimitBytes,
+		CPUs:         summary.CPULimitCores,
+		SessionToken: a.opts.SessionToken,
+		NetworkID:    networkID,
+		NetworkName:  networkName,
+	}
+	if err := m.provisionContainer(ctx, a, in); err != nil {
+		return RestartResult{}, err
+	}
+	if m.store != nil {
+		if _, err := m.store.DB().ExecContext(ctx,
+			`UPDATE sessions SET status='running', image_id=? WHERE id=?`,
+			imageID, sessionID); err != nil {
+			m.logger.Warn("session.restart.db_update_failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		}
+		_, _ = m.store.DB().ExecContext(ctx,
+			`INSERT INTO session_lifecycle (session_id, at, event, detail_json) VALUES (?, ?, 'resumed', ?)`,
+			sessionID, m.now().Format(time.RFC3339Nano), `{"reason":"restart"}`)
+	}
+	a.broadcast(proto.EventSessionResumed, mustJSON(map[string]string{"image_id": imageID}))
+	return RestartResult{SessionID: sessionID, Status: "running", ImageID: imageID}, nil
+}
+
+func (m *manager) currentImageID() string {
+	if m.opts.PinnedImageID != nil {
+		if id := m.opts.PinnedImageID(); id != "" {
+			return id
+		}
+	}
+	return m.opts.ImageID
 }
 
 func (m *manager) Terminate(ctx context.Context, sessionID string) error {

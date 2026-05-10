@@ -120,6 +120,8 @@ type actor struct {
 	terminated             bool
 	pendingSnap            map[string]chan ControlFrame
 	containerID            string
+	networkID              string
+	networkName            string
 	lastError              string
 }
 
@@ -306,9 +308,15 @@ func (a *actor) handleTerminate(t *terminateItem) {
 	a.mu.Unlock()
 
 	if a.opts.Containers != nil && a.summary.ImageID != "" {
+		containerID, networkID, _ := a.snapshotIDs()
 		ctx, cancel := context.WithTimeout(context.Background(), a.opts.ShutdownGrace+5*time.Second)
-		_ = a.opts.Containers.Stop(ctx, a.opts.ID, a.opts.ShutdownGrace)
-		_ = a.opts.Containers.Remove(ctx, a.opts.ID, true)
+		if containerID != "" {
+			_ = a.opts.Containers.Stop(ctx, containerID, a.opts.ShutdownGrace)
+			_ = a.opts.Containers.Remove(ctx, containerID, true)
+		}
+		if networkID != "" {
+			_ = a.opts.Containers.NetworkRemove(ctx, networkID)
+		}
 		cancel()
 	}
 	if a.opts.Control != nil {
@@ -542,6 +550,7 @@ func (a *actor) snapshotDetail() proto.SessionDetail {
 		SessionSummary: a.summary,
 		MCPStatus:      copyStrMap(a.mcpStatus),
 		ContainerID:    a.containerID,
+		NetworkID:      a.networkID,
 		LastError:      a.lastError,
 	}
 	d.QueueDepth = len(a.queue)
@@ -608,10 +617,37 @@ func (a *actor) markError(reason string) {
 	a.broadcast(proto.EventSessionError, body)
 }
 
+func (a *actor) markRestarting(imageID string) {
+	a.mu.Lock()
+	a.summary.Status = "starting"
+	a.summary.ImageID = imageID
+	a.containerID = ""
+	a.lastError = ""
+	if a.control != nil {
+		_ = a.control.Close()
+		a.control = nil
+	}
+	a.mu.Unlock()
+	a.broadcast(proto.EventSessionStarting, mustJSON(map[string]any{"phase": "restart"}))
+}
+
 func (a *actor) setContainerID(id string) {
 	a.mu.Lock()
 	a.containerID = id
 	a.mu.Unlock()
+}
+
+func (a *actor) setNetwork(id, name string) {
+	a.mu.Lock()
+	a.networkID = id
+	a.networkName = name
+	a.mu.Unlock()
+}
+
+func (a *actor) snapshotIDs() (containerID, networkID, networkName string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.containerID, a.networkID, a.networkName
 }
 
 func (a *actor) applyMCPStatus(statuses map[string]string, failures []proto.MCPUnreachableData) {

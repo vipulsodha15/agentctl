@@ -18,6 +18,9 @@ type Manager interface {
 	Remove(ctx context.Context, id string, force bool) error
 	Inspect(ctx context.Context, id string) (Status, error)
 	DockerInfo(ctx context.Context) (Info, error)
+	NetworkCreate(ctx context.Context, sessionID, name string) (NetworkRef, error)
+	NetworkRemove(ctx context.Context, networkID string) error
+	NetworkList(ctx context.Context, labelKey, labelValue string) ([]NetworkRef, error)
 }
 
 type CreateRequest struct {
@@ -49,6 +52,9 @@ type DockerClient interface {
 	Remove(ctx context.Context, id string, force bool) error
 	Inspect(ctx context.Context, id string) (Status, error)
 	Info(ctx context.Context) (Info, error)
+	NetworkCreate(ctx context.Context, req NetworkCreateRequest) (NetworkRef, error)
+	NetworkRemove(ctx context.Context, networkID string) error
+	NetworkList(ctx context.Context, labelKey, labelValue string) ([]NetworkRef, error)
 }
 
 type managerImpl struct {
@@ -100,6 +106,46 @@ func (m *managerImpl) DockerInfo(ctx context.Context) (Info, error) {
 		return Info{OK: false, Error: err.Error()}, nil
 	}
 	return info, nil
+}
+
+func (m *managerImpl) NetworkCreate(ctx context.Context, sessionID, name string) (NetworkRef, error) {
+	if sessionID == "" {
+		return NetworkRef{}, errors.New("network: session id required")
+	}
+	if name == "" {
+		return NetworkRef{}, errors.New("network: name required")
+	}
+	req := NetworkCreateRequest{
+		Name:   name,
+		Driver: "bridge",
+		Labels: map[string]string{"agentctl.session": sessionID},
+		Options: map[string]string{
+			"com.docker.network.bridge.enable_icc": "false",
+		},
+		EnableIPv6: false,
+	}
+	ref, err := m.docker.NetworkCreate(ctx, req)
+	if err != nil {
+		return NetworkRef{}, fmt.Errorf("network create %s: %w", name, err)
+	}
+	if ref.Name == "" {
+		ref.Name = name
+	}
+	if ref.Label == "" {
+		ref.Label = sessionID
+	}
+	return ref, nil
+}
+
+func (m *managerImpl) NetworkRemove(ctx context.Context, networkID string) error {
+	if networkID == "" {
+		return errors.New("network: id required")
+	}
+	return m.docker.NetworkRemove(ctx, networkID)
+}
+
+func (m *managerImpl) NetworkList(ctx context.Context, labelKey, labelValue string) ([]NetworkRef, error) {
+	return m.docker.NetworkList(ctx, labelKey, labelValue)
 }
 
 func validateSpec(spec Spec) error {
