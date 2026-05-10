@@ -12,10 +12,10 @@ import (
 )
 
 type BuildOptions struct {
-	Tag          string
-	ContextPath  string
-	NoCache      bool
-	Output       io.Writer
+	Tag         string
+	ContextPath string
+	NoCache     bool
+	Output      io.Writer
 }
 
 type BuildResult struct {

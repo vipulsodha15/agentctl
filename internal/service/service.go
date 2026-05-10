@@ -39,8 +39,8 @@ type noopManager struct {
 }
 
 func (noopManager) Install(InstallOptions) (Status, error) { return Status{}, ErrUnsupportedPlatform }
-func (noopManager) Start() error                            { return ErrUnsupportedPlatform }
-func (noopManager) Stop() error                             { return ErrUnsupportedPlatform }
-func (noopManager) IsActive() (bool, error)                 { return false, ErrUnsupportedPlatform }
-func (noopManager) UnitPath() string                        { return "" }
-func (n noopManager) Platform() string                      { return n.platform }
+func (noopManager) Start() error                           { return ErrUnsupportedPlatform }
+func (noopManager) Stop() error                            { return ErrUnsupportedPlatform }
+func (noopManager) IsActive() (bool, error)                { return false, ErrUnsupportedPlatform }
+func (noopManager) UnitPath() string                       { return "" }
+func (n noopManager) Platform() string                     { return n.platform }

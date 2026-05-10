@@ -29,11 +29,11 @@ type AgentdSection struct {
 }
 
 type SessionSection struct {
-	IdleTimeout   string  `toml:"idle_timeout"`
-	MaxIdle       string  `toml:"max_idle"`
-	MemLimit      string  `toml:"mem_limit"`
-	CPULimit      float64 `toml:"cpu_limit"`
-	QueuePolicy   string  `toml:"queue_policy"`
+	IdleTimeout string  `toml:"idle_timeout"`
+	MaxIdle     string  `toml:"max_idle"`
+	MemLimit    string  `toml:"mem_limit"`
+	CPULimit    float64 `toml:"cpu_limit"`
+	QueuePolicy string  `toml:"queue_policy"`
 }
 
 type ImageSection struct {
@@ -52,8 +52,8 @@ type PricingSection struct {
 }
 
 type PricingTables struct {
-	Version int                       `toml:"version"`
-	Models  map[string]PricingEntry   `toml:"models"`
+	Version int                     `toml:"version"`
+	Models  map[string]PricingEntry `toml:"models"`
 }
 
 type PricingEntry struct {

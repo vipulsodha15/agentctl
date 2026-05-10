@@ -22,10 +22,10 @@ import (
 type Status string
 
 const (
-	StatusOK    Status = "ok"
-	StatusFail  Status = "fail"
-	StatusWarn  Status = "warn"
-	StatusSkip  Status = "skip"
+	StatusOK   Status = "ok"
+	StatusFail Status = "fail"
+	StatusWarn Status = "warn"
+	StatusSkip Status = "skip"
 )
 
 type Check struct {
@@ -53,13 +53,13 @@ func (r *Result) HasFailures() bool {
 }
 
 type RunOptions struct {
-	Home        string
-	ConfigPath  string
-	SecretsPath string
+	Home         string
+	ConfigPath   string
+	SecretsPath  string
 	WebTokenPath string
-	DBPath      string
-	SocketPath  string
-	WebAddr     string
+	DBPath       string
+	SocketPath   string
+	WebAddr      string
 }
 
 func DefaultPaths(home string) RunOptions {
