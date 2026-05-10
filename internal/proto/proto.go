@@ -39,6 +39,7 @@ const (
 	OpImportSkill         = "ImportSkill"
 	OpExportSkill         = "ExportSkill"
 	OpValidateSkill       = "ValidateSkill"
+	OpGetCost             = "GetCost"
 )
 
 type Frame struct {
@@ -197,6 +198,7 @@ type SessionSummary struct {
 	QueueDepth     int       `json:"queue_depth"`
 	MemLimitBytes  int64     `json:"mem_limit_bytes"`
 	CPULimitCores  float64   `json:"cpu_limit_cores"`
+	CostUSD        *float64  `json:"cost_usd,omitempty"`
 }
 
 type SessionDetail struct {
@@ -464,6 +466,73 @@ type ExportSkillRequest struct {
 type ExportSkillResponse struct {
 	Name    string `json:"name"`
 	Tarball []byte `json:"tarball"`
+}
+
+type GetCostRequest struct {
+	SessionID string `json:"session_id,omitempty"`
+	Since     string `json:"since,omitempty"`
+}
+
+type CostModelTotals struct {
+	Model            string  `json:"model"`
+	Turns            int     `json:"turns"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	HasUnknown       bool    `json:"has_unknown_model,omitempty"`
+}
+
+type CostTurnRow struct {
+	TurnID           string    `json:"turn_id"`
+	At               time.Time `json:"at"`
+	Model            string    `json:"model"`
+	InputTokens      int64     `json:"input_tokens"`
+	OutputTokens     int64     `json:"output_tokens"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
+	CostUSD          *float64  `json:"cost_usd,omitempty"`
+}
+
+type SessionCostTotals struct {
+	SessionID        string            `json:"session_id"`
+	Turns            int               `json:"turns"`
+	InputTokens      int64             `json:"input_tokens"`
+	OutputTokens     int64             `json:"output_tokens"`
+	CacheReadTokens  int64             `json:"cache_read_tokens"`
+	CacheWriteTokens int64             `json:"cache_write_tokens"`
+	CostUSD          float64           `json:"cost_usd"`
+	HasUnknown       bool              `json:"has_unknown_model,omitempty"`
+	ByModel          []CostModelTotals `json:"by_model"`
+	Timeline         []CostTurnRow     `json:"timeline"`
+}
+
+type RangeSessionTotals struct {
+	SessionID    string  `json:"session_id"`
+	Name         string  `json:"name,omitempty"`
+	Status       string  `json:"status,omitempty"`
+	Turns        int     `json:"turns"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+	HasUnknown   bool    `json:"has_unknown_model,omitempty"`
+}
+
+type RangeCostTotals struct {
+	Start        time.Time            `json:"start"`
+	End          time.Time            `json:"end"`
+	Turns        int                  `json:"turns"`
+	InputTokens  int64                `json:"input_tokens"`
+	OutputTokens int64                `json:"output_tokens"`
+	CostUSD      float64              `json:"cost_usd"`
+	HasUnknown   bool                 `json:"has_unknown_model,omitempty"`
+	BySession    []RangeSessionTotals `json:"by_session"`
+}
+
+type GetCostResponse struct {
+	PerSession *SessionCostTotals `json:"per_session,omitempty"`
+	Range      *RangeCostTotals   `json:"range,omitempty"`
 }
 
 type MCPSkippedData struct {
