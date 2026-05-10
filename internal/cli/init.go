@@ -22,7 +22,6 @@ import (
 	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/service"
 	"github.com/agentctl/agentctl/internal/store"
-	"github.com/agentctl/agentctl/internal/ui"
 	"github.com/agentctl/agentctl/internal/update"
 	"github.com/agentctl/agentctl/internal/version"
 )
@@ -417,9 +416,6 @@ func printInitSummary(env *Env, layout paths.Layout, cfg config.Config, foregrou
 	fmt.Fprintf(env.Stdout, "  Config:         %s\n", layout.ConfigFile)
 	fmt.Fprintln(env.Stdout, "")
 	fmt.Fprintln(env.Stdout, "Next: agentctl start --repo <git-url>   (M2)")
-	if !foreground {
-		_ = ui.URLForToken
-	}
 }
 
 func promptSecret(env *Env, prompt string) (string, error) {

@@ -13,7 +13,6 @@ import (
 
 	"github.com/agentctl/agentctl/internal/cliclient"
 	"github.com/agentctl/agentctl/internal/config"
-	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/service"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/version"
@@ -261,5 +260,3 @@ func joinLines(ss []string) string {
 	}
 	return out
 }
-
-var _ = secrets.FilePerm
