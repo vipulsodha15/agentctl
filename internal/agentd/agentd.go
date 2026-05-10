@@ -14,8 +14,10 @@ import (
 	"github.com/agentctl/agentctl/internal/config"
 	"github.com/agentctl/agentctl/internal/fan"
 	"github.com/agentctl/agentctl/internal/log"
+	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/paths"
 	"github.com/agentctl/agentctl/internal/secrets"
+	"github.com/agentctl/agentctl/internal/skills"
 	"github.com/agentctl/agentctl/internal/sm"
 	"github.com/agentctl/agentctl/internal/socksrv"
 	"github.com/agentctl/agentctl/internal/store"
@@ -85,6 +87,12 @@ func Run(ctx context.Context, opts Options) error {
 		ccSrv.AdoptInjector(ccAdapt, ccAdapt)
 	}
 
+	mcpReg := mcp.NewRegistry(mcp.Options{Store: st})
+	skillMgr := skills.NewManager(skills.Options{
+		BuiltinDir: opts.Layout.BuiltinSkills,
+		CustomDir:  opts.Layout.CustomSkills,
+	})
+
 	managerOpts := sm.Options{
 		Store:        st,
 		SessionsDir:  opts.Layout.SessionsDir,
@@ -93,6 +101,7 @@ func Run(ctx context.Context, opts Options) error {
 		DefaultModel: cfg.Model.Default,
 		ImageID:      cfg.Image.PinnedID,
 		SecretsPath:  opts.Layout.SecretsFile,
+		MCPs:         mcpReg,
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt
@@ -110,6 +119,8 @@ func Run(ctx context.Context, opts Options) error {
 		SocketPath: opts.Layout.SocketFile,
 		API:        apiSrv,
 		Manager:    manager,
+		MCPs:       mcpReg,
+		Skills:     skillMgr,
 		LogStream:  logStream,
 		Logger:     sockLog,
 	})

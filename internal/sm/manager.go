@@ -15,6 +15,7 @@ import (
 
 	"github.com/agentctl/agentctl/internal/fan"
 	agentlog "github.com/agentctl/agentctl/internal/log"
+	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/store"
@@ -83,6 +84,7 @@ type Options struct {
 	Hub             fan.Hub
 	Containers      ContainerManager
 	Control         ControlServer
+	MCPs            mcp.Registry
 	Logger          *slog.Logger
 	Now             func() time.Time
 	DefaultModel    string
@@ -157,9 +159,13 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	if model == "" {
 		model = m.opts.DefaultModel
 	}
+	resolvedEntries := m.resolveMCPs(ctx, req.MCPs, req.ExcludeMCPs)
 	mcps := req.MCPs
 	if mcps == nil {
-		mcps = []string{}
+		mcps = make([]string, 0, len(resolvedEntries))
+		for _, e := range resolvedEntries {
+			mcps = append(mcps, e.Name)
+		}
 	}
 	repos := req.Repos
 	if repos == nil {
@@ -265,6 +271,12 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	}
 
 	sockPath := filepath.Join(dir, "control", "agentd.sock")
+	pat := ""
+	if m.opts.SecretsPath != "" {
+		if sec, serr := secrets.Load(m.opts.SecretsPath); serr == nil {
+			pat = sec.GitHubPAT
+		}
+	}
 	a := newActor(actorOptions{
 		ID:              id,
 		Summary:         summary,
@@ -282,11 +294,15 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		SessionToken:    sessionToken,
 		Store:           m.store,
 		Repos:           reposState,
+		ResolvedMCPs:    resolvedEntries,
+		GitHubPAT:       pat,
 	})
 	m.mu.Lock()
 	m.actors[id] = a
 	m.mu.Unlock()
 	a.start()
+
+	go m.probeAndRecord(id, a, resolvedEntries)
 
 	a.broadcast(proto.EventSessionStarting, mustJSON(map[string]any{"phase": "container"}))
 
@@ -677,4 +693,44 @@ func mustJSON(v any) json.RawMessage {
 		return json.RawMessage(`null`)
 	}
 	return b
+}
+
+func (m *manager) resolveMCPs(ctx context.Context, requested, excluded []string) []mcp.Entry {
+	if m.opts.MCPs == nil {
+		return nil
+	}
+	all, err := m.opts.MCPs.List(ctx)
+	if err != nil {
+		m.logger.Warn("mcp.list_failed", slog.String("error", err.Error()))
+		return nil
+	}
+	return mcp.Resolve(all, requested, excluded)
+}
+
+func (m *manager) probeAndRecord(sessionID string, a *actor, entries []mcp.Entry) {
+	if len(entries) == 0 {
+		a.applyMCPStatus(map[string]string{}, nil)
+		return
+	}
+	results := mcp.ProbeAll(context.Background(), entries, mcp.ProbeOptions{})
+	statuses := mcp.ProbeResultsToStatusMap(results)
+	transports := make(map[string]string, len(entries))
+	for _, e := range entries {
+		transports[e.Name] = e.Transport
+	}
+	failures := make([]proto.MCPUnreachableData, 0)
+	for _, r := range results {
+		if !r.OK {
+			failures = append(failures, proto.MCPUnreachableData{
+				Name: r.Name, Transport: transports[r.Name], Error: r.Reason,
+			})
+		}
+	}
+	a.applyMCPStatus(statuses, failures)
+	if m.store != nil {
+		body, _ := json.Marshal(statuses)
+		if _, err := m.store.DB().Exec(`UPDATE sessions SET mcp_status_json = ? WHERE id = ?`, string(body), sessionID); err != nil {
+			m.logger.Warn("mcp.status_write_failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		}
+	}
 }

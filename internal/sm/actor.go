@@ -10,6 +10,7 @@ import (
 
 	"github.com/agentctl/agentctl/internal/fan"
 	agentlog "github.com/agentctl/agentctl/internal/log"
+	"github.com/agentctl/agentctl/internal/mcp"
 	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/ulidgen"
@@ -86,6 +87,8 @@ type actorOptions struct {
 	SessionToken    string
 	Store           *store.Store
 	Repos           []proto.RepoState
+	ResolvedMCPs    []mcp.Entry
+	GitHubPAT       string
 }
 
 type actor struct {
@@ -94,18 +97,20 @@ type actor struct {
 	wg      sync.WaitGroup
 	stopCh  chan struct{}
 
-	mu          sync.RWMutex
-	summary     proto.SessionSummary
-	queue       []queuedMessage
-	inFlight    string
-	currentTurn string
-	mcpStatus   map[string]string
-	repos       []proto.RepoState
-	control     ControlConn
-	terminated  bool
-	pendingSnap map[string]chan ControlFrame
-	containerID string
-	lastError   string
+	mu                 sync.RWMutex
+	summary            proto.SessionSummary
+	queue              []queuedMessage
+	inFlight           string
+	currentTurn        string
+	mcpStatus          map[string]string
+	mcpFailures        []proto.MCPUnreachableData
+	mcpFailuresEmitted bool
+	repos              []proto.RepoState
+	control            ControlConn
+	terminated         bool
+	pendingSnap        map[string]chan ControlFrame
+	containerID        string
+	lastError          string
 }
 
 func newActor(opts actorOptions) *actor {
@@ -294,6 +299,8 @@ func (a *actor) readControl(conn ControlConn) {
 
 func (a *actor) handleControlFrame(fr ControlFrame) {
 	switch fr.Kind {
+	case RuntimeHello:
+		a.sendGreet()
 	case RuntimeReady:
 		a.mu.Lock()
 		a.summary.Status = "running"
@@ -454,6 +461,7 @@ func (a *actor) snapshotEvent(ctx context.Context) (*proto.Event, error) {
 		TS:        a.opts.Now(),
 		Data:      body,
 	}
+	go a.emitDeferredAttachEvents()
 	return &ev, nil
 }
 
@@ -543,4 +551,72 @@ func (a *actor) setContainerID(id string) {
 	a.mu.Lock()
 	a.containerID = id
 	a.mu.Unlock()
+}
+
+func (a *actor) applyMCPStatus(statuses map[string]string, failures []proto.MCPUnreachableData) {
+	a.mu.Lock()
+	a.mcpStatus = copyStrMap(statuses)
+	a.mcpFailures = append(a.mcpFailures[:0], failures...)
+	a.mu.Unlock()
+}
+
+// emitDeferredAttachEvents fires the one-shot mcp.unreachable + mcp.skipped
+// events that accumulated before any client was attached. Called by
+// snapshotEvent right after the snapshot is sent.
+func (a *actor) emitDeferredAttachEvents() {
+	a.mu.Lock()
+	if a.mcpFailuresEmitted {
+		a.mu.Unlock()
+		return
+	}
+	a.mcpFailuresEmitted = true
+	failures := append([]proto.MCPUnreachableData(nil), a.mcpFailures...)
+	a.mu.Unlock()
+	for _, f := range failures {
+		a.broadcast(proto.EventMCPUnreachable, mustJSON(f))
+	}
+}
+
+// notifyMCPSkipped is called by the manager during MCP rendering for the
+// `agentd.greet` payload — entries whose transport/kind are unknown to this
+// build are dropped and reported here.
+func (a *actor) notifyMCPSkipped(skipped []proto.MCPSkippedData) {
+	for _, sk := range skipped {
+		a.broadcast(proto.EventMCPSkipped, mustJSON(sk))
+	}
+}
+
+func (a *actor) renderedMCPs() []mcp.Entry {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return append([]mcp.Entry(nil), a.opts.ResolvedMCPs...)
+}
+
+func (a *actor) sendGreet() {
+	entries := a.renderedMCPs()
+	render := mcp.Render(mcp.RenderInputs{
+		Entries: entries,
+		Secrets: mcp.Secrets{GitHubPAT: a.greetSecrets().GitHubPAT},
+	})
+	skipped := make([]proto.MCPSkippedData, 0, len(render.Skipped))
+	for _, s := range render.Skipped {
+		skipped = append(skipped, proto.MCPSkippedData{Name: s.Name, Transport: s.Transport, Kind: s.Kind, Reason: s.Reason})
+	}
+	a.notifyMCPSkipped(skipped)
+	payload := map[string]any{
+		"session_id": a.opts.ID,
+		"model":      a.summary.Model,
+		"mcps":       render.Configs,
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sendControlLocked(AgentdGreet, mustJSON(payload))
+}
+
+type greetSecretsView struct {
+	GitHubPAT string
+}
+
+func (a *actor) greetSecrets() greetSecretsView {
+	return greetSecretsView{GitHubPAT: a.opts.GitHubPAT}
 }
