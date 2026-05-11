@@ -45,6 +45,7 @@ type CreateRequest struct {
 	SecurityOpt     []string
 	PidsLimit       int64
 	Tmpfs           map[string]string
+	ExtraHosts      []string
 }
 
 type DockerClient interface {
@@ -196,6 +197,7 @@ func BuildCreateRequest(spec Spec) (CreateRequest, error) {
 	if err != nil {
 		return CreateRequest{}, err
 	}
+	env = append(env, spec.Env...)
 	nanoCPUs := int64(spec.CPUs * float64(billion))
 	memSwap := spec.MemorySwap
 	if memSwap == 0 {
@@ -220,6 +222,7 @@ func BuildCreateRequest(spec Spec) (CreateRequest, error) {
 		SecurityOpt:     append([]string(nil), spec.SecurityOpts...),
 		PidsLimit:       spec.PidsLimit,
 		Tmpfs:           copyStringMap(spec.Tmpfs),
+		ExtraHosts:      append([]string(nil), spec.ExtraHosts...),
 	}
 	if req.NetworkMode == "" {
 		req.NetworkMode = "bridge"

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -206,12 +207,14 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	if err := os.Chown(volumeDir, 1000, 1000); err != nil {
 		_ = os.Chmod(volumeDir, 0o777)
 	}
+	// Reserve the per-session control dir for legacy compatibility (unix-sock
+	// tests still write there), but it is no longer bind-mounted into the
+	// container. Production uses a TCP listener on 127.0.0.1; the container
+	// reaches it via host.docker.internal, which sidesteps Docker Desktop's
+	// fs-share refusing to pass unix sockets through bind-mounts.
 	controlDir := filepath.Join(dir, "control")
 	if err := os.MkdirAll(controlDir, 0o700); err != nil {
 		return CreateResult{}, fmt.Errorf("control dir: %w", err)
-	}
-	if err := os.Chown(controlDir, 1000, 1000); err != nil {
-		_ = os.Chmod(controlDir, 0o777)
 	}
 	skillsDir := filepath.Join(dir, "skills")
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
@@ -276,13 +279,15 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	}
 
 	if m.store != nil {
+		// control_sock_path is populated after Listen returns the assigned TCP
+		// address in provisionContainer; insert with empty here.
 		if _, err := m.store.DB().ExecContext(ctx, `INSERT INTO sessions
             (id, name, status, created_at, last_activity_at,
              image_id, volume_path, control_sock_path, skills_snapshot_path, skills_snapshot_hash,
              model, mem_limit_bytes, cpu_limit_cores, mcp_set_json, repos_json, session_token)
              VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, defaultName(req.Name, id), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-			imageID, filepath.Join(dir, "volume"), filepath.Join(dir, "control", "agentd.sock"),
+			imageID, filepath.Join(dir, "volume"), "",
 			skillsResult.Path, skillsResult.Hash,
 			model, mem, cpus, string(mcpJSON), string(reposJSON), sessionToken,
 		); err != nil {
@@ -309,7 +314,6 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		CPULimitCores:  cpus,
 	}
 
-	sockPath := filepath.Join(dir, "control", "agentd.sock")
 	pat := ""
 	if m.opts.SecretsPath != "" {
 		if sec, serr := secrets.Load(m.opts.SecretsPath); serr == nil {
@@ -329,7 +333,6 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		ShutdownGrace:   m.opts.ShutdownGrace,
 		Containers:      m.opts.Containers,
 		Control:         m.opts.Control,
-		ControlSockPath: sockPath,
 		SessionToken:    sessionToken,
 		Store:           m.store,
 		Repos:           reposState,
@@ -353,9 +356,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		ImageID:      imageID,
 		EnvFile:      envFile,
 		VolumeDir:    filepath.Join(dir, "volume"),
-		ControlDir:   filepath.Join(dir, "control"),
 		SkillsDir:    skillsResult.Path,
-		SockPath:     sockPath,
 		MemBytes:     mem,
 		CPUs:         cpus,
 		SessionToken: sessionToken,
@@ -373,9 +374,7 @@ type provisionInputs struct {
 	ImageID      string
 	EnvFile      string
 	VolumeDir    string
-	ControlDir   string
 	SkillsDir    string
-	SockPath     string
 	MemBytes     int64
 	CPUs         float64
 	SessionToken string
@@ -445,19 +444,56 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 	}
 	mounts := []ContainerMount{
 		{Type: MountBind, Source: in.VolumeDir, Target: "/work"},
-		{Type: MountBind, Source: in.ControlDir, Target: "/run/agentctl/control"},
 	}
 	if in.SkillsDir != "" {
 		mounts = append(mounts, ContainerMount{
 			Type: MountBind, Source: in.SkillsDir, Target: "/skills", ReadOnly: true,
 		})
 	}
+
+	// Listen first so we know the host port to hand to the container. TCP on
+	// 127.0.0.1 is reachable from the container via host.docker.internal,
+	// which Docker Desktop resolves natively and Linux Docker resolves via
+	// the host-gateway ExtraHost below.
+	handler := func(conn ControlConn) { a.InjectControlConn(conn) }
+	resolvedAddr, err := m.opts.Control.Listen(in.SessionID, "tcp", "127.0.0.1:0", in.SessionToken, handler)
+	if err != nil {
+		if createdNetwork {
+			removeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = m.opts.Containers.NetworkRemove(removeCtx, netID)
+			cancel()
+		}
+		m.markSessionError(ctx, in.SessionID, "control_listen_failed: "+err.Error())
+		a.markError("control_listen_failed")
+		return fmt.Errorf("control listen: %w", err)
+	}
+	containerAddr, err := containerControlAddr(resolvedAddr)
+	if err != nil {
+		_ = m.opts.Control.Stop(in.SessionID)
+		if createdNetwork {
+			removeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = m.opts.Containers.NetworkRemove(removeCtx, netID)
+			cancel()
+		}
+		m.markSessionError(ctx, in.SessionID, "control_addr_invalid: "+err.Error())
+		a.markError("control_addr_invalid")
+		return fmt.Errorf("control addr: %w", err)
+	}
+	if m.store != nil {
+		if _, err := m.store.DB().ExecContext(ctx,
+			`UPDATE sessions SET control_sock_path=? WHERE id=?`,
+			resolvedAddr, in.SessionID); err != nil {
+			m.logger.Warn("session.control_addr_update_failed", slog.String("session_id", in.SessionID), slog.String("error", err.Error()))
+		}
+	}
+
 	spec := ContainerSpec{
 		SessionID:      in.SessionID,
 		ImageID:        in.ImageID,
 		Name:           "agentctl-" + short,
 		Labels:         labels,
 		EnvFile:        in.EnvFile,
+		Env:            []string{"AGENTCTL_CONTROL_ADDR=" + containerAddr},
 		Mounts:         mounts,
 		MemBytes:       in.MemBytes,
 		CPUs:           in.CPUs,
@@ -467,6 +503,7 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		CapDrop:        []string{"ALL"},
 		SecurityOpts:   []string{"no-new-privileges"},
 		PidsLimit:      512,
+		ExtraHosts:     []string{"host.docker.internal:host-gateway"},
 		Tmpfs: map[string]string{
 			"/home/agent": "rw,size=64m,mode=0700,uid=1000,gid=1000",
 			"/tmp":        "rw,size=128m,mode=1777",
@@ -475,6 +512,7 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 
 	handle, err := m.opts.Containers.Create(ctx, spec)
 	if err != nil {
+		_ = m.opts.Control.Stop(in.SessionID)
 		if createdNetwork {
 			removeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			_ = m.opts.Containers.NetworkRemove(removeCtx, netID)
@@ -483,20 +521,6 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		m.markSessionError(ctx, in.SessionID, "container_create_failed: "+err.Error())
 		a.markError("container_create_failed")
 		return fmt.Errorf("container create: %w", err)
-	}
-
-	handler := func(conn ControlConn) { a.InjectControlConn(conn) }
-	if err := m.opts.Control.Listen(in.SessionID, in.SockPath, in.SessionToken, handler); err != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = m.opts.Containers.Stop(stopCtx, handle.ID, time.Second)
-		_ = m.opts.Containers.Remove(stopCtx, handle.ID, true)
-		if createdNetwork {
-			_ = m.opts.Containers.NetworkRemove(stopCtx, netID)
-		}
-		cancel()
-		m.markSessionError(ctx, in.SessionID, "control_listen_failed: "+err.Error())
-		a.markError("control_listen_failed")
-		return fmt.Errorf("control listen: %w", err)
 	}
 
 	if err := m.opts.Containers.Start(ctx, handle.ID); err != nil {
@@ -540,6 +564,27 @@ func suffix(id string) string {
 		return id
 	}
 	return id[len(id)-8:]
+}
+
+// containerControlAddr swaps the host-side bind address (127.0.0.1 / ::1 /
+// 0.0.0.0) for host.docker.internal, which is the name the container uses to
+// reach the host. Unix-socket paths (legacy / tests) are passed through.
+func containerControlAddr(addr string) (string, error) {
+	if addr == "" {
+		return "", errors.New("empty control address")
+	}
+	if strings.HasPrefix(addr, "/") {
+		return addr, nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("parse control addr %q: %w", addr, err)
+	}
+	switch host {
+	case "127.0.0.1", "::1", "0.0.0.0", "", "::":
+		host = "host.docker.internal"
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 type secretsEnvInputs struct {
@@ -698,7 +743,6 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 
 	dir := filepath.Join(m.opts.SessionsDir, sessionID)
 	envFile := filepath.Join(dir, "secrets.env")
-	sockPath := filepath.Join(dir, "control", "agentd.sock")
 	summary := a.snapshotSummary()
 	in := provisionInputs{
 		SessionID:    sessionID,
@@ -706,8 +750,6 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 		ImageID:      imageID,
 		EnvFile:      envFile,
 		VolumeDir:    filepath.Join(dir, "volume"),
-		ControlDir:   filepath.Join(dir, "control"),
-		SockPath:     sockPath,
 		MemBytes:     summary.MemLimitBytes,
 		CPUs:         summary.CPULimitCores,
 		SessionToken: a.opts.SessionToken,

@@ -46,6 +46,7 @@ func (a *cmAdapter) Create(ctx context.Context, spec sm.ContainerSpec) (sm.Conta
 		Name:           spec.Name,
 		Labels:         spec.Labels,
 		EnvFile:        spec.EnvFile,
+		Env:            spec.Env,
 		Mounts:         mounts,
 		MemBytes:       spec.MemBytes,
 		CPUs:           spec.CPUs,
@@ -56,6 +57,7 @@ func (a *cmAdapter) Create(ctx context.Context, spec sm.ContainerSpec) (sm.Conta
 		PidsLimit:      spec.PidsLimit,
 		Tmpfs:          spec.Tmpfs,
 		MemorySwap:     spec.MemorySwap,
+		ExtraHosts:     spec.ExtraHosts,
 	})
 	if err != nil {
 		return sm.ContainerHandle{}, err
@@ -108,19 +110,20 @@ func newCcAdapter(inner cc.Server) *ccAdapter {
 	}
 }
 
-func (a *ccAdapter) Listen(sessionID, sockPath, sessionToken string, handler sm.ControlHandler) error {
+func (a *ccAdapter) Listen(sessionID, network, addr, sessionToken string, handler sm.ControlHandler) (string, error) {
 	a.mu.Lock()
 	a.sessions[sessionID] = &ccSession{sessionToken: sessionToken, handler: handler}
 	a.tokens[sessionToken] = sessionID
 	a.mu.Unlock()
-	if err := a.inner.Listen(sessionID, sockPath); err != nil {
+	resolved, err := a.inner.Listen(sessionID, network, addr)
+	if err != nil {
 		a.mu.Lock()
 		delete(a.sessions, sessionID)
 		delete(a.tokens, sessionToken)
 		a.mu.Unlock()
-		return err
+		return "", err
 	}
-	return nil
+	return resolved, nil
 }
 
 func (a *ccAdapter) Stop(sessionID string) error {

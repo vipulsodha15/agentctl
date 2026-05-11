@@ -10,6 +10,7 @@ type Spec struct {
 	Name           string
 	Labels         map[string]string
 	EnvFile        string
+	Env            []string
 	Mounts         []Mount
 	MemBytes       int64
 	CPUs           float64
@@ -20,6 +21,7 @@ type Spec struct {
 	PidsLimit      int64
 	Tmpfs          map[string]string
 	MemorySwap     int64
+	ExtraHosts     []string
 }
 
 type MountType string

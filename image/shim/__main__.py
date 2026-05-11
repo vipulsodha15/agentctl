@@ -2,10 +2,11 @@
 
 Pipeline (container-and-image.md §2.6):
 
-1.  Read ``secrets.env`` (already exposed via ``--env-file``) and the
-    per-session ``session.json`` written into the control dir at create time.
-2.  Connect to ``/run/agentctl/control/agentd.sock`` and send ``runtime.hello``
-    carrying ``session_token``.
+1.  Read ``secrets.env`` (already exposed via ``--env-file``); pick up the
+    session_token from ``AGENTCTL_SESSION_TOKEN`` and the host control
+    endpoint from ``AGENTCTL_CONTROL_ADDR`` (``host.docker.internal:<port>``).
+2.  TCP-dial that address and send ``runtime.hello`` carrying
+    ``session_token``.
 3.  Receive ``agentd.greet``; clone any ``repos[]`` (record SHAs to
     ``/work/.agentctl/repo-bases.json``); send ``runtime.ready``.
 4.  Translate SDK events into ``runtime.event`` frames; service inbound
@@ -35,13 +36,19 @@ SHIM_VERSION = "1.0.0-m2"
 SDK_VERSION = "0.1.80"
 HEARTBEAT_SECONDS = 5.0
 SHUTDOWN_GRACE_SECONDS = 30.0
-CONTROL_SOCK_DEFAULT = "/run/agentctl/control/agentd.sock"
+# AGENTCTL_CONTROL_ADDR (TCP, ``host:port``) is what production agentd sets so
+# the container reaches the host control channel through host.docker.internal
+# instead of a bind-mounted unix socket — Docker Desktop's filesystem share
+# does not pass unix sockets through reliably. AGENTCTL_CONTROL_SOCK is kept
+# for unit tests that drive the shim against a local unix socket.
+CONTROL_ADDR_ENV = "AGENTCTL_CONTROL_ADDR"
+CONTROL_SOCK_ENV = "AGENTCTL_CONTROL_SOCK"
 SESSION_META_DEFAULT = "/run/agentctl/control/session.json"
 
 
 class Shim:
-    def __init__(self, *, control_sock: str, session_meta: str) -> None:
-        self._control_sock = control_sock
+    def __init__(self, *, control_addr: str, session_meta: str) -> None:
+        self._control_addr = control_addr
         self._session_meta = session_meta
         self._client: Optional[control.ControlClient] = None
         self._driver: Optional[rt.RuntimeDriver] = None
@@ -64,7 +71,7 @@ class Shim:
             sys.stderr.write("shim: AGENTCTL_SESSION_TOKEN missing\n")
             return 64
 
-        self._client = control.ControlClient.connect(self._control_sock)
+        self._client = control.ControlClient.connect_address(self._control_addr)
         self._client.send(
             control.KIND_HELLO,
             control.hello_payload(session_token, shim_version=SHIM_VERSION, sdk_version=SDK_VERSION),
@@ -357,9 +364,14 @@ def _render_mcp_servers(mcps):
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    sock = os.environ.get("AGENTCTL_CONTROL_SOCK", CONTROL_SOCK_DEFAULT)
+    addr = os.environ.get(CONTROL_ADDR_ENV) or os.environ.get(CONTROL_SOCK_ENV, "")
+    if not addr:
+        sys.stderr.write(
+            f"shim: neither {CONTROL_ADDR_ENV} nor {CONTROL_SOCK_ENV} is set\n"
+        )
+        return 64
     meta = os.environ.get("AGENTCTL_SESSION_META", SESSION_META_DEFAULT)
-    return Shim(control_sock=sock, session_meta=meta).run()
+    return Shim(control_addr=addr, session_meta=meta).run()
 
 
 if __name__ == "__main__":

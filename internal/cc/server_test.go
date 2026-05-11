@@ -97,7 +97,7 @@ func startServer(t *testing.T) (Server, *captureAdopter, string, string) {
 	srv := New(Options{})
 	adopter := &captureAdopter{}
 	srv.AdoptInjector(stubVerifier{token: "good-token", id: "sess-1"}, adopter)
-	if err := srv.Listen("sess-1", sock); err != nil {
+	if _, err := srv.Listen("sess-1", "unix", sock); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	return srv, adopter, sock, dir

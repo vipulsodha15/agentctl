@@ -1,11 +1,15 @@
-"""NDJSON framing on the control socket bind-mounted from the host.
+"""NDJSON framing on the control channel.
 
 Wire spec lives in architecture/api.md §4. Both directions speak
 ``{ "v":1, "seq":N, "kind":"...", "ts":"...", "data":{} }``; max line length
 is 1 MiB. Backpressure (drop-on-overflow of ``runtime.event`` of kind
 ``assistant.delta``) is enforced by ``agentd`` on its read side; the shim
-only frames and ships. Socket access is gated by filesystem permissions
-on the bind-mounted ``/run/agentctl/control/`` directory.
+only frames and ships.
+
+Transport is a TCP connection to ``host.docker.internal:<port>`` (see
+``connect_address``). Access is gated by the ``session_token`` carried in
+``runtime.hello``; the listener is bound to ``127.0.0.1`` on the host so
+only the local Docker daemon's containers can reach it.
 """
 
 from __future__ import annotations
@@ -66,6 +70,29 @@ class ControlClient:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect(path)
+        s.settimeout(None)
+        return cls(s)
+
+    @classmethod
+    def connect_address(cls, address: str, timeout: float = 5.0) -> "ControlClient":
+        """Connect to *address*.
+
+        Accepts a unix socket path (anything starting with ``/``, kept for
+        tests) or a TCP ``host:port``. Production agentd hands the shim a
+        ``host.docker.internal:<port>`` address via ``AGENTCTL_CONTROL_ADDR``
+        because Docker Desktop's host-fs share refuses to pass a bind-mounted
+        unix socket through to the container.
+        """
+        if not address:
+            raise OSError("control: empty address")
+        if address.startswith("/"):
+            return cls.connect(address, timeout=timeout)
+        host, sep, port = address.rpartition(":")
+        if not sep or not host or not port:
+            raise OSError(f"control: malformed address {address!r}")
+        host = host.strip("[]")
+        port_num = int(port)
+        s = socket.create_connection((host, port_num), timeout=timeout)
         s.settimeout(None)
         return cls(s)
 

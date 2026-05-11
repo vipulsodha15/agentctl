@@ -116,13 +116,17 @@ func (a *recoveryAdapter) NetworkRemove(ctx context.Context, id string) error {
 	return a.cli.NetworkRemove(ctx, id)
 }
 
-func (a *recoveryAdapter) Adopt(_ context.Context, _, sockPath string, timeout time.Duration) error {
-	if sockPath == "" {
-		return errors.New("recovery adopt: empty sock path")
+func (a *recoveryAdapter) Adopt(_ context.Context, _, addr string, timeout time.Duration) error {
+	if addr == "" {
+		return errors.New("recovery adopt: empty control address")
 	}
-	conn, err := net.DialTimeout("unix", sockPath, timeout)
+	network := "tcp"
+	if strings.HasPrefix(addr, "/") {
+		network = "unix"
+	}
+	conn, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", sockPath, err)
+		return fmt.Errorf("dial %s %s: %w", network, addr, err)
 	}
 	_ = conn.Close()
 	return nil
