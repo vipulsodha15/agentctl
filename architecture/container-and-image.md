@@ -214,7 +214,6 @@ The runtime can resolve external DNS names via the host's resolver
 | Source | Target | Mode | Purpose |
 |---|---|---|---|
 | `~/.local/share/agentctl/sessions/<id>/volume/` | `/work` | `rw` | The session volume. Owned by uid 1000 to match the `agent` user. |
-| `~/.local/share/agentctl/sessions/<id>/control/` | `/run/agentctl/control/` | `rw` | Control socket dir. Only path that touches host loopback equivalent. |
 | `~/.local/share/agentctl/sessions/<id>/skills/` | `/skills/` | `ro` | Per-session skills snapshot composed at start by `agentd` from the install's built-in skills + the developer's custom skills. Frozen for the session's lifetime; live reload is v2. |
 
 No other host paths. In particular: not `/var/run/docker.sock`, not
@@ -222,6 +221,13 @@ No other host paths. In particular: not `/var/run/docker.sock`, not
 host-side `~/.local/share/agentctl/builtin-skills/` and `custom-skills/`
 directories are **not** mounted directly — only the per-session
 snapshot is.
+
+The control channel used to be a bind-mounted Unix socket under
+`/run/agentctl/control/`; it is now a TCP connection to
+`host.docker.internal:<port>` (api.md §4.1). Docker Desktop's host-fs
+share does not pass Unix sockets through to the container, so the
+bind-mount approach failed on macOS / Windows with
+`OSError: [Errno 95] Operation not supported`.
 
 #### Skills snapshot composition
 
@@ -279,14 +285,16 @@ without inlining it in command output (R3 acceptance criterion).
 The image's `ENTRYPOINT` is `/usr/local/bin/agentctl-entrypoint`. It runs
 as `agent` (uid 1000) and:
 
-1. Reads `secrets.env` already exposed via `--env-file`, plus a
-   `session.json` written into the control dir at create time
-   (mode `0640`).
+1. Reads `secrets.env` already exposed via `--env-file`. (The
+   pre-v1 design also wrote a `session.json` into a bind-mounted
+   control dir; that dir is gone with the move to TCP control —
+   everything the shim needs is in env vars.)
 2. For each repo in `repos`: `git clone <url> /work/<basename>`; record
    `git rev-parse HEAD` and current branch. Errors are captured but do
    not abort start; the shim emits `runtime.error{fatal:false}` and
    leaves the repo placeholder absent.
-3. Connects to `/run/agentctl/control/agentd.sock` and sends
+3. Reads `AGENTCTL_CONTROL_ADDR` (set by agentd, of the form
+   `host.docker.internal:<port>`), TCP-dials it, and sends
    `runtime.hello` with `session_token` (verified by agentd).
 4. Receives `agentd.greet` with the resolved MCP set (each entry carries
    `url`, `transport` (`http`/`sse`/…), `kind`, and any auth-derived

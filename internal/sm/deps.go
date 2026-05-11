@@ -36,6 +36,7 @@ type ContainerSpec struct {
 	Name           string
 	Labels         map[string]string
 	EnvFile        string
+	Env            []string
 	Mounts         []ContainerMount
 	MemBytes       int64
 	CPUs           float64
@@ -46,6 +47,7 @@ type ContainerSpec struct {
 	PidsLimit      int64
 	Tmpfs          map[string]string
 	MemorySwap     int64
+	ExtraHosts     []string
 }
 
 type SkillsComposer interface {
@@ -74,8 +76,12 @@ type ContainerHandle struct {
 // ControlServer is the subset of internal/cc.Server that sm uses. The session
 // manager registers a callback that the control server calls when a connection
 // arrives for a given session id.
+//
+// network is "tcp" or "unix". For TCP, addr is "host:port" (with port=0 for
+// an ephemeral assignment); Listen returns the resolved address so the caller
+// can advertise it to the container. For unix, addr is the socket path.
 type ControlServer interface {
-	Listen(sessionID, sockPath, sessionToken string, handler ControlHandler) error
+	Listen(sessionID, network, addr, sessionToken string, handler ControlHandler) (string, error)
 	Stop(sessionID string) error
 }
 

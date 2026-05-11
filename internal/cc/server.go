@@ -28,10 +28,19 @@ type Adopter interface {
 	Adopt(ctx context.Context, sessionID string, conn Conn, events <-chan Frame)
 }
 
-// Server listens on per-session control sockets, authenticates incoming shims,
-// and hands successful connections off to the session-actor layer.
+// Server listens on per-session control endpoints, authenticates incoming
+// shims, and hands successful connections off to the session-actor layer.
+//
+// `network` is "tcp" or "unix" (Go's net package conventions). For TCP, the
+// container reaches agentd via host.docker.internal so a bind-mounted unix
+// socket (which Docker Desktop / WSL2 fs-shares don't pass through reliably)
+// isn't needed. For unix, the legacy behaviour is preserved for tests.
+//
+// Listen returns the resolved listening address (e.g. "127.0.0.1:54321"). The
+// caller is responsible for storing this and telling the container how to
+// reach it.
 type Server interface {
-	Listen(sessionID string, sockPath string) error
+	Listen(sessionID, network, addr string) (string, error)
 	Stop(sessionID string) error
 	StopAll() error
 	AdoptInjector(verifier TokenVerifier, adopter Adopter)
@@ -55,7 +64,8 @@ type server struct {
 
 type listenerState struct {
 	sessionID string
-	sockPath  string
+	network   string
+	addr      string
 	listener  net.Listener
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -86,45 +96,60 @@ func (s *server) AdoptInjector(verifier TokenVerifier, adopter Adopter) {
 	s.adopter = adopter
 }
 
-func (s *server) Listen(sessionID, sockPath string) error {
+func (s *server) Listen(sessionID, network, addr string) (string, error) {
+	if network == "" {
+		network = "tcp"
+	}
 	s.mu.Lock()
 	if _, exists := s.listeners[sessionID]; exists {
 		s.mu.Unlock()
-		return fmt.Errorf("cc: already listening for session %s", sessionID)
+		return "", fmt.Errorf("cc: already listening for session %s", sessionID)
 	}
 	s.mu.Unlock()
 
-	dir := filepath.Dir(sockPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("cc: mkdir %s: %w", dir, err)
+	switch network {
+	case "unix":
+		dir := filepath.Dir(addr)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("cc: mkdir %s: %w", dir, err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("cc.dir_chmod_failed", slog.String("path", dir), slog.String("error", err.Error()))
+		}
+		if err := os.Remove(addr); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("cc: remove existing sock %s: %w", addr, err)
+		}
+	case "tcp", "tcp4", "tcp6":
+		// nothing to prepare on the filesystem.
+	default:
+		return "", fmt.Errorf("cc: unsupported network %q", network)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
-		s.logger.Warn("cc.dir_chmod_failed", slog.String("path", dir), slog.String("error", err.Error()))
-	}
-	if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("cc: remove existing sock %s: %w", sockPath, err)
-	}
-	ln, err := net.Listen("unix", sockPath)
+
+	ln, err := net.Listen(network, addr)
 	if err != nil {
-		return fmt.Errorf("cc: listen %s: %w", sockPath, err)
+		return "", fmt.Errorf("cc: listen %s %s: %w", network, addr, err)
 	}
-	if err := os.Chmod(sockPath, 0o660); err != nil {
-		_ = ln.Close()
-		return fmt.Errorf("cc: chmod sock: %w", err)
+
+	if network == "unix" {
+		if err := os.Chmod(addr, 0o660); err != nil {
+			_ = ln.Close()
+			return "", fmt.Errorf("cc: chmod sock: %w", err)
+		}
+		// Legacy unix path: container runs as uid 1000; chown so it can
+		// connect, falling back to a relaxed mode if Chown can't grant it
+		// (rootless docker with userns remap, non-root agentd).
+		if err := os.Chown(addr, 1000, 1000); err != nil {
+			_ = os.Chmod(addr, 0o666)
+		}
 	}
-	// Container runs as uid 1000 and connects through this bind-mounted
-	// socket; agentd typically runs as a higher uid (or root in test rigs).
-	// Chown to 1000:1000 so the agent user can connect. Best-effort: failure
-	// is non-fatal; if uid mapping makes Chown impossible (rootless docker
-	// with userns remap) we relax mode to 0666 instead.
-	if err := os.Chown(sockPath, 1000, 1000); err != nil {
-		_ = os.Chmod(sockPath, 0o666)
-	}
+
+	resolved := ln.Addr().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &listenerState{
 		sessionID: sessionID,
-		sockPath:  sockPath,
+		network:   network,
+		addr:      resolved,
 		listener:  ln,
 		cancel:    cancel,
 	}
@@ -134,7 +159,7 @@ func (s *server) Listen(sessionID, sockPath string) error {
 
 	st.wg.Add(1)
 	go s.acceptLoop(ctx, st)
-	return nil
+	return resolved, nil
 }
 
 func (s *server) Stop(sessionID string) error {
@@ -175,7 +200,9 @@ func (s *server) tearDownListener(st *listenerState) error {
 	}
 	st.currentMu.Unlock()
 	st.wg.Wait()
-	_ = os.Remove(st.sockPath)
+	if st.network == "unix" {
+		_ = os.Remove(st.addr)
+	}
 	return nil
 }
 

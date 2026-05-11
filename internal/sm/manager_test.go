@@ -451,7 +451,6 @@ func TestSkillsSnapshotFrozenAtCreate(t *testing.T) {
 func mountsWithSkills(sessionDir string) []ContainerMount {
 	return []ContainerMount{
 		{Type: MountBind, Source: filepath.Join(sessionDir, "volume"), Target: "/work"},
-		{Type: MountBind, Source: filepath.Join(sessionDir, "control"), Target: "/run/agentctl/control"},
 		{Type: MountBind, Source: filepath.Join(sessionDir, "skills"), Target: "/skills", ReadOnly: true},
 	}
 }
@@ -545,7 +544,7 @@ func newFakeControl() *fakeControl {
 	return &fakeControl{handlers: map[string]ControlHandler{}, conns: map[string]*fakeConn{}}
 }
 
-func (f *fakeControl) Listen(sessionID, _, _ string, h ControlHandler) error {
+func (f *fakeControl) Listen(sessionID, _, addr, _ string, h ControlHandler) (string, error) {
 	f.mu.Lock()
 	f.handlers[sessionID] = h
 	f.listened = true
@@ -556,7 +555,10 @@ func (f *fakeControl) Listen(sessionID, _, _ string, h ControlHandler) error {
 		bound.listenSeen = true
 		bound.mu.Unlock()
 	}
-	return nil
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	return addr, nil
 }
 
 func (f *fakeControl) Stop(sessionID string) error {

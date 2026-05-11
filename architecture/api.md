@@ -411,21 +411,28 @@ the error codes in §2.3), 5xx unavailable/internal.
 - The SPA bundles its own client; it is recompiled with the daemon. There
   is no third-party SPA talking to multiple agentd versions.
 
-## 4. Container ↔ agentd: control socket
+## 4. Container ↔ agentd: control channel
 
 ### 4.1 Transport
 
-- A Unix domain socket on the host at
-  `~/.local/share/agentctl/sessions/<id>/control/agentd.sock`, owned by
-  the running user, mode `0660`.
-- The `control/` directory is bind-mounted into the container at
-  `/run/agentctl/control/` **read-write** (the runtime needs to connect to
-  the socket). No other host paths are mounted.
-- Inside the container, the runtime shim connects to
-  `/run/agentctl/control/agentd.sock`.
-- This is the **only** host-loopback-equivalent the container ever has.
-  R7's "no host loopback" rule applies to network ports; this is a
-  bind-mounted socket with explicit fs perms.
+- A TCP listener on the host, bound to `127.0.0.1:<ephemeral>` per
+  session. The assigned `host:port` is persisted on the session row
+  (`sessions.control_sock_path`, name retained for schema compat) and
+  passed to the container as `AGENTCTL_CONTROL_ADDR` at create time.
+- The container reaches the host via Docker's `host.docker.internal`
+  alias. On macOS / Windows Docker Desktop this is built in; on Linux
+  Docker the container is created with
+  `--add-host=host.docker.internal:host-gateway`.
+- The earlier design (a bind-mounted Unix domain socket under
+  `~/.local/share/agentctl/sessions/<id>/control/`) was abandoned
+  because Docker Desktop's host-fs share (gRPC-FUSE / VirtIOFS) and
+  WSL2-on-Windows shares do not pass Unix socket inode operations
+  through to the container, surfacing as
+  `OSError: [Errno 95] Operation not supported` on connect.
+- The container's own bridge network keeps ICC off (container-and-image.md
+  §2.2); the `host.docker.internal` route is the only host-equivalent
+  the container has, and the channel is authenticated by `session_token`
+  (§4.4).
 
 ### 4.2 Frame schema
 
@@ -470,15 +477,17 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 
 ### 4.4 Authentication / authorization
 
-- The control sock is in a directory mode `0700` owned by the user; only
-  processes running as that user (and the bind-mounted container running
-  as the same uid via Docker) can open it. We rely on this fs-perms
-  boundary; no in-band auth.
+- The TCP listener is bound to `127.0.0.1` so only processes on the
+  host can reach it. The container reaches it through Docker's
+  `host.docker.internal`, which the engine routes to the host loopback.
+  Other containers and remote hosts cannot reach it.
 - The shim's `runtime.hello` includes a `session_token` (a 256-bit random
-  written to `session.json` at create time). agentd verifies it before
-  sending `agentd.greet`. This binds "the process that connected to this
-  socket" to "the session that owns this socket dir" even if a malicious
-  process inside the container tries to be the shim.
+  passed to the container as `AGENTCTL_SESSION_TOKEN`). agentd verifies
+  it before sending `agentd.greet`; tokens are bound 1:1 to the session
+  that owns the listener, so a process inside another session's
+  container cannot impersonate this session. This is the **only**
+  in-band auth — the unix-fs-perms boundary the prior design relied on
+  is gone.
 - agentd's accept loop binds **one** active control connection per
   session. A second connect attempt while one is alive returns
   `agentd.error{code: "already_connected"}` and is closed.

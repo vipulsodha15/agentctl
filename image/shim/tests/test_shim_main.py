@@ -105,7 +105,7 @@ class ShimMainTests(unittest.TestCase):
         listener = listen_unix(self.sock_path)
         self.addCleanup(listener.close)
 
-        shim = shim_main.Shim(control_sock=self.sock_path, session_meta=self.meta_path)
+        shim = shim_main.Shim(control_addr=self.sock_path, session_meta=self.meta_path)
         rc_holder: dict[str, Any] = {}
 
         def shim_runner():

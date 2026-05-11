@@ -90,7 +90,6 @@ type actorOptions struct {
 	ShutdownGrace   time.Duration
 	Containers      ContainerManager
 	Control         ControlServer
-	ControlSockPath string
 	SessionToken    string
 	Store           *store.Store
 	Repos           []proto.RepoState

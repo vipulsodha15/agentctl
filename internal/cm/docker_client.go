@@ -54,6 +54,7 @@ func (d *dockerSDK) Create(ctx context.Context, req CreateRequest) (string, erro
 		CapDrop:        req.CapDrop,
 		SecurityOpt:    req.SecurityOpt,
 		Tmpfs:          req.Tmpfs,
+		ExtraHosts:     req.ExtraHosts,
 		Resources: container.Resources{
 			Memory:     req.MemoryBytes,
 			MemorySwap: req.MemorySwapBytes,
