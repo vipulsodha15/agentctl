@@ -60,6 +60,74 @@ class FrameTests(unittest.TestCase):
         self.assertTrue(control.stderr_filter("real diagnostic"))
 
 
+class ConnectAddressTests(unittest.TestCase):
+    """connect_address is the production path: TCP host:port (the bind-mount
+    unix-socket path failed with EOPNOTSUPP on Docker Desktop). Verify it
+    actually opens a TCP connection and exchanges a frame.
+    """
+
+    def test_tcp_address_connects_and_round_trips(self):
+        ln = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        ln.bind(("127.0.0.1", 0))
+        ln.listen(1)
+        try:
+            host, port = ln.getsockname()
+            address = f"{host}:{port}"
+
+            accepted: dict = {}
+
+            def accept_thread():
+                conn, _ = ln.accept()
+                accepted["conn"] = conn
+
+            t = threading.Thread(target=accept_thread, daemon=True)
+            t.start()
+
+            client = control.ControlClient.connect_address(address, timeout=2.0)
+            t.join(timeout=2.0)
+            self.assertIn("conn", accepted)
+            server = control.ControlClient(accepted["conn"])
+
+            client.send(control.KIND_HELLO, {"session_token": "good"})
+            frame = server.recv()
+            self.assertIsNotNone(frame)
+            self.assertEqual(frame["kind"], control.KIND_HELLO)
+            self.assertEqual(frame["data"]["session_token"], "good")
+
+            client.close()
+            server.close()
+        finally:
+            ln.close()
+
+    def test_unix_path_still_supported(self):
+        import tempfile
+
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "sock")
+        ln = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        ln.bind(path)
+        ln.listen(1)
+        try:
+            accepted: dict = {}
+
+            def accept_thread():
+                conn, _ = ln.accept()
+                accepted["conn"] = conn
+
+            t = threading.Thread(target=accept_thread, daemon=True)
+            t.start()
+
+            client = control.ControlClient.connect_address(path, timeout=2.0)
+            t.join(timeout=2.0)
+            self.assertIn("conn", accepted)
+            client.close()
+            accepted["conn"].close()
+        finally:
+            ln.close()
+            os.unlink(path)
+            os.rmdir(tmp)
+
+
 class HandshakeTests(unittest.TestCase):
     def test_hello_then_greet_sequence(self):
         server, client = make_socket_pair()

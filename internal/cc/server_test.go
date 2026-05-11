@@ -231,3 +231,54 @@ func TestStopClosesActiveConnection(t *testing.T) {
 		t.Errorf("expected close after Stop")
 	}
 }
+
+// TestListenTCPAndHandshake exercises the production path: agentd listens on
+// TCP 127.0.0.1:0, the shim dials the resolved host:port and completes the
+// runtime.hello / agentd adoption handshake. This is the wire the fix for
+// "EOPNOTSUPP on bind-mounted unix socket inside Docker Desktop" runs on.
+func TestListenTCPAndHandshake(t *testing.T) {
+	srv := New(Options{})
+	defer func() { _ = srv.StopAll() }()
+	adopter := &captureAdopter{}
+	srv.AdoptInjector(stubVerifier{token: "good-token", id: "sess-tcp"}, adopter)
+
+	addr, err := srv.Listen("sess-tcp", "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	if addr == "" {
+		t.Fatalf("Listen returned empty addr")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split host:port %q: %v", addr, err)
+	}
+	if host != "127.0.0.1" || port == "0" || port == "" {
+		t.Fatalf("unexpected resolved addr: host=%q port=%q (raw=%q)", host, port, addr)
+	}
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial tcp %s: %v", addr, err)
+	}
+	defer func() { _ = c.Close() }()
+
+	body, _ := json.Marshal(map[string]any{
+		"session_token": "good-token",
+		"shim_version":  "1.0.0",
+		"sdk_version":   "0.1.80",
+	})
+	sendFrame(t, c, Frame{Kind: KindHello, Data: body})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := adopter.framesFor(0); len(got) >= 1 {
+			if got[0].Kind != KindHello {
+				t.Errorf("first frame to actor over TCP: got %s want %s", got[0].Kind, KindHello)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("actor never received hello over TCP")
+}
