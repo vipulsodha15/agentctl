@@ -821,7 +821,9 @@ input[type="checkbox"] {
   border-bottom: 1px solid var(--c-border);
   background: var(--c-surface);
 }
-.tabs button {
+/* Direct-child selector only — must not cascade into nested controls
+ * like the .filter-bar that lives inside the same .tabs container. */
+.tabs > button {
   border: none;
   background: transparent;
   border-radius: 0;
@@ -836,11 +838,11 @@ input[type="checkbox"] {
     color var(--transition),
     border-color var(--transition);
 }
-.tabs button:hover:not(:disabled) {
+.tabs > button:hover:not(:disabled) {
   background: transparent;
   color: var(--c-fg);
 }
-.tabs button.active {
+.tabs > button.active {
   color: var(--c-fg);
   border-bottom-color: var(--c-fg);
   background: transparent;
