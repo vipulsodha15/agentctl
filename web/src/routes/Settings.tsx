@@ -12,11 +12,33 @@ export function Settings() {
   return (
     <section className="page">
       <div className="page-header">
-        <h2>Settings</h2>
+        <div style={{ flex: 1 }}>
+          <h2>Settings</h2>
+          <div className="muted" style={{ marginTop: 4 }}>
+            MCP servers and custom skills available to your sessions
+          </div>
+        </div>
       </div>
-      <p className="warning">
-        Changes apply only to future sessions; running sessions are unaffected.
-      </p>
+      <div className="warning" style={{ marginBottom: 24 }}>
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ flex: "0 0 auto" }}
+          aria-hidden
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 8v5M12 16.5h.01" />
+        </svg>
+        <span>
+          Changes apply only to future sessions; running sessions are unaffected.
+        </span>
+      </div>
       <McpSection />
       <SkillsSection />
     </section>
