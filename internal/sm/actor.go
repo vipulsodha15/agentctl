@@ -1,11 +1,17 @@
 package sm
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,6 +134,11 @@ type actor struct {
 	networkName            string
 	lastError              string
 	nextMsgSeq             int64
+	// sdkSessionID is the claude-agent-sdk session uuid the shim resumed (or
+	// created on first run) for this actor. Persisted to sessions.sdk_session_id
+	// so a fresh shim after a daemon restart can resume the same SDK session
+	// and keep extending the same JSONL file instead of orphaning it.
+	sdkSessionID string
 }
 
 func newActor(opts actorOptions) *actor {
@@ -153,6 +164,16 @@ func newActor(opts actorOptions) *actor {
 		).Scan(&maxSeq)
 		if maxSeq.Valid {
 			a.nextMsgSeq = maxSeq.Int64 + 1
+		}
+		// Pick up sdk_session_id so the next shim greet can include it and
+		// the SDK resumes the same conversation instead of orphaning the
+		// existing JSONL.
+		var sid sql.NullString
+		_ = opts.Store.DB().QueryRow(
+			`SELECT sdk_session_id FROM sessions WHERE id = ?`, opts.ID,
+		).Scan(&sid)
+		if sid.Valid {
+			a.sdkSessionID = sid.String
 		}
 	}
 	return a
@@ -451,6 +472,8 @@ func (a *actor) handleControlFrame(fr ControlFrame) {
 		a.broadcast(proto.EventSessionError, fr.Data)
 	case RuntimeSnapshot:
 		a.routeSnapshotReply(fr)
+	case RuntimeSessionID:
+		a.handleRuntimeSessionID(fr)
 	case RuntimeMessageRecord:
 		a.handleMessageRecord(fr)
 	case RuntimeDiffChunk:
@@ -630,6 +653,132 @@ func (a *actor) loadConversationFromStore() (json.RawMessage, error) {
 	return buf, nil
 }
 
+// loadConversationFromDisk reads the SDK's JSONL history directly from the
+// bind-mounted session volume. It exists for two cases the DB mirror does
+// not cover:
+//
+//   - Sessions that pre-date the messages-table mirror (no rows; on-disk
+//     JSONL is the only surviving record).
+//   - Rehydrated sessions whose shim hasn't been started yet (no live shim
+//     to ask via runtime.snapshot, but the JSONL is still on disk).
+//
+// Returns (nil, nil) when nothing is readable so the caller can keep its
+// default empty conversation.
+func (a *actor) loadConversationFromDisk() (json.RawMessage, error) {
+	if a.opts.SessionDir == "" {
+		return nil, nil
+	}
+	// /work is bind-mounted at <SessionDir>/volume; the SDK encodes cwd
+	// "/work" as "-work" under .claude/projects/.
+	projectsDir := filepath.Join(a.opts.SessionDir, "volume", ".claude", "projects", "-work")
+	a.mu.RLock()
+	preferred := a.sdkSessionID
+	a.mu.RUnlock()
+	path := ""
+	if preferred != "" {
+		candidate := filepath.Join(projectsDir, preferred+".jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			path = candidate
+		}
+	}
+	if path == "" {
+		// No (or stale) sdk_session_id — fall back to scanning the
+		// projects dir. With SDK resume working this directory holds at
+		// most one file, but pre-resume sessions can leave several.
+		// Picking the most recently modified one is the best heuristic
+		// for "the live conversation."
+		entries, err := os.ReadDir(projectsDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		type cand struct {
+			path string
+			mod  time.Time
+		}
+		var found []cand
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil {
+				continue
+			}
+			found = append(found, cand{path: filepath.Join(projectsDir, e.Name()), mod: info.ModTime()})
+		}
+		if len(found) == 0 {
+			return nil, nil
+		}
+		sort.Slice(found, func(i, j int) bool { return found[i].mod.After(found[j].mod) })
+		path = found[0].path
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	buf := []byte{'['}
+	first := true
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		// Drop malformed lines so a corrupt record can't poison the array.
+		if !json.Valid(line) {
+			continue
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, line...)
+		first = false
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if first {
+		return nil, nil
+	}
+	buf = append(buf, ']')
+	return buf, nil
+}
+
+// handleRuntimeSessionID persists the SDK-assigned conversation id the shim
+// captures the first time it sees a message. Keeping this in the DB is what
+// lets a fresh shim (after a daemon restart or container swap) resume the
+// same SDK session instead of starting a new one and orphaning the
+// existing JSONL.
+func (a *actor) handleRuntimeSessionID(fr ControlFrame) {
+	var payload struct {
+		SDKSessionID string `json:"sdk_session_id"`
+	}
+	if err := json.Unmarshal(fr.Data, &payload); err != nil || payload.SDKSessionID == "" {
+		a.opts.Logger.Warn("control.malformed_session_id", slog.String("session_id", a.opts.ID))
+		return
+	}
+	a.mu.Lock()
+	changed := a.sdkSessionID != payload.SDKSessionID
+	a.sdkSessionID = payload.SDKSessionID
+	a.mu.Unlock()
+	if !changed || a.opts.Store == nil {
+		return
+	}
+	if _, err := a.opts.Store.DB().Exec(
+		`UPDATE sessions SET sdk_session_id = ? WHERE id = ?`,
+		payload.SDKSessionID, a.opts.ID,
+	); err != nil {
+		a.opts.Logger.Warn("control.session_id_persist_failed",
+			slog.String("session_id", a.opts.ID),
+			slog.String("error", err.Error()))
+	}
+}
+
 // handleMessageRecord persists a single SDK JSONL record the shim shipped
 // after a turn finished. The dedup index on (session_id, record_uuid) makes
 // re-sends after a shim reconnect a no-op, so we don't have to track which
@@ -682,6 +831,19 @@ func (a *actor) snapshotEvent(ctx context.Context) (*proto.Event, error) {
 		a.mu.Lock()
 		conn := a.control
 		a.mu.Unlock()
+		if conn == nil {
+			// No live shim to ask. Fall back to the SDK JSONL the
+			// previous container left on the bind-mounted volume so
+			// rehydrated and pre-mirror sessions still show their
+			// history on attach.
+			if records, derr := a.loadConversationFromDisk(); derr == nil && records != nil {
+				conv = records
+			} else if derr != nil {
+				a.opts.Logger.Warn("snapshot.disk_fallback_failed",
+					slog.String("session_id", a.opts.ID),
+					slog.String("error", derr.Error()))
+			}
+		}
 		if conn != nil {
 			reqID := ulidgen.New()
 			ch := make(chan ControlFrame, 1)
@@ -922,13 +1084,19 @@ func (a *actor) sendGreet() {
 		skipped = append(skipped, proto.MCPSkippedData{Name: s.Name, Transport: s.Transport, Kind: s.Kind, Reason: s.Reason})
 	}
 	a.notifyMCPSkipped(skipped)
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	payload := map[string]any{
 		"session_id": a.opts.ID,
 		"model":      a.summary.Model,
 		"mcps":       render.Configs,
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// Pass the previously captured SDK session id so the shim resumes the
+	// same conversation (extending its existing JSONL) instead of forking
+	// a fresh one after a daemon restart or container swap.
+	if a.sdkSessionID != "" {
+		payload["sdk_session_id"] = a.sdkSessionID
+	}
 	a.sendControlLocked(AgentdGreet, mustJSON(payload))
 }
 

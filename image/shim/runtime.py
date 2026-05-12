@@ -228,11 +228,15 @@ class RuntimeDriver:
         cancelled = False
         try:
             async for message in client.receive_response():
-                if self._sdk_session_id is None:
-                    sid = _extract_session_id(message)
-                    if sid:
-                        self._sdk_session_id = sid
-                        self._emit_session_id(sid)
+                sid = _extract_session_id(message)
+                if sid and sid != self._sdk_session_id:
+                    # First time we learn the id, or the SDK refused to
+                    # resume and assigned a new one — either way, switch
+                    # the JSONL cursor to the new file before flushing so
+                    # we don't end up tailing the wrong path.
+                    self._sdk_session_id = sid
+                    self._jsonl_lines_emitted = 0
+                    self._emit_session_id(sid)
                 for kind, data in translate_message(message, turn_id=turn_id):
                     self._emit(kind, data)
         except asyncio.CancelledError:
