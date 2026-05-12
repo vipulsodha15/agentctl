@@ -16,6 +16,7 @@ import (
 
 	"github.com/agentctl/agentctl/internal/fan"
 	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/store"
 )
 
@@ -905,6 +906,87 @@ func TestRestartRefusesWhenImageNotPinned(t *testing.T) {
 	if _, err := mgr.Restart(ctx, r.SessionID); err == nil {
 		t.Fatal("expected error when no pinned image")
 	}
+}
+
+// TestRestartPreservesOAuthCredsBindMount reproduces the bug where restarting
+// (or sending to a stopped session, which auto-restarts) dropped the
+// /home/agent/.claude bind-mount, making the bundled claude CLI look "logged
+// out" inside the container. Create populated ClaudeCredsHost correctly;
+// Restart did not. Both paths must mount the credentials dir.
+func TestRestartPreservesOAuthCredsBindMount(t *testing.T) {
+	base := t.TempDir()
+	secretsPath := filepath.Join(base, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		AnthropicAuthMode: secrets.AuthModeOAuth,
+	}); err != nil {
+		t.Fatalf("save secrets: %v", err)
+	}
+	credsDir := filepath.Join(base, "claude")
+	if err := os.MkdirAll(credsDir, 0o700); err != nil {
+		t.Fatalf("mkdir creds: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credsDir, ".credentials.json"), []byte(`{"oauth":"tok"}`), 0o600); err != nil {
+		t.Fatalf("write creds: %v", err)
+	}
+
+	fc := newFakeControl()
+	cm := newFakeContainerManager()
+	fc.bound = cm
+	pinned := "sha256:abc"
+	mgr := New(Options{
+		SessionsDir:     filepath.Join(base, "sessions"),
+		Hub:             fan.NewHub(),
+		Containers:      cm,
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		ImageID:         pinned,
+		PinnedImageID:   func() string { return pinned },
+		SecretsPath:     secretsPath,
+		ClaudeCredsDir:  credsDir,
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	res, err := mgr.Create(ctx, CreateRequest{Name: "oauth"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	cm.mu.Lock()
+	specsAfterCreate := append([]ContainerSpec(nil), cm.specs...)
+	cm.mu.Unlock()
+	if len(specsAfterCreate) == 0 {
+		t.Fatal("create did not record a container spec")
+	}
+	if !hasClaudeCredsMount(specsAfterCreate[len(specsAfterCreate)-1].Mounts, credsDir) {
+		t.Fatalf("Create: missing /home/agent/.claude bind-mount from %q, got %+v",
+			credsDir, specsAfterCreate[len(specsAfterCreate)-1].Mounts)
+	}
+
+	if _, err := mgr.Restart(ctx, res.SessionID); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+
+	cm.mu.Lock()
+	specsAfterRestart := append([]ContainerSpec(nil), cm.specs...)
+	cm.mu.Unlock()
+	if len(specsAfterRestart) <= len(specsAfterCreate) {
+		t.Fatalf("Restart did not record a new container spec: before=%d after=%d",
+			len(specsAfterCreate), len(specsAfterRestart))
+	}
+	restartSpec := specsAfterRestart[len(specsAfterRestart)-1]
+	if !hasClaudeCredsMount(restartSpec.Mounts, credsDir) {
+		t.Fatalf("Restart: missing /home/agent/.claude bind-mount from %q, got %+v",
+			credsDir, restartSpec.Mounts)
+	}
+}
+
+func hasClaudeCredsMount(mounts []ContainerMount, source string) bool {
+	for _, m := range mounts {
+		if m.Type == MountBind && m.Source == source && m.Target == "/home/agent/.claude" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestSendOnStoppedSessionAutoRestarts reproduces the bug where messages sent
