@@ -77,8 +77,8 @@ type SkippedImport struct {
 }
 
 type AddResult struct {
-	Name string
-	Path string
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type Manager interface {

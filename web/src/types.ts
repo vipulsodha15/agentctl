@@ -106,11 +106,27 @@ export interface SkillEntry {
   name: string;
   description: string;
   source?: "builtin" | "custom";
+  path?: string;
   overrides?: boolean;
 }
 
 export interface ListSkillsResponse {
   skills: SkillEntry[];
+}
+
+// Inline-editor payload for POST /v1/skills. Provide `skill_md` (full
+// SKILL.md content with YAML front matter), or just `description` and the
+// daemon will synthesize a minimal SKILL.md.
+export interface AddSkillRequest {
+  name: string;
+  description?: string;
+  skill_md?: string;
+  force?: boolean;
+}
+
+export interface AddSkillResponse {
+  name: string;
+  path: string;
 }
 
 // Per-session MCP status reported in snapshots / events.

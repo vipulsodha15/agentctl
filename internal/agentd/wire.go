@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -397,8 +401,63 @@ func (a *skillsAdapter) ListForSession(ctx context.Context, _ string) ([]byte, e
 	return a.ListInstalled(ctx)
 }
 
-func (a *skillsAdapter) Add(_ context.Context, _ string, _ io.Reader) ([]byte, error) {
-	return nil, errors.New("skills add via HTTP upload lands in M4")
+// Add accepts an inline skill payload as JSON:
+//
+//	{"name": "my-skill", "description": "...", "skill_md": "---\n...\n---\n...", "force": false}
+//
+// Either skill_md or description must be set; if only description is given,
+// a minimal SKILL.md is synthesized. The payload is written to a temp dir
+// and handed to the underlying Manager.Add so size/name/manifest validation
+// matches the CLI path.
+func (a *skillsAdapter) Add(_ context.Context, contentType string, body io.Reader) ([]byte, error) {
+	if !strings.HasPrefix(contentType, "application/json") {
+		return nil, fmt.Errorf("unsupported content type %q; want application/json", contentType)
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, 5<<20))
+	if err != nil {
+		return nil, err
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		SkillMD     string `json:"skill_md"`
+		Force       bool   `json:"force"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, errors.New("name is required")
+	}
+	skillMD := req.SkillMD
+	if strings.TrimSpace(skillMD) == "" {
+		desc := strings.TrimSpace(req.Description)
+		if desc == "" {
+			return nil, errors.New("skill_md or description is required")
+		}
+		skillMD = fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n# %s\n\nTODO\n", name, desc, name)
+	}
+
+	tmp, err := os.MkdirTemp("", "skill-inline-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+
+	skillDir := filepath.Join(tmp, name)
+	if err := os.Mkdir(skillDir, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, skills.SkillMD), []byte(skillMD), 0o644); err != nil {
+		return nil, err
+	}
+
+	res, err := a.inner.Add(skills.AddSource{Path: skillDir}, skills.ImportOptions{Force: req.Force})
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(res)
 }
 
 func (a *skillsAdapter) Import(_ context.Context, body []byte) ([]byte, error) {
