@@ -30,10 +30,11 @@ from shim import control, __main__ as shim_main  # noqa: E402
 
 
 class FakeDriver:
-    def __init__(self, cfg, emit_event, emit_session_id):
+    def __init__(self, cfg, emit_event, emit_session_id, emit_message_record=None):
         self.cfg = cfg
         self.emit_event = emit_event
         self.emit_session_id = emit_session_id
+        self.emit_message_record = emit_message_record
         self.turns: list[tuple[str, str]] = []
         self.interrupts = 0
         self.started = False
@@ -88,8 +89,10 @@ class ShimMainTests(unittest.TestCase):
         original_driver = shim_main.rt.RuntimeDriver
         original_watcher = shim_main.RepoWatcher
 
-        def driver_factory(cfg, emit_event, emit_session_id):
-            self.captured_driver = FakeDriver(cfg, emit_event, emit_session_id)
+        def driver_factory(cfg, emit_event, emit_session_id, emit_message_record=None):
+            self.captured_driver = FakeDriver(
+                cfg, emit_event, emit_session_id, emit_message_record=emit_message_record,
+            )
             return self.captured_driver
 
         shim_main.rt.RuntimeDriver = driver_factory  # type: ignore[assignment]

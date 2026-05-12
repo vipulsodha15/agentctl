@@ -109,6 +109,7 @@ const (
 	RuntimeSessionID        = "runtime.session_id"
 	RuntimeHeartbeat        = "runtime.heartbeat"
 	RuntimeSnapshot         = "runtime.snapshot"
+	RuntimeMessageRecord    = "runtime.message_record"
 	RuntimeRepoChanged      = "repo.changed"
 	RuntimeDiffChunk        = "runtime.diff_chunk"
 	RuntimeDiffEnd          = "runtime.diff_end"

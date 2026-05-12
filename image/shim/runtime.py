@@ -38,6 +38,7 @@ EVENT_TURN_CANCELLED = "turn.cancelled"
 
 
 EmitEvent = Callable[[str, dict], None]
+EmitRecord = Callable[[dict], None]
 
 
 @dataclass
@@ -57,10 +58,20 @@ class RuntimeDriver:
     posted to it via ``asyncio.run_coroutine_threadsafe``.
     """
 
-    def __init__(self, cfg: RuntimeConfig, emit_event: EmitEvent, emit_session_id: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        cfg: RuntimeConfig,
+        emit_event: EmitEvent,
+        emit_session_id: Callable[[str], None],
+        emit_message_record: Optional[EmitRecord] = None,
+    ) -> None:
         self._cfg = cfg
         self._emit = emit_event
         self._emit_session_id = emit_session_id
+        # When set, the driver tails the SDK's JSONL after each turn and
+        # ships each new record so agentd can mirror conversation history
+        # into its own store. Optional so unit tests don't have to wire it.
+        self._emit_record = emit_message_record
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_ready = threading.Event()
         self._loop_thread: Optional[threading.Thread] = None
@@ -69,6 +80,7 @@ class RuntimeDriver:
         self._sdk_session_id: Optional[str] = cfg.resume
         self._in_flight_lock = threading.Lock()
         self._in_flight: Optional[asyncio.Task] = None
+        self._jsonl_lines_emitted = 0
 
     def start(self) -> None:
         self._loop_thread = threading.Thread(target=self._run_loop, name="shim-runtime", daemon=True)
@@ -226,13 +238,56 @@ class RuntimeDriver:
         except asyncio.CancelledError:
             cancelled = True
         except Exception as exc:  # noqa: BLE001
+            self._flush_message_records()
             self._emit(EVENT_TURN_END, {"turn_id": turn_id, "ok": False, "error": str(exc)})
             return
 
+        self._flush_message_records()
         if cancelled:
             self._emit(EVENT_TURN_CANCELLED, {"turn_id": turn_id})
         else:
             self._emit(EVENT_TURN_END, {"turn_id": turn_id, "ok": True})
+
+    def _flush_message_records(self) -> None:
+        """Tail the SDK's JSONL and ship newly-written records to agentd.
+
+        agentd mirrors these into SQLite so it can serve conversation
+        history without the shim being alive. We read line-by-line and
+        track the count we've already emitted; the daemon dedups by the
+        record's ``uuid`` field, so re-sending after a shim restart is
+        safe — those rows are already there.
+        """
+
+        if self._emit_record is None or not self._sdk_session_id:
+            return
+        path = os.path.join(
+            self._cfg.cwd, ".claude", "projects", "-work", f"{self._sdk_session_id}.jsonl"
+        )
+        if not os.path.exists(path):
+            return
+        emitted = self._jsonl_lines_emitted
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i < emitted:
+                        continue
+                    emitted = i + 1
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = __import__("json").loads(line)
+                    except ValueError:
+                        continue
+                    try:
+                        self._emit_record(record)
+                    except Exception:  # noqa: BLE001
+                        # Don't let a single bad frame stall the rest;
+                        # the daemon will re-receive on the next flush.
+                        pass
+        except OSError:
+            return
+        self._jsonl_lines_emitted = emitted
 
 
 def _extract_session_id(message: Any) -> Optional[str]:

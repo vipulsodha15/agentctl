@@ -16,6 +16,7 @@ import (
 
 	"github.com/agentctl/agentctl/internal/fan"
 	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/store"
 )
 
 func newTestManager(t *testing.T) (Manager, *fakeControl) {
@@ -538,6 +539,78 @@ func (f *fakeContainerManager) NetworkRemove(_ context.Context, id string) error
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "net_remove:"+id)
 	return nil
+}
+
+func TestMessageRecordsMirroredToStore(t *testing.T) {
+	// Two-attach round trip: after the shim ships a couple of
+	// runtime.message_record frames, both the current attach and a fresh
+	// attach (which goes through snapshotEvent again) should see those
+	// records in the conversation. The fresh attach is what mirrors the
+	// real bug — page reload / reconnect of an existing session.
+	dir := t.TempDir()
+	st, err := store.Open(store.Options{Path: filepath.Join(dir, "agentctl.db")})
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	fc := newFakeControl()
+	mgr := New(Options{
+		Store:           st,
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "mirror"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeMessageRecord, TS: time.Now().UTC(),
+		Data: json.RawMessage(`{"record":{"uuid":"u1","type":"user","message":{"role":"user","content":"hi"}}}`)}
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeMessageRecord, TS: time.Now().UTC(),
+		Data: json.RawMessage(`{"record":{"uuid":"u2","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}}`)}
+	// A duplicate of u1 — dedup index must collapse this to a no-op so
+	// the snapshot doesn't double-render the prompt.
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeMessageRecord, TS: time.Now().UTC(),
+		Data: json.RawMessage(`{"record":{"uuid":"u1","type":"user","message":{"role":"user","content":"hi"}}}`)}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		_ = st.DB().QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, r.SessionID).Scan(&n)
+		if n == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stream, err := mgr.Attach(ctx, r.SessionID)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	defer stream.Close()
+	ev := mustEvent(t, stream, proto.EventSessionSnapshot)
+	var snap proto.SessionSnapshotData
+	if err := json.Unmarshal(ev.Data, &snap); err != nil {
+		t.Fatalf("snapshot unmarshal: %v", err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(snap.Conversation, &records); err != nil {
+		t.Fatalf("conversation unmarshal: %v (raw=%s)", err, string(snap.Conversation))
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records after dedup, got %d: %v", len(records), records)
+	}
+	if records[0]["uuid"] != "u1" || records[1]["uuid"] != "u2" {
+		t.Fatalf("records out of order: %v", records)
+	}
 }
 
 func TestTerminate(t *testing.T) {
