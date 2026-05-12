@@ -76,30 +76,29 @@ export function SessionList() {
       {rows && rows.length === 0 && (
         <div
           className="panel"
-          style={{ textAlign: "center", padding: "64px 24px" }}
+          style={{ textAlign: "center", padding: "72px 24px" }}
         >
           <div
             aria-hidden
             style={{
-              width: 48,
-              height: 48,
-              margin: "0 auto 16px",
-              borderRadius: 14,
+              width: 44,
+              height: 44,
+              margin: "0 auto 18px",
+              borderRadius: 12,
               display: "grid",
               placeItems: "center",
-              background:
-                "linear-gradient(135deg, var(--c-accent-soft) 0%, var(--c-accent-soft-2) 100%)",
-              color: "var(--c-accent-fg)",
-              boxShadow: "inset 0 0 0 1px rgba(91, 95, 239, 0.12)",
+              background: "var(--c-surface-2)",
+              color: "var(--c-fg-mute)",
+              border: "1px solid var(--c-border)",
             }}
           >
             <svg
-              width="22"
-              height="22"
+              width="20"
+              height="20"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
-              strokeWidth="1.8"
+              strokeWidth="1.5"
               strokeLinecap="round"
               strokeLinejoin="round"
             >
@@ -108,15 +107,19 @@ export function SessionList() {
               <circle cx="19.5" cy="12" r="1" fill="currentColor" stroke="none" />
             </svg>
           </div>
-          <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 15 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 15, letterSpacing: "-0.015em" }}>
             No sessions yet
           </div>
-          <div className="empty" style={{ padding: 0, maxWidth: 360, margin: "0 auto" }}>
-            Start one from the CLI with <code style={{ fontFamily: "var(--font-mono)", background: "var(--c-surface-2)", padding: "1px 6px", borderRadius: 4, border: "1px solid var(--c-border)", fontSize: 12 }}>agentctl new</code> or click below.
+          <div className="empty" style={{ padding: 0, maxWidth: 380, margin: "0 auto", lineHeight: 1.55 }}>
+            Start one from the CLI with{" "}
+            <code style={{ fontFamily: "var(--font-mono)", background: "var(--c-surface-2)", padding: "1.5px 6px", borderRadius: 4, border: "1px solid var(--c-border)", fontSize: 12, color: "var(--c-fg)" }}>
+              agentctl new
+            </code>{" "}
+            or click below.
           </div>
-          <div style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 20 }}>
             <Link to="/new">
-              <button className="accent">
+              <button className="primary">
                 <PlusIcon /> Create your first session
               </button>
             </Link>

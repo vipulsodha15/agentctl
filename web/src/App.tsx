@@ -32,20 +32,17 @@ export function App() {
         <div
           aria-hidden
           style={{
-            width: 42,
-            height: 42,
-            borderRadius: 12,
-            background:
-              "linear-gradient(135deg, #5b5fef 0%, #7c3aed 50%, #0a0e1a 100%)",
-            color: "#fff",
+            width: 36,
+            height: 36,
+            borderRadius: 10,
+            background: "var(--c-fg)",
+            color: "var(--c-canvas)",
             display: "grid",
             placeItems: "center",
-            fontWeight: 700,
+            fontWeight: 600,
             letterSpacing: "-0.04em",
-            fontSize: 18,
-            marginBottom: 18,
-            boxShadow:
-              "inset 0 1px 0 rgba(255,255,255,0.2), 0 6px 16px -4px rgba(91,95,239,0.35)",
+            fontSize: 17,
+            marginBottom: 20,
           }}
         >
           a
