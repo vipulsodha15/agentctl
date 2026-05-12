@@ -114,6 +114,14 @@ func runAuthLogin(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "auth login: mkdir %s: %v\n", credsDir, err)
 		return ExitEnvironment
 	}
+	// The auth container runs as uid 1000 (node user) and writes
+	// .credentials.json into the bind-mounted /creds. If the host user is
+	// uid 1000, chown is a no-op; otherwise we fall back to 0777 so the
+	// container user can still write. Mirrors sm/manager.go's volumeDir
+	// handling for the same cross-platform reason.
+	if err := os.Chown(credsDir, 1000, 1000); err != nil {
+		_ = os.Chmod(credsDir, 0o777)
+	}
 
 	if !*skipBuild {
 		if err := ensureAuthImage(ctx, env, *noCache); err != nil {
