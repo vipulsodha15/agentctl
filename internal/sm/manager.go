@@ -281,24 +281,10 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		return CreateResult{}, err
 	}
 
-	authMode := secrets.AuthModeAPIKey
-	claudeCredsBindSource := ""
-	if m.opts.SecretsPath != "" {
-		if sec, err := secrets.Load(m.opts.SecretsPath); err == nil {
-			authMode = sec.ResolvedAuthMode()
-		}
-	}
-	if authMode == secrets.AuthModeOAuth {
-		if m.opts.ClaudeCredsDir == "" {
-			_ = logger.Close()
-			return CreateResult{}, fmt.Errorf("auth mode=oauth but ClaudeCredsDir not configured; check agentd setup")
-		}
-		credFile := filepath.Join(m.opts.ClaudeCredsDir, ".credentials.json")
-		if info, err := os.Stat(credFile); err != nil || info.Size() == 0 {
-			_ = logger.Close()
-			return CreateResult{}, fmt.Errorf("auth mode=oauth but %s missing or empty; run `agentctl auth login`", credFile)
-		}
-		claudeCredsBindSource = m.opts.ClaudeCredsDir
+	claudeCredsBindSource, err := m.resolveClaudeCredsBindSource()
+	if err != nil {
+		_ = logger.Close()
+		return CreateResult{}, err
 	}
 
 	if m.store != nil {
@@ -390,6 +376,33 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	}
 
 	return CreateResult{SessionID: id, Status: "starting", Summary: summary}, nil
+}
+
+// resolveClaudeCredsBindSource returns the host directory to bind-mount as
+// the container's ~/.claude when the user has switched to OAuth auth. Empty
+// string means no bind-mount (API-key mode, or no secrets file yet). An
+// error means OAuth is configured but the credentials file is missing —
+// surfacing the cause early so the container does not silently start without
+// auth, which is what made restarts look like "claude logs out".
+func (m *manager) resolveClaudeCredsBindSource() (string, error) {
+	if m.opts.SecretsPath == "" {
+		return "", nil
+	}
+	sec, err := secrets.Load(m.opts.SecretsPath)
+	if err != nil {
+		return "", nil
+	}
+	if sec.ResolvedAuthMode() != secrets.AuthModeOAuth {
+		return "", nil
+	}
+	if m.opts.ClaudeCredsDir == "" {
+		return "", fmt.Errorf("auth mode=oauth but ClaudeCredsDir not configured; check agentd setup")
+	}
+	credFile := filepath.Join(m.opts.ClaudeCredsDir, ".credentials.json")
+	if info, err := os.Stat(credFile); err != nil || info.Size() == 0 {
+		return "", fmt.Errorf("auth mode=oauth but %s missing or empty; run `agentctl auth login`", credFile)
+	}
+	return m.opts.ClaudeCredsDir, nil
 }
 
 type provisionInputs struct {
@@ -972,17 +985,22 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 	dir := filepath.Join(m.opts.SessionsDir, sessionID)
 	envFile := filepath.Join(dir, "secrets.env")
 	summary := a.snapshotSummary()
+	claudeCredsBindSource, err := m.resolveClaudeCredsBindSource()
+	if err != nil {
+		return RestartResult{}, err
+	}
 	in := provisionInputs{
-		SessionID:    sessionID,
-		Name:         summary.Name,
-		ImageID:      imageID,
-		EnvFile:      envFile,
-		VolumeDir:    filepath.Join(dir, "volume"),
-		MemBytes:     summary.MemLimitBytes,
-		CPUs:         summary.CPULimitCores,
-		SessionToken: a.opts.SessionToken,
-		NetworkID:    networkID,
-		NetworkName:  networkName,
+		SessionID:       sessionID,
+		Name:            summary.Name,
+		ImageID:         imageID,
+		EnvFile:         envFile,
+		VolumeDir:       filepath.Join(dir, "volume"),
+		ClaudeCredsHost: claudeCredsBindSource,
+		MemBytes:        summary.MemLimitBytes,
+		CPUs:            summary.CPULimitCores,
+		SessionToken:    a.opts.SessionToken,
+		NetworkID:       networkID,
+		NetworkName:     networkName,
 	}
 	if err := m.provisionContainer(ctx, a, in); err != nil {
 		return RestartResult{}, err
