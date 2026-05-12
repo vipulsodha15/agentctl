@@ -603,7 +603,12 @@ func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
 	}
 	if secretsPath != "" {
 		if sec, err := secrets.Load(secretsPath); err == nil {
-			if sec.AnthropicAPIKey != "" {
+			if sec.AnthropicAuthToken != "" {
+				pairs["ANTHROPIC_AUTH_TOKEN"] = sec.AnthropicAuthToken
+				if sec.AnthropicBaseURL != "" {
+					pairs["ANTHROPIC_BASE_URL"] = sec.AnthropicBaseURL
+				}
+			} else if sec.AnthropicAPIKey != "" {
 				pairs["ANTHROPIC_API_KEY"] = sec.AnthropicAPIKey
 			}
 			if sec.GitHubPAT != "" {
