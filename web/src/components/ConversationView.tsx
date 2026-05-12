@@ -233,7 +233,7 @@ function TypingIndicator() {
       aria-live="polite"
       aria-label="Assistant is working"
     >
-      <div className="avatar">AI</div>
+      <div className="avatar" aria-hidden>a</div>
       <div className="body">
         <div className="role">Assistant</div>
         <div className="typing-pill">

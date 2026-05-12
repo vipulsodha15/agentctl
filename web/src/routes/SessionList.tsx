@@ -51,23 +51,78 @@ export function SessionList() {
   return (
     <section className="page">
       <div className="page-header">
-        <h2>Sessions</h2>
+        <div style={{ flex: 1 }}>
+          <h2>Sessions</h2>
+          <div className="muted" style={{ marginTop: 4 }}>
+            {rows === null
+              ? "Loading…"
+              : rows.length === 0
+                ? "No active sessions"
+                : `${rows.length} ${rows.length === 1 ? "session" : "sessions"}`}
+          </div>
+        </div>
         <Link to="/new">
-          <button className="primary">+ New session</button>
+          <button className="primary">
+            <PlusIcon /> New session
+          </button>
         </Link>
       </div>
       {error && <div className="error-text">{error}</div>}
-      {rows === null && !error && <div className="empty">Loading…</div>}
+      {rows === null && !error && (
+        <div className="panel" style={{ textAlign: "center", padding: "48px 24px" }}>
+          <div className="empty" style={{ padding: 0 }}>Loading sessions…</div>
+        </div>
+      )}
       {rows && rows.length === 0 && (
         <div
           className="panel"
-          style={{ textAlign: "center", padding: "48px 24px" }}
+          style={{ textAlign: "center", padding: "72px 24px" }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>
+          <div
+            aria-hidden
+            style={{
+              width: 44,
+              height: 44,
+              margin: "0 auto 18px",
+              borderRadius: 12,
+              display: "grid",
+              placeItems: "center",
+              background: "var(--c-surface-2)",
+              color: "var(--c-fg-mute)",
+              border: "1px solid var(--c-border)",
+            }}
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M4 6.5h13M4 12h13M4 17.5h9" />
+              <circle cx="19.5" cy="6.5" r="1" fill="currentColor" stroke="none" />
+              <circle cx="19.5" cy="12" r="1" fill="currentColor" stroke="none" />
+            </svg>
+          </div>
+          <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 15, letterSpacing: "-0.015em" }}>
             No sessions yet
           </div>
-          <div className="empty" style={{ padding: 0 }}>
-            Start one from the CLI or click <strong>+ New session</strong>.
+          <div className="empty" style={{ padding: 0, maxWidth: 380, margin: "0 auto", lineHeight: 1.55 }}>
+            Start one from the CLI with{" "}
+            <code style={{ fontFamily: "var(--font-mono)", background: "var(--c-surface-2)", padding: "1.5px 6px", borderRadius: 4, border: "1px solid var(--c-border)", fontSize: 12, color: "var(--c-fg)" }}>
+              agentctl new
+            </code>{" "}
+            or click below.
+          </div>
+          <div style={{ marginTop: 20 }}>
+            <Link to="/new">
+              <button className="primary">
+                <PlusIcon /> Create your first session
+              </button>
+            </Link>
           </div>
         </div>
       )}
@@ -91,21 +146,40 @@ export function SessionList() {
                 onClick={() => navigate(`/sessions/${row.session_id}`)}
               >
                 <td className="id-cell">{shortId(row.session_id)}</td>
-                <td>{row.name || "—"}</td>
+                <td style={{ fontWeight: 500 }}>{row.name || "—"}</td>
                 <td>
                   <span className={`status-badge ${row.status}`}>
                     {row.status}
                   </span>
                 </td>
-                <td>{formatRelative(row.last_activity_at)}</td>
+                <td style={{ color: "var(--c-fg-mute)" }}>{formatRelative(row.last_activity_at)}</td>
                 <td className="id-cell">{shortImage(row.image_id)}</td>
-                <td>{formatCost(row.cost_usd)}</td>
+                <td style={{ fontFamily: "var(--font-mono)", fontSize: 12.5, fontFeatureSettings: "'tnum'" }}>{formatCost(row.cost_usd)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
     </section>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ marginRight: 5, marginLeft: -2 }}
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
   );
 }
 

@@ -4,7 +4,7 @@ import { Markdown } from "./Markdown";
 export function AssistantMessage({ message }: { message: ConversationMessage }) {
   return (
     <div className="msg assistant" id={`msg-${message.id}`}>
-      <div className="avatar">AI</div>
+      <div className="avatar" aria-hidden>a</div>
       <div className="body">
         <div className="role">
           Assistant

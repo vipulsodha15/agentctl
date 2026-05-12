@@ -906,3 +906,90 @@ func TestRestartRefusesWhenImageNotPinned(t *testing.T) {
 		t.Fatal("expected error when no pinned image")
 	}
 }
+
+// TestSendOnStoppedSessionAutoRestarts reproduces the bug where messages sent
+// to a STOPPED session queued forever: handleSend enqueued because the runtime
+// wasn't ready, but RuntimeReady — the only event that drains the queue —
+// never fired because the container was down. Send must auto-restart the
+// container so the queued message actually runs.
+func TestSendOnStoppedSessionAutoRestarts(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeControl()
+	cm := newFakeContainerManager()
+	fc.bound = cm
+	pinned := "sha256:abc"
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Containers:      cm,
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		ImageID:         pinned,
+		PinnedImageID:   func() string { return pinned },
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "auto"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_ = fc.attach(t, r.SessionID, mgr)
+
+	if err := mgr.Stop(ctx, r.SessionID, "user"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	d, err := mgr.Get(ctx, r.SessionID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if d.Status != "stopped" {
+		t.Fatalf("status after stop: got %q want stopped", d.Status)
+	}
+
+	// Snapshot the call log so we can assert only on what happens during the
+	// auto-restart triggered by Send.
+	cm.mu.Lock()
+	cm.calls = nil
+	cm.mu.Unlock()
+
+	res, err := mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "wake"})
+	if err != nil {
+		t.Fatalf("send on stopped session: %v", err)
+	}
+	// Runtime is "starting" right after Restart returns (the new shim hasn't
+	// sent RuntimeReady yet), so handleSend queues the message rather than
+	// dispatching it inline.
+	if !res.Queued {
+		t.Fatalf("expected message to be queued after auto-restart, got %+v", res)
+	}
+
+	cm.mu.Lock()
+	calls := append([]string(nil), cm.calls...)
+	cm.mu.Unlock()
+	var gotCreate, gotStart bool
+	for _, c := range calls {
+		if c == "create" {
+			gotCreate = true
+		}
+		if c == "start" {
+			gotStart = true
+		}
+	}
+	if !gotCreate || !gotStart {
+		t.Fatalf("auto-restart did not provision a new container: calls=%v", calls)
+	}
+
+	// Once the new shim says it's ready, the queued message must fire.
+	stream, err := mgr.Attach(ctx, r.SessionID)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	defer stream.Close()
+	mustEvent(t, stream, proto.EventSessionSnapshot)
+
+	_ = fc.attach(t, r.SessionID, mgr)
+	mustEvent(t, stream, proto.EventSessionRunning)
+	mustEvent(t, stream, proto.EventQueueDepth)
+	mustEvent(t, stream, proto.EventUserMessage)
+	mustEvent(t, stream, proto.EventTurnStart)
+}

@@ -58,12 +58,17 @@ export function Usage() {
   return (
     <section className="page">
       <div className="page-header">
-        <h2>Usage</h2>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div style={{ flex: 1 }}>
+          <h2>Usage</h2>
+          <div className="muted" style={{ marginTop: 4 }}>
+            Token consumption and cost over time
+          </div>
+        </div>
+        <div className="filter-bar" style={{ marginLeft: 0 }}>
           {PRESETS.map((p) => (
             <button
               key={p.value}
-              className={preset === p.value ? "primary" : ""}
+              className={`filter-btn${preset === p.value ? " active" : ""}`}
               onClick={() => setPreset(p.value)}
             >
               {p.label}
@@ -73,13 +78,13 @@ export function Usage() {
       </div>
 
       {preset === "custom" && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
           <input
             type="date"
             value={start}
             onChange={(e) => setStart(e.target.value)}
           />
-          <span style={{ alignSelf: "center" }}>to</span>
+          <span className="muted">to</span>
           <input
             type="date"
             value={end}
@@ -89,18 +94,22 @@ export function Usage() {
       )}
 
       {error && <div className="error-text">{error}</div>}
-      {loading && !data && <div className="empty">Loading…</div>}
+      {loading && !data && (
+        <div className="panel" style={{ textAlign: "center", padding: "48px 24px" }}>
+          <div className="empty" style={{ padding: 0 }}>Loading usage…</div>
+        </div>
+      )}
 
       {data && (
         <div>
-          <div className="panel" style={{ marginBottom: 16 }}>
-            <h3>Total</h3>
-            <div className="cost-amount" style={{ fontSize: 32 }}>
+          <div className="panel" style={{ marginBottom: 18, padding: "20px 22px" }}>
+            <h3>Total spend</h3>
+            <div className="cost-amount" style={{ fontSize: 36, marginTop: 8 }}>
               {formatUSD(data.cost_usd)}
               {data.has_unknown_model && (
                 <span
                   title="Some turns used a model not in the price table."
-                  style={{ marginLeft: 6, color: "var(--c-warn)", fontSize: 20 }}
+                  style={{ marginLeft: 8, color: "var(--c-warn-fg)", fontSize: 20 }}
                 >
                   *
                 </span>

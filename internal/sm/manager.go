@@ -687,6 +687,16 @@ func (m *manager) Send(ctx context.Context, req SendRequest) (SendResult, error)
 	if a == nil {
 		return SendResult{}, ErrSessionNotFound
 	}
+	// A stopped session has no container and no control conn. handleSend would
+	// park the message in the queue, but the only path that drains the queue
+	// (the RuntimeReady frame from the shim) can't fire because there is no
+	// shim. Bring the container back up first; the Send below then enqueues
+	// through the normal path and the new shim pops it once it signals ready.
+	if a.snapshotSummary().Status == "stopped" {
+		if _, err := m.Restart(ctx, req.SessionID); err != nil {
+			return SendResult{}, fmt.Errorf("restart stopped session: %w", err)
+		}
+	}
 	if req.IdempotencyKey != "" && m.store != nil {
 		if existing, ok := m.checkIdempotency(req.SessionID, req.IdempotencyKey); ok {
 			return SendResult{MessageID: existing, Idempotent: true, QueueDepth: a.queueDepth()}, nil

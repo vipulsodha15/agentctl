@@ -207,7 +207,11 @@ func (a *actor) handle(item mboxItem) {
 	case mboxControlConn:
 		a.handleControlConn(item.controlConn.conn)
 	case mboxControlClosed:
-		a.handleControlClosed()
+		var conn ControlConn
+		if item.controlConn != nil {
+			conn = item.controlConn.conn
+		}
+		a.handleControlClosed(conn)
 	}
 }
 
@@ -241,6 +245,12 @@ func (a *actor) handleStop(s *stopItem) {
 		_ = a.control.Close()
 		a.control = nil
 	}
+	// runtimeReady is normally cleared by handleControlClosed when readControl
+	// wakes up from the closed conn — but that runs on the next mailbox tick.
+	// Clear it inline so a Send arriving right after Stop (e.g. the auto-restart
+	// path) sees the consistent "no runtime" state instead of dispatching a
+	// frame into a nil control conn.
+	a.runtimeReady = false
 	a.mu.Unlock()
 	if a.opts.Control != nil {
 		_ = a.opts.Control.Stop(a.opts.ID)
@@ -374,8 +384,18 @@ func (a *actor) handleControlConn(conn ControlConn) {
 	go a.readControl(conn)
 }
 
-func (a *actor) handleControlClosed() {
+func (a *actor) handleControlClosed(conn ControlConn) {
 	a.mu.Lock()
+	// Stop and Restart close the old conn synchronously, then a fresh conn
+	// can be wired in via handleControlConn before the old readControl
+	// goroutine gets scheduled to enqueue its mboxControlClosed. Without an
+	// identity check here, the stale close would wipe out the freshly
+	// installed conn and clear runtimeReady — the session would look ready
+	// for a moment and then silently drop back to "not ready".
+	if conn != nil && a.control != conn {
+		a.mu.Unlock()
+		return
+	}
 	a.control = nil
 	a.runtimeReady = false
 	a.mu.Unlock()
@@ -386,7 +406,10 @@ func (a *actor) readControl(conn ControlConn) {
 	for {
 		fr, err := conn.Recv()
 		if err != nil {
-			a.mailbox <- mboxItem{kind: mboxControlClosed}
+			a.mailbox <- mboxItem{
+				kind:        mboxControlClosed,
+				controlConn: &controlConnItem{conn: conn},
+			}
 			return
 		}
 		a.mailbox <- mboxItem{kind: mboxControlFrame, controlFrame: &controlFrameItem{frame: fr}}

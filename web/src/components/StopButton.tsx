@@ -34,7 +34,19 @@ export function StopButton({ sessionId, inFlight }: Props) {
   if (!inFlight) return null;
   return (
     <>
-      <button className="danger" onClick={onStop} disabled={busy}>
+      <button className="danger" onClick={onStop} disabled={busy} title="Stop the current turn">
+        {!busy && (
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            aria-hidden
+            style={{ marginRight: 6, marginLeft: -2 }}
+          >
+            <rect x="6" y="6" width="12" height="12" rx="1.5" />
+          </svg>
+        )}
         {busy ? "Stopping…" : "Stop turn"}
       </button>
       {error && <span className="error-text">{error}</span>}
