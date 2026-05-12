@@ -1,0 +1,6 @@
+name: bug
+description: Three-stage bug-fix workflow — investigate, plan, then execute.
+stages:
+  - agent: bug-investigator
+  - agent: bug-planner
+  - agent: bug-executor

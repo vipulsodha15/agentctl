@@ -298,3 +298,106 @@ export interface ConversationMessage {
   inFlight?: boolean;
   turn_id?: string;
 }
+
+// ── Task workflows (workflows-task-management.md) ─────────────────
+
+export interface Agent {
+  name: string;
+  description: string;
+  colour: string;
+  model?: string;
+  prompt: string;
+  mcps_allowed?: string[];
+  skills_allowed?: string[];
+  source?: string;
+  path?: string;
+  loaded_at?: string;
+}
+
+export interface WorkflowStageDef {
+  agent: string;
+}
+
+export interface Workflow {
+  name: string;
+  description: string;
+  stages: WorkflowStageDef[];
+  source?: string;
+  path?: string;
+  loaded_at?: string;
+}
+
+export type TaskStatus = "not-started" | "working" | "done" | "abandoned";
+export type StageStatus = "pending" | "active" | "done";
+
+export interface TaskStage {
+  stage_id: string;
+  task_id: string;
+  position: number;
+  agent_name: string;
+  colour?: string;
+  session_id?: string;
+  volume_name?: string;
+  synthesis?: string;
+  status: StageStatus;
+  started_at?: string;
+  ended_at?: string;
+}
+
+export interface Task {
+  task_id: string;
+  name: string;
+  workflow_name?: string;
+  repo_url?: string;
+  base_sha?: string;
+  source_kind: "github_issue" | "freeform";
+  source_url?: string;
+  issue_md: string;
+  current_stage_id?: string;
+  status: TaskStatus;
+  created_at: string;
+  started_at?: string;
+  ended_at?: string;
+  stages?: TaskStage[];
+}
+
+export type TaskMessageRole =
+  | "user"
+  | "assistant"
+  | "system"
+  | "seam"
+  | "synthesis"
+  | "error";
+
+export interface TaskMessage {
+  task_id: string;
+  seq: number;
+  stage_id?: string;
+  agent_name?: string;
+  at: string;
+  role: TaskMessageRole;
+  content: string;
+}
+
+export interface CreateTaskRequest {
+  name?: string;
+  workflow_name?: string;
+  repo_url?: string;
+  source_kind: "github_issue" | "freeform";
+  source_url?: string;
+  issue_md: string;
+}
+
+export interface ListAgentsResponse {
+  agents: Agent[];
+}
+export interface ListWorkflowsResponse {
+  workflows: Workflow[];
+}
+export interface ListTasksResponse {
+  tasks: Task[];
+}
+export interface TaskDetailResponse {
+  task: Task;
+  messages: TaskMessage[];
+}

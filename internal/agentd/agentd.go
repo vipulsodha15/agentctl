@@ -26,6 +26,8 @@ import (
 	"github.com/agentctl/agentctl/internal/socksrv"
 	"github.com/agentctl/agentctl/internal/store"
 	"github.com/agentctl/agentctl/internal/sweep"
+	"github.com/agentctl/agentctl/internal/tm"
+	"github.com/agentctl/agentctl/internal/ttl"
 	"github.com/agentctl/agentctl/internal/usage"
 	"github.com/agentctl/agentctl/internal/version"
 	"github.com/agentctl/agentctl/internal/websrv"
@@ -108,6 +110,40 @@ func Run(ctx context.Context, opts Options) error {
 		BuiltinDir: opts.Layout.BuiltinSkills,
 		CustomDir:  opts.Layout.CustomSkills,
 	})
+
+	// Task library — agents + workflows YAML index. Loaded once at boot.
+	if written, err := ttl.MaterializeBuiltins(opts.Layout.BuiltinAgents, opts.Layout.BuiltinWorkflows); err == nil && written > 0 {
+		logger.Info("ttl.builtins_materialized", slog.Int("written", written))
+	} else if err != nil {
+		logger.Warn("ttl.materialize_builtins_failed", slog.String("error", err.Error()))
+	}
+	taskLib := ttl.New(ttl.Options{
+		BuiltinAgentsDir:    opts.Layout.BuiltinAgents,
+		CustomAgentsDir:     opts.Layout.CustomAgents,
+		BuiltinWorkflowsDir: opts.Layout.BuiltinWorkflows,
+		CustomWorkflowsDir:  opts.Layout.CustomWorkflows,
+	})
+	if issues, err := taskLib.Load(); err == nil {
+		if len(issues.AgentErrors) > 0 || len(issues.WorkflowErrors) > 0 {
+			logger.Warn("ttl.load_issues",
+				slog.Int("agent_errors", len(issues.AgentErrors)),
+				slog.Int("workflow_errors", len(issues.WorkflowErrors)))
+		}
+		logger.Info("ttl.loaded",
+			slog.Int("agents", len(taskLib.ListAgents())),
+			slog.Int("workflows", len(taskLib.ListWorkflows())))
+	}
+
+	taskHub := fan.NewHub()
+	simRuntime := tm.NewSimRuntime(log.New(log.Options{Component: "tm"}))
+	taskMgr := tm.New(tm.Options{
+		Store:   st,
+		Library: taskLib,
+		Runtime: simRuntime,
+		Hub:     taskHub,
+		Logger:  log.New(log.Options{Component: "tm"}),
+	})
+	_ = taskMgr
 
 	usageLog := log.New(log.Options{Component: log.ComponentSessions})
 	usageSvc := usage.New(usage.Options{
@@ -205,6 +241,9 @@ func Run(ctx context.Context, opts Options) error {
 		Skills:  newSkillsAdapter(skillMgr),
 		Usage:   newUsageWebAdapter(usageSvc),
 		Logs:    logStream,
+		Library: taskLib,
+		Tasks:   taskMgr,
+		TaskHub: taskHub,
 		Logger:  webLog,
 	})
 	if err := webSrv.Start(); err != nil {

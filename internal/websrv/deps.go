@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/agentctl/agentctl/internal/fan"
 	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/sm"
 )
@@ -72,4 +73,9 @@ type Updater interface {
 type UsageService interface {
 	GetUsage(ctx context.Context, since, sessionID string) ([]byte, error)
 	RunningTotals(ctx context.Context, sessionIDs []string) (map[string]float64, error)
+}
+
+// TaskHub is the subset of fan.Hub that the task-stream handler needs.
+type TaskHub interface {
+	Subscribe(channel string) (fan.Stream, func(), error)
 }

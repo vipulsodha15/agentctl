@@ -35,6 +35,9 @@ type Server struct {
 	logs     LogStreamer
 	doctor   Doctor
 	updater  Updater
+	library  LibraryService
+	tasks    TaskService
+	taskHub  TaskHub
 	token    string
 	addr     string
 	originOK string
@@ -51,6 +54,9 @@ type Options struct {
 	Logs    LogStreamer
 	Doctor  Doctor
 	Updater Updater
+	Library LibraryService
+	Tasks   TaskService
+	TaskHub TaskHub
 	Logger  *slog.Logger
 }
 
@@ -65,6 +71,9 @@ func New(opts Options) *Server {
 		logs:     opts.Logs,
 		doctor:   opts.Doctor,
 		updater:  opts.Updater,
+		library:  opts.Library,
+		tasks:    opts.Tasks,
+		taskHub:  opts.TaskHub,
 		token:    opts.Token,
 		addr:     opts.Addr,
 		originOK: "http://" + opts.Addr,
@@ -190,6 +199,77 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 		}
 		methodNotAllowed(w)
 		return
+	case path == "/v1/agents":
+		switch method {
+		case http.MethodGet:
+			s.handleListAgents(w, r)
+		case http.MethodPost:
+			s.requireOrigin(w, r, s.handleAddAgent)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	case path == "/v1/workflows":
+		switch method {
+		case http.MethodGet:
+			s.handleListWorkflows(w, r)
+		case http.MethodPost:
+			s.requireOrigin(w, r, s.handleAddWorkflow)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	case path == "/v1/tasks":
+		switch method {
+		case http.MethodGet:
+			s.handleListTasks(w, r)
+		case http.MethodPost:
+			s.requireOrigin(w, r, s.handleCreateTask)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
+
+	if name, ok := matchPrefix(path, "/v1/agents/"); ok && !strings.Contains(name, "/") {
+		switch method {
+		case http.MethodGet:
+			s.handleGetAgent(w, r, name)
+		case http.MethodPut:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handlePutAgent(w, r, name)
+			})
+		case http.MethodDelete:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleRemoveAgent(w, r, name)
+			})
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
+
+	if name, ok := matchPrefix(path, "/v1/workflows/"); ok && !strings.Contains(name, "/") {
+		switch method {
+		case http.MethodGet:
+			s.handleGetWorkflow(w, r, name)
+		case http.MethodPut:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handlePutWorkflow(w, r, name)
+			})
+		case http.MethodDelete:
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleRemoveWorkflow(w, r, name)
+			})
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
+
+	if rest, ok := matchPrefix(path, "/v1/tasks/"); ok {
+		s.routeTaskItem(w, r, rest)
+		return
 	}
 
 	if name, ok := matchPrefix(path, "/v1/mcps/"); ok && !strings.Contains(name, "/") {
@@ -299,6 +379,46 @@ func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest s
 		s.handleSessionSkills(w, r, id)
 	case suffix == "stream" && method == http.MethodGet:
 		s.handleAttachStream(w, r, id)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) routeTaskItem(w http.ResponseWriter, r *http.Request, rest string) {
+	method := r.Method
+	id, suffix, hasSuffix := splitOne(rest)
+	if !hasSuffix {
+		switch method {
+		case http.MethodGet:
+			s.handleGetTask(w, r, id)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
+	switch {
+	case suffix == "attach" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleAttachWorkflow(w, r, id)
+		})
+	case suffix == "messages" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleTaskSend(w, r, id)
+		})
+	case suffix == "handoff" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleTaskHandoff(w, r, id)
+		})
+	case suffix == "complete" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleTaskComplete(w, r, id)
+		})
+	case suffix == "abandon" && method == http.MethodPost:
+		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+			s.handleTaskAbandon(w, r, id)
+		})
+	case suffix == "stream" && method == http.MethodGet:
+		s.handleAttachTaskStream(w, r, id)
 	default:
 		methodNotAllowed(w)
 	}
