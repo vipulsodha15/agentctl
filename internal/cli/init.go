@@ -300,6 +300,8 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 	skipAnthropic := os.Getenv("AGENTCTL_SKIP_ANTHROPIC_VALIDATE") == "1"
 	skipGitHub := os.Getenv("AGENTCTL_SKIP_GITHUB_PAT_CHECK") == "1"
 
+	// If the user passes --anthropic-key, treat that as an explicit request
+	// to use API-key mode (overrides any prior oauth setup).
 	if f.anthropicKey != "" {
 		if !skipAnthropic {
 			if err := validateAnthropic(f.anthropicKey); err != nil {
@@ -307,20 +309,32 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 			}
 		}
 		out.AnthropicAPIKey = f.anthropicKey
+		out.AnthropicAuthMode = secrets.AuthModeAPIKey
+	} else if out.ResolvedAuthMode() == secrets.AuthModeOAuth && f.resetToken != "anthropic" {
+		// Already in oauth mode (from `agentctl auth login`). Don't prompt
+		// for an API key; the session bind-mount handles authentication.
+		fmt.Fprintln(env.Stdout, "Anthropic auth: oauth (from `agentctl auth login`)")
 	} else if out.AnthropicAPIKey == "" || f.resetToken == "anthropic" {
+		fmt.Fprintln(env.Stdout, "Anthropic credentials:")
+		fmt.Fprintln(env.Stdout, "  Press Enter to skip and use `agentctl auth login` (Pro/Max subscription)")
+		fmt.Fprintln(env.Stdout, "  Or paste an ANTHROPIC_API_KEY now")
 		v, err := promptSecret(env, "ANTHROPIC_API_KEY: ")
 		if err != nil {
 			return secrets.Secrets{}, err
 		}
 		if v == "" {
-			return secrets.Secrets{}, fmt.Errorf("ANTHROPIC_API_KEY required (use --anthropic-key)")
-		}
-		if !skipAnthropic {
-			if err := validateAnthropic(v); err != nil {
-				return secrets.Secrets{}, err
+			fmt.Fprintln(env.Stdout, "Skipped. Run `agentctl auth login` to sign in with your Claude subscription.")
+			// Leave AnthropicAuthMode untouched: if the user was already in
+			// oauth mode and just hit Enter, don't silently break their setup.
+		} else {
+			if !skipAnthropic {
+				if err := validateAnthropic(v); err != nil {
+					return secrets.Secrets{}, err
+				}
 			}
+			out.AnthropicAPIKey = v
+			out.AnthropicAuthMode = secrets.AuthModeAPIKey
 		}
-		out.AnthropicAPIKey = v
 	}
 
 	if f.githubPAT != "" {

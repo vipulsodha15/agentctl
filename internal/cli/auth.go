@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -17,11 +18,6 @@ import (
 // updating the session base image doesn't churn this one (and vice versa).
 const authImageTag = "agentctl/auth:local"
 
-// authCredsSubdir is the directory under ~/.config/agentctl/ that we bind
-// into the login container as CLAUDE_CONFIG_DIR. After a successful login,
-// .credentials.json appears here on the host.
-const authCredsSubdir = "claude"
-
 func runAuth(ctx context.Context, env *Env, args []string) int {
 	if len(args) == 0 {
 		return authHelp(env, ExitUsage)
@@ -31,6 +27,8 @@ func runAuth(ctx context.Context, env *Env, args []string) int {
 	switch sub {
 	case "login":
 		return runAuthLogin(ctx, env, rest)
+	case "status":
+		return runAuthStatus(env)
 	case "-h", "--help", "help":
 		return authHelp(env, ExitOK)
 	}
@@ -46,9 +44,37 @@ func authHelp(env *Env, code int) int {
 	fmt.Fprintln(w, "Usage: agentctl auth <subcommand> [flags]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Subcommands:")
-	fmt.Fprintln(w, "  login   Run `claude auth login` inside a one-shot container; store credentials")
-	fmt.Fprintln(w, "          under ~/.config/agentctl/claude/.credentials.json.")
+	fmt.Fprintln(w, "  login    Run `claude auth login` inside a one-shot container; store credentials")
+	fmt.Fprintln(w, "           under ~/.config/agentctl/claude/.credentials.json and switch sessions")
+	fmt.Fprintln(w, "           to subscription auth.")
+	fmt.Fprintln(w, "  status   Print whether sessions are configured to use an API key or OAuth.")
 	return code
+}
+
+func runAuthStatus(env *Env) int {
+	sec, err := secrets.Load(env.Layout.SecretsFile)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(env.Stderr, "auth status: %v\n", err)
+		return ExitGeneric
+	}
+	mode := sec.ResolvedAuthMode()
+	fmt.Fprintf(env.Stdout, "anthropic auth mode: %s\n", mode)
+	switch mode {
+	case secrets.AuthModeOAuth:
+		credFile := env.Layout.ClaudeCredsFile
+		if info, statErr := os.Stat(credFile); statErr == nil && info.Size() > 0 {
+			fmt.Fprintf(env.Stdout, "credentials file:    %s\n", credFile)
+		} else {
+			fmt.Fprintf(env.Stdout, "credentials file:    %s (missing — run `agentctl auth login`)\n", credFile)
+		}
+	case secrets.AuthModeAPIKey:
+		if sec.AnthropicAPIKey != "" {
+			fmt.Fprintln(env.Stdout, "anthropic api key:   set (run `agentctl init --reset-token anthropic` to replace)")
+		} else {
+			fmt.Fprintln(env.Stdout, "anthropic api key:   NOT set (run `agentctl init` or `agentctl auth login`)")
+		}
+	}
+	return ExitOK
 }
 
 func runAuthLogin(ctx context.Context, env *Env, args []string) int {
@@ -62,6 +88,10 @@ func runAuthLogin(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Runs `claude auth login` inside a one-shot Linux container so the OAuth")
 		fmt.Fprintln(env.Stderr, "flow writes credentials into ~/.config/agentctl/claude/ on the host,")
 		fmt.Fprintln(env.Stderr, "instead of touching ~/.claude or the macOS Keychain.")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "On success, secrets.json is updated to anthropic_auth_mode=oauth and")
+		fmt.Fprintln(env.Stderr, "subsequent `agentctl start` sessions bind-mount the credentials into")
+		fmt.Fprintln(env.Stderr, "the container instead of injecting ANTHROPIC_API_KEY.")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "The container has no reachable callback port, so Claude Code falls back")
 		fmt.Fprintln(env.Stderr, "to the paste flow: open the URL it prints on your host browser, sign in,")
@@ -79,7 +109,7 @@ func runAuthLogin(ctx context.Context, env *Env, args []string) int {
 		return ExitEnvironment
 	}
 
-	credsDir := filepath.Join(env.Layout.ConfigDir, authCredsSubdir)
+	credsDir := env.Layout.ClaudeCredsDir
 	if err := os.MkdirAll(credsDir, secrets.DirPerm); err != nil {
 		fmt.Fprintf(env.Stderr, "auth login: mkdir %s: %v\n", credsDir, err)
 		return ExitEnvironment
@@ -106,15 +136,34 @@ func runAuthLogin(ctx context.Context, env *Env, args []string) int {
 		return ExitRuntime
 	}
 
-	credFile := filepath.Join(credsDir, ".credentials.json")
+	credFile := env.Layout.ClaudeCredsFile
 	info, err := os.Stat(credFile)
 	if err != nil || info.Size() == 0 {
 		fmt.Fprintf(env.Stderr, "auth login: %s was not written; login may have been cancelled\n", credFile)
 		return ExitAuth
 	}
+
+	if err := persistOAuthMode(env); err != nil {
+		fmt.Fprintf(env.Stderr, "auth login: credentials saved but failed to update secrets.json: %v\n", err)
+		return ExitGeneric
+	}
+
 	fmt.Fprintf(env.Stdout, "Claude credentials saved to %s\n", credFile)
-	fmt.Fprintln(env.Stdout, "(session injection wiring is a follow-up; this only persists creds.)")
+	fmt.Fprintln(env.Stdout, "Sessions will now authenticate with your Claude subscription.")
 	return ExitOK
+}
+
+// persistOAuthMode flips secrets.json into oauth mode while preserving every
+// other field. We deliberately keep AnthropicAPIKey in place so the user can
+// switch back later by editing the mode (or by re-running init with a new
+// key). Missing secrets.json is fine — we create one with mode=oauth.
+func persistOAuthMode(env *Env) error {
+	sec, err := secrets.Load(env.Layout.SecretsFile)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	sec.AnthropicAuthMode = secrets.AuthModeOAuth
+	return secrets.Save(env.Layout.SecretsFile, sec)
 }
 
 func ensureAuthImage(ctx context.Context, env *Env, noCache bool) error {
