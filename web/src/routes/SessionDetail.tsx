@@ -7,9 +7,10 @@ import type {
   McpStatus,
   SessionStatus,
   SnapshotData,
+  UsageTotals,
   WireEvent,
 } from "../types";
-import { ConversationView } from "../components/ConversationView";
+import { ConversationView, type TranscriptFilter } from "../components/ConversationView";
 import { MessageInput } from "../components/MessageInput";
 import { McpPanel } from "../components/McpPanel";
 import { StopButton } from "../components/StopButton";
@@ -41,6 +42,11 @@ interface State {
   // tool_use_id → tool name, populated as tool.call events arrive so we
   // can resolve the tool name on the matching tool.result.
   toolNames: Record<string, string>;
+  // tool_use_id → message index, so tool.result can update the same row
+  // instead of appending a separate one.
+  toolIndexById: Record<string, number>;
+  // Per-turn aggregated usage, surfaced as a chip on the turn divider.
+  usageByTurn: Record<string, UsageTotals>;
   connected: boolean;
   disconnectReason: string | null;
 }
@@ -64,6 +70,8 @@ const INITIAL: State = {
   openBubbleByTurn: {},
   inFlightCount: 0,
   toolNames: {},
+  toolIndexById: {},
+  usageByTurn: {},
   connected: false,
   disconnectReason: null,
 };
@@ -71,7 +79,7 @@ const INITIAL: State = {
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "reset":
-      return { ...INITIAL };
+      return { ...INITIAL, seenEventIds: new Set() };
     case "ws_open":
       return { ...state, connected: true, disconnectReason: null };
     case "ws_close":
@@ -93,7 +101,7 @@ function applySnapshot(state: State, data: SnapshotData): State {
     : Array.isArray((rawConv as { messages?: unknown[] } | null)?.messages)
       ? ((rawConv as { messages: unknown[] }).messages)
       : [];
-  const { messages, toolNames } = normalizeConversation(convArray);
+  const { messages, toolNames, toolIndexById } = normalizeConversation(convArray);
   // SessionSnapshotData.in_flight (proto.go) is a turn_id string when in-flight,
   // empty otherwise — the local type declares it as boolean for historical
   // reasons. Coerce defensively.
@@ -114,6 +122,8 @@ function applySnapshot(state: State, data: SnapshotData): State {
     openBubbleByTurn: {},
     inFlightCount: isInFlight ? 1 : 0,
     toolNames,
+    toolIndexById,
+    usageByTurn: {},
   };
 }
 
@@ -136,12 +146,18 @@ function normalizeMcps(raw: unknown): McpStatus[] {
 //   {type:"attachment"|"queue-operation"|"last-prompt", ...}   ← skip
 // Tool results come back as a user message whose content array has
 // {type:"tool_result", tool_use_id, content, is_error}.
+//
+// We pair tool_use parts with their later tool_result parts (keyed by
+// tool_use_id) so the rendered transcript carries a single "tool" entry per
+// call instead of two separate rows.
 function normalizeConversation(raw: unknown[]): {
   messages: ConversationMessage[];
   toolNames: Record<string, string>;
+  toolIndexById: Record<string, number>;
 } {
   const out: ConversationMessage[] = [];
   const toolNames: Record<string, string> = {};
+  const toolIndexById: Record<string, number> = {};
   let i = 0;
   for (const item of raw) {
     i++;
@@ -171,35 +187,67 @@ function normalizeConversation(raw: unknown[]): {
     if (role === "assistant") {
       let textParts = "";
       let partIdx = 0;
+      const flushText = () => {
+        if (textParts) {
+          out.push({
+            id: `${baseId}-t${partIdx++}`,
+            kind: "assistant",
+            text: textParts,
+          });
+          textParts = "";
+        }
+      };
       for (const part of content) {
         if (!part || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
         const t = typeof p.type === "string" ? (p.type as string) : "";
         if (t === "text" && typeof p.text === "string") {
           textParts += textParts ? "\n" + p.text : p.text;
-        } else if (t === "tool_use") {
-          if (textParts) {
-            out.push({ id: `${baseId}-t${partIdx++}`, kind: "assistant", text: textParts });
-            textParts = "";
+        } else if (t === "thinking" || t === "redacted_thinking") {
+          flushText();
+          const tx =
+            (typeof p.thinking === "string" && p.thinking) ||
+            (typeof p.text === "string" && p.text) ||
+            "";
+          if (tx) {
+            out.push({
+              id: `${baseId}-th${partIdx++}`,
+              kind: "thinking",
+              text: tx,
+            });
           }
+        } else if (t === "tool_use") {
+          flushText();
           const toolUseId = typeof p.id === "string" ? (p.id as string) : "";
           const name = typeof p.name === "string" ? (p.name as string) : "?";
           if (toolUseId) toolNames[toolUseId] = name;
+          const id = toolUseId || `${baseId}-tc${partIdx++}`;
+          if (toolUseId) toolIndexById[toolUseId] = out.length;
           out.push({
-            id: toolUseId || `${baseId}-tc${partIdx++}`,
-            kind: "tool_call",
+            id,
+            kind: "tool",
             tool: name,
+            tool_use_id: toolUseId || undefined,
+            input: p.input ?? {},
             text: stableStringify(p.input ?? {}),
+            status: "pending",
           });
         }
-        // thinking / server-side parts are intentionally ignored.
       }
-      if (textParts) {
-        out.push({ id: `${baseId}-t${partIdx}`, kind: "assistant", text: textParts });
-      }
+      flushText();
     } else if (role === "user") {
       let userText = "";
       let partIdx = 0;
+      const flushText = () => {
+        if (userText) {
+          out.push({
+            id: `${baseId}-u${partIdx++}`,
+            kind: "user",
+            text: userText,
+          });
+          userText = "";
+        }
+      };
       for (const part of content) {
         if (!part || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
@@ -207,27 +255,48 @@ function normalizeConversation(raw: unknown[]): {
         if (t === "text" && typeof p.text === "string") {
           userText += userText ? "\n" + p.text : p.text;
         } else if (t === "tool_result") {
-          if (userText) {
-            out.push({ id: `${baseId}-u${partIdx++}`, kind: "user", text: userText });
-            userText = "";
+          flushText();
+          const useId =
+            typeof p.tool_use_id === "string" ? (p.tool_use_id as string) : "";
+          const isErr = !!p.is_error;
+          const outputText =
+            typeof p.content === "string"
+              ? p.content
+              : stableStringify(p.content ?? "");
+          // Prefer to fold this result into the existing tool_use row.
+          if (useId && toolIndexById[useId] !== undefined) {
+            const idx = toolIndexById[useId];
+            const prev = out[idx];
+            out[idx] = {
+              ...prev,
+              output: outputText,
+              is_error: isErr,
+              status: isErr ? "error" : "done",
+            };
+          } else {
+            // Result without a matching call — render as a standalone tool row
+            // so the user can still see what happened.
+            const tool = useId && toolNames[useId] ? toolNames[useId] : "";
+            const id = useId || `${baseId}-tr${partIdx++}`;
+            out.push({
+              id,
+              kind: "tool",
+              tool,
+              tool_use_id: useId || undefined,
+              input: undefined,
+              text: "",
+              output: outputText,
+              is_error: isErr,
+              status: isErr ? "error" : "done",
+            });
+            if (useId) toolIndexById[useId] = out.length - 1;
           }
-          const useId = typeof p.tool_use_id === "string" ? (p.tool_use_id as string) : "";
-          const tool = useId && toolNames[useId] ? toolNames[useId] : "";
-          out.push({
-            id: useId || `${baseId}-tr${partIdx++}`,
-            kind: "tool_result",
-            tool,
-            is_error: !!p.is_error,
-            text: typeof p.content === "string" ? p.content : stableStringify(p.content ?? ""),
-          });
         }
       }
-      if (userText) {
-        out.push({ id: `${baseId}-u${partIdx}`, kind: "user", text: userText });
-      }
+      flushText();
     }
   }
-  return { messages: out, toolNames };
+  return { messages: out, toolNames, toolIndexById };
 }
 
 function stableStringify(v: unknown): string {
@@ -386,6 +455,18 @@ function applyEvent(state: State, e: WireEvent): State {
         };
         openMap = {};
       }
+      // Mark any tool rows still pending as cancelled-as-done so they don't
+      // spin forever after a cancellation.
+      if (e.kind === "turn.cancelled") {
+        next = {
+          ...next,
+          messages: next.messages.map((m) =>
+            m.kind === "tool" && m.status === "pending"
+              ? { ...m, status: "done" }
+              : m,
+          ),
+        };
+      }
       next = {
         ...next,
         openBubbleByTurn: openMap,
@@ -427,17 +508,26 @@ function applyEvent(state: State, e: WireEvent): State {
         ? { ...next.toolNames, [useId]: toolName }
         : next.toolNames;
 
+      const rowId = useId ? `tc-${useId}` : `tc-${id ?? Math.random()}`;
+      const idx = next.messages.length;
       next = {
         ...next,
         openBubbleByTurn: openMap,
         toolNames: nextToolNames,
+        toolIndexById: useId
+          ? { ...next.toolIndexById, [useId]: idx }
+          : next.toolIndexById,
         messages: [
           ...next.messages,
           {
-            id: useId ? `tc-${useId}` : `tc-${id ?? Math.random()}`,
-            kind: "tool_call",
+            id: rowId,
+            kind: "tool",
             tool: toolName,
+            tool_use_id: useId || undefined,
+            input: d.input ?? {},
             text: stableStringify(d.input ?? {}),
+            status: "pending",
+            started_at: Date.now(),
             turn_id: d.turn_id,
           },
         ],
@@ -456,24 +546,93 @@ function applyEvent(state: State, e: WireEvent): State {
         is_error?: boolean;
       };
       const useId = d.tool_use_id ?? "";
-      const toolName =
-        d.tool ?? (useId ? next.toolNames[useId] : undefined) ?? "";
       const body = d.content !== undefined ? d.content : d.output;
-      const text =
+      const outputText =
         typeof body === "string" ? body : stableStringify(body ?? "");
+      const idx = useId ? next.toolIndexById[useId] : undefined;
+      const isErr = !!d.is_error;
+      if (idx !== undefined && next.messages[idx]?.kind === "tool") {
+        // Fold the result into the existing pending row.
+        next = {
+          ...next,
+          messages: next.messages.map((m, i) =>
+            i === idx
+              ? {
+                  ...m,
+                  output: outputText,
+                  is_error: isErr,
+                  status: isErr ? "error" : "done",
+                  ended_at: Date.now(),
+                }
+              : m,
+          ),
+        };
+      } else {
+        const tool =
+          d.tool ?? (useId ? next.toolNames[useId] : undefined) ?? "";
+        const rowId = useId ? `tr-${useId}` : `tr-${id ?? Math.random()}`;
+        next = {
+          ...next,
+          messages: [
+            ...next.messages,
+            {
+              id: rowId,
+              kind: "tool",
+              tool,
+              tool_use_id: useId || undefined,
+              input: undefined,
+              text: "",
+              output: outputText,
+              is_error: isErr,
+              status: isErr ? "error" : "done",
+              ended_at: Date.now(),
+              turn_id: d.turn_id,
+            },
+          ],
+        };
+        if (useId) {
+          next = {
+            ...next,
+            toolIndexById: {
+              ...next.toolIndexById,
+              [useId]: next.messages.length - 1,
+            },
+          };
+        }
+      }
+      break;
+    }
+    case "usage": {
+      const d = e.data as {
+        turn_id?: string;
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_tokens?: number;
+        cache_write_tokens?: number;
+        cost_usd?: number;
+      };
+      if (!d.turn_id) break;
+      const prev: UsageTotals = next.usageByTurn[d.turn_id] ?? {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      };
       next = {
         ...next,
-        messages: [
-          ...next.messages,
-          {
-            id: useId ? `tr-${useId}` : `tr-${id ?? Math.random()}`,
-            kind: "tool_result",
-            tool: toolName,
-            text,
-            is_error: !!d.is_error,
-            turn_id: d.turn_id,
+        usageByTurn: {
+          ...next.usageByTurn,
+          [d.turn_id]: {
+            input_tokens: prev.input_tokens + (d.input_tokens ?? 0),
+            output_tokens: prev.output_tokens + (d.output_tokens ?? 0),
+            cache_read_tokens:
+              prev.cache_read_tokens + (d.cache_read_tokens ?? 0),
+            cache_write_tokens:
+              prev.cache_write_tokens + (d.cache_write_tokens ?? 0),
+            cost_usd:
+              (prev.cost_usd ?? 0) + (typeof d.cost_usd === "number" ? d.cost_usd : 0),
           },
-        ],
+        },
       };
       break;
     }
@@ -484,11 +643,18 @@ function applyEvent(state: State, e: WireEvent): State {
     }
     case "mcp.unreachable": {
       const d = e.data as { name?: string; error?: string };
+      const text = `MCP ${d.name ?? "?"} unreachable${d.error ? `: ${d.error}` : ""}`;
       next = {
         ...next,
-        warnings: [
-          ...next.warnings,
-          `MCP ${d.name ?? "?"} unreachable${d.error ? `: ${d.error}` : ""}`,
+        warnings: [...next.warnings, text],
+        messages: [
+          ...next.messages,
+          {
+            id: `n-mcp-${id ?? Math.random()}`,
+            kind: "notice",
+            text,
+            notice_level: "error",
+          },
         ],
         mcps: next.mcps.map((m) =>
           m.name === d.name ? { ...m, status: "unreachable", error: d.error } : m,
@@ -498,11 +664,60 @@ function applyEvent(state: State, e: WireEvent): State {
     }
     case "mcp.skipped": {
       const d = e.data as { name?: string; reason?: string };
+      const text = `MCP ${d.name ?? "?"} skipped${d.reason ? `: ${d.reason}` : ""}`;
       next = {
         ...next,
-        warnings: [
-          ...next.warnings,
-          `MCP ${d.name ?? "?"} skipped${d.reason ? `: ${d.reason}` : ""}`,
+        warnings: [...next.warnings, text],
+        messages: [
+          ...next.messages,
+          {
+            id: `n-mcps-${id ?? Math.random()}`,
+            kind: "notice",
+            text,
+            notice_level: "warn",
+          },
+        ],
+      };
+      break;
+    }
+    case "skills.changed": {
+      // Inline notice — the right-rail Skills panel (if any) carries the
+      // canonical list, but transcripts benefit from a marker so audit
+      // trails can see when the skill set shifted mid-conversation.
+      const d = e.data as { added?: string[]; removed?: string[] };
+      const parts: string[] = [];
+      if (Array.isArray(d.added) && d.added.length > 0) {
+        parts.push(`+${d.added.join(", ")}`);
+      }
+      if (Array.isArray(d.removed) && d.removed.length > 0) {
+        parts.push(`-${d.removed.join(", ")}`);
+      }
+      next = {
+        ...next,
+        messages: [
+          ...next.messages,
+          {
+            id: `n-sk-${id ?? Math.random()}`,
+            kind: "notice",
+            text: `Skills updated${parts.length ? ` (${parts.join(" ")})` : ""}`,
+            notice_level: "info",
+          },
+        ],
+      };
+      break;
+    }
+    case "skill.collision": {
+      const d = e.data as { name?: string; overrides?: string };
+      next = {
+        ...next,
+        messages: [
+          ...next.messages,
+          {
+            id: `n-skc-${id ?? Math.random()}`,
+            kind: "notice",
+            text: `Skill "${d.name ?? "?"}" overrides ${d.overrides ?? "another"}`,
+            notice_level: "warn",
+          },
         ],
       };
       break;
@@ -525,12 +740,19 @@ function applyEvent(state: State, e: WireEvent): State {
       break;
     case "session.error": {
       const d = e.data as { message?: string; code?: string };
+      const text = `session error: ${d.code ?? ""} ${d.message ?? ""}`.trim();
       next = {
         ...next,
         status: "error",
-        warnings: [
-          ...next.warnings,
-          `session error: ${d.code ?? ""} ${d.message ?? ""}`.trim(),
+        warnings: [...next.warnings, text],
+        messages: [
+          ...next.messages,
+          {
+            id: `n-err-${id ?? Math.random()}`,
+            kind: "notice",
+            text,
+            notice_level: "error",
+          },
         ],
       };
       break;
@@ -565,6 +787,7 @@ export function SessionDetail() {
   const [tab, setTab] = useState<"conversation" | "changes">("conversation");
   const [endBusy, setEndBusy] = useState(false);
   const [costRefreshKey, setCostRefreshKey] = useState(0);
+  const [filter, setFilter] = useState<TranscriptFilter>("all");
 
   // Initial fetch for session metadata (name, status before snapshot lands).
   useEffect(() => {
@@ -704,12 +927,31 @@ export function SessionDetail() {
           >
             Changes
           </button>
+          {tab === "conversation" && (
+            <div className="filter-bar">
+              <FilterButton current={filter} value="all" onSet={setFilter}>
+                All
+              </FilterButton>
+              <FilterButton current={filter} value="text" onSet={setFilter}>
+                Text
+              </FilterButton>
+              <FilterButton current={filter} value="tools" onSet={setFilter}>
+                Tools
+              </FilterButton>
+              <FilterButton current={filter} value="errors" onSet={setFilter}>
+                Errors
+              </FilterButton>
+            </div>
+          )}
         </div>
         {tab === "conversation" ? (
           <ConversationView
             messages={visibleMessages}
             warnings={state.warnings}
             inFlight={state.inFlight}
+            mcps={state.mcps}
+            usageByTurn={state.usageByTurn}
+            filter={filter}
           />
         ) : (
           <div className="conversation">
@@ -732,5 +974,27 @@ export function SessionDetail() {
         <CostPanel sessionId={id} refreshKey={costRefreshKey} />
       </aside>
     </section>
+  );
+}
+
+function FilterButton({
+  current,
+  value,
+  onSet,
+  children,
+}: {
+  current: TranscriptFilter;
+  value: TranscriptFilter;
+  onSet: (v: TranscriptFilter) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={`filter-btn ${current === value ? "active" : ""}`}
+      onClick={() => onSet(value)}
+    >
+      {children}
+    </button>
   );
 }

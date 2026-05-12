@@ -223,6 +223,16 @@ export interface RangeCostTotals {
   by_session: RangeSessionTotals[];
 }
 
+// Per-turn usage totals, derived from `usage` events and rendered as a chip
+// on the turn divider.
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd?: number;
+}
+
 export interface SnapshotData {
   session: SessionRow;
   conversation: ConversationMessage[];
@@ -233,24 +243,41 @@ export interface SnapshotData {
 }
 
 // Normalized conversation message rendered in ConversationView.
+//
+// "tool" is a paired call+result view keyed by tool_use_id. The call arrives
+// first (status="pending"), then the matching result fills in output/error
+// and flips status to "done"|"error".
 export type RenderedMessageKind =
   | "user"
   | "assistant"
-  | "tool_call"
-  | "tool_result"
+  | "thinking"
+  | "tool"
+  | "notice"
   | "system";
 
+export type ToolStatus = "pending" | "done" | "error";
+
 export interface ConversationMessage {
-  // Stable identifier for de-dup. Prefer message_id / turn_id from the wire;
+  // Stable identifier for de-dup. Prefer message_id / turn_id / tool_use_id;
   // fall back to a synthetic id for entries reconstructed from the snapshot.
   id: string;
   kind: RenderedMessageKind;
-  // For user/assistant: rendered text. For tool_call: stringified input.
-  // For tool_result: stringified output.
+  // For user / assistant / thinking / notice / system: rendered text.
+  // For tool: the stringified input (output lives on `output`).
   text: string;
-  // Tool name (when kind is tool_call/tool_result).
+  // Tool name (when kind === "tool").
   tool?: string;
+  // Paired tool fields.
+  tool_use_id?: string;
+  input?: unknown;
+  output?: string;
+  status?: ToolStatus;
   is_error?: boolean;
+  // Wall-clock timestamps for elapsed-time rendering on tool blocks.
+  started_at?: number;
+  ended_at?: number;
+  // Notice severity (for kind === "notice").
+  notice_level?: "info" | "warn" | "error";
   // Marks an in-flight assistant bubble that is still receiving deltas.
   inFlight?: boolean;
   turn_id?: string;
