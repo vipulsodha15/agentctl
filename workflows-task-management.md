@@ -106,6 +106,15 @@ Constraints every requirement and the technical design must respect:
 7. **Workspaces are durable per ticket.** The shared volume and branch
    persist until the ticket is explicitly terminated (or auto-pruned by
    policy). All stages of a ticket see the same filesystem and git state.
+8. **agentd is the sole writer of ticket, stage, and stage-event state.**
+   Clients (CLI, Web UI) and containers never mutate the sqlite tables
+   directly. Clients emit *intent* events (`Handoff`, `Approve`,
+   `Handback`, `Stop`, `Send`); containers stream agent output and
+   container-lifecycle events. agentd interprets these into state
+   transitions and is the only party that writes the `tickets`,
+   `stages`, and `stage_events` tables. This extends v1 principle 1
+   (`agentd` is the single source of truth) to the new ticket/stage
+   primitives.
 
 ## 4. Non-functional requirements
 
@@ -439,9 +448,30 @@ terminates when the workflow completes or the user stops it.
    └─────────┘            └─────────┘
 ```
 
-A ticket is in `running` for the entire span where at least one stage is
-not yet `done`. The currently-active stage's status is what the UI
-displays as the ticket's "current phase."
+**Ticket status is an aggregate of stage status.** A ticket has its own
+`status` row in sqlite, but its transitions are *derived* from stage
+transitions plus user intent. agentd writes the ticket status; nothing
+else does. The trigger map:
+
+| Ticket transition | Concrete trigger | Trigger source |
+|---|---|---|
+| `pending → running` | Stage 1 transitions `pending → active` | agentd scheduler |
+| `running → done` | Last stage in the workflow transitions to `done` | agentd scheduler |
+| `running → stopped` | User clicks "Stop ticket" / `agentctl ticket stop` | User intent |
+| `pending → failed` | Workspace clone, volume creation, or MCP fetch error during materialization | agentd observation |
+| `running → failed` | Any stage transitions to `failed` (v0: no automatic stage retry) | agentd observation |
+
+A ticket remains in `running` for the entire span where at least one stage
+is not yet `done`. The currently-active stage's status (`active` /
+`awaiting-approval` / `paused-for-backtrack`) is what the UI displays as
+the ticket's "current phase." Backtracks do not change ticket status;
+the ticket stays `running` through any number of forward handoffs and
+backtracks.
+
+**Stages drive the ticket; the ticket only writes back on Stop.** Stage
+transitions push the ticket through its lifecycle. The only ticket → stage
+direction write is `Stop ticket`, which forcibly terminates the current
+stage's session and freezes stage statuses where they were at stop time.
 
 **Workspace materialization.** On ticket creation:
 
@@ -551,6 +581,31 @@ ticket. Stage state transitions are deterministic and durable.
     is restored from `done` to `active` and a new session is spawned.)
 ```
 
+**Status transition triggers (stage).** Per principle 8, agentd writes
+every transition. The trigger source for each is one of: **user intent**
+(click / CLI command), **agentd scheduler** (internal sequencing logic),
+or **agent observation** (events read off the session's chat stream or
+container lifecycle).
+
+| Stage transition | Concrete trigger | Trigger source |
+|---|---|---|
+| `pending → active` | Ticket starting, OR prior stage transitioned to `done` | agentd scheduler |
+| `active → awaiting-approval` | User clicks "Hand off" → agentd injects auto-prompt → agent emits synthesis → agentd flips state on synthesis observation | User intent + agent observation |
+| `awaiting-approval → awaiting-approval` (refinement, new candidate) | User pushes back in chat; agent emits a revised synthesis. State does not change; the candidate-synthesis pointer advances to the latest agent reply | n/a |
+| `awaiting-approval → done` | User clicks "Approve & continue" (or `agentctl ticket approve`) | User intent |
+| `done → active` (backtracking *into* this prior stage) | User clicks "Hand back" from a *later* stage | User intent |
+| `active → paused-for-backtrack` (the later stage being left) | Same "Hand back" click | User intent |
+| `paused-for-backtrack → active` (resuming the later stage on re-handoff) | User clicks "Hand off" from the re-entered prior stage | User intent |
+| any → `failed` | Session crash, unrecoverable agent error, container exit | agentd observation |
+
+**`approval_required: false` stages.** When the current stage's workflow
+step has `approval_required: false` (e.g., the executor in the bug
+workflow), the `active → awaiting-approval → done` path collapses into a
+single atomic `active → done` transition. agentd treats the agent's
+synthesis emission as both the synthesis event and the approval event.
+There is no per-stage Approve gate; the user retains the ability to
+invoke `Stop ticket` if they disagree.
+
 **Stage-to-session mapping.**
 
 - On stage transition to `active`, agentd:
@@ -586,15 +641,88 @@ referenced skill's SKILL.md) at session start. The combined prompt is the
 session's system prompt. This is the only place per-workflow customization
 of agent behavior is supported in v0.
 
-**One stage active at a time invariant.** v0 enforces strict
-serialization within a ticket. The UI composer is disabled and a non-active
-stage's session does not exist. The current stage is recorded in the
-`tickets.current_stage_id` column.
+**Invariants.**
+
+1. **One current stage at a time.** While the ticket is `running`,
+   exactly one stage in status `active` / `awaiting-approval` /
+   `paused-for-backtrack` is pointed at by `tickets.current_stage_id`.
+   Other stages are `done` (already executed, possibly more than once via
+   backtrack) or `pending` (not yet reached). The UI composer always
+   targets `current_stage_id`'s backing session; non-current stages have
+   no live session.
+2. **Stages drive the ticket; ticket only writes back on Stop.** All
+   ticket transitions except `running → stopped` are derived from stage
+   transitions. The ticket never modifies stage state except on
+   `Stop ticket`, which forcibly terminates the current stage's session
+   and freezes stage statuses.
+3. **Backtracks mutate stage rows, not duplicate them.** A stage retains
+   the same `stage_id` whether it has been entered once or repeatedly via
+   backtrack. Only `status`, `session_id`, and (on each successful
+   re-handoff) `handoff_message` are overwritten. The audit trail of
+   entries, handoffs, approvals, and backtracks lives in `stage_events`
+   (one append-only row per event kind: `stage_started`,
+   `handoff_triggered`, `synthesis_emitted`, `approved`,
+   `handback_triggered`, `resumed`, `failed`).
+4. **Terminal-status semantics.**
+   - A `done` ticket has every stage in status `done`.
+   - A `failed` ticket has at least one stage in status `failed`.
+   - A `stopped` ticket's stages are frozen at whatever statuses they
+     held at stop time; no constraint on their combination.
 
 **Cost and diff scope.** A ticket's aggregate cost is the sum of its
 stages' session costs (mirrors v1 R10 per session). The diff view is
 sourced from the ticket's workspace volume, not per session, so it
 reflects all stages' cumulative changes.
+
+**Worked example: happy path (bug workflow).** Three stages
+(`bug-investigator` → `bug-planner` → `bug-executor`), the third with
+`approval_required: false`. Both state machines in lockstep:
+
+| # | Event | Ticket | Stage 1 (Inv.) | Stage 2 (Pln.) | Stage 3 (Exc.) |
+|---|---|---|---|---|---|
+| 0 | "Start ticket" clicked | `pending` | `pending` | `pending` | `pending` |
+| 1 | Workspace materialized; Stage 1 session spawns | **`running`** | **`active`** | `pending` | `pending` |
+| 2 | User chats with investigator | `running` | `active` | `pending` | `pending` |
+| 3 | "Hand off to Planner" → auto-prompt → agent emits synthesis | `running` | **`awaiting-approval`** | `pending` | `pending` |
+| 4 | User pushes back; agent revises (new candidate synthesis) | `running` | `awaiting-approval` | `pending` | `pending` |
+| 5 | "Approve & continue" | `running` | **`done`** | **`active`** | `pending` |
+| 6 | User chats with planner | `running` | `done` | `active` | `pending` |
+| 7 | "Hand off to Executor" → approve | `running` | `done` | **`done`** | **`active`** |
+| 8 | Executor commits, runs tests, opens PR, emits handoff. `approval_required: false` collapses `awaiting-approval` into immediate `done` | **`done`** | `done` | `done` | **`done`** |
+
+**Worked example: backtrack path.** Continuing from step 5 above
+(Stage 1 `done`, Stage 2 `active`):
+
+| # | Event | Ticket | Stage 1 | Stage 2 |
+|---|---|---|---|---|
+| 5 | (Stage 2 started) | `running` | `done` | `active` |
+| 6a | "◂ Hand back to Investigator" with a question | `running` | **`active`** | **`paused-for-backtrack`** |
+| 6b | Stage 1's session respawns, seeded with prior `handoff_message` + the question; user chats | `running` | `active` | `paused-for-backtrack` |
+| 6c | "Hand off to Planner" clicked again → auto-prompt → revised synthesis | `running` | **`awaiting-approval`** | `paused-for-backtrack` |
+| 6d | "Approve & continue" on revised synthesis | `running` | **`done`** | **`active`** |
+
+Notes on backtrack semantics:
+
+- Hand-back flips Stage 1 from `done` back to `active` on the **same**
+  `stage_id` (per Invariant 3) and Stage 2 to `paused-for-backtrack`.
+  Stage 2's session is stopped.
+- v0 chooses stop-and-respawn over pause-and-resume (§10.1) — Stage 1's
+  prior session is gone; a fresh one is spawned.
+- On the second forward handoff, Stage 1's `handoff_message` is
+  overwritten with the revised synthesis. Stage 2 cycles
+  `paused-for-backtrack → active` and its session is respawned fresh,
+  seeded with the *new* `handoff_message`.
+- The ticket stays `running` the entire time. Backtracks never change
+  ticket status.
+
+**Termination paths.** Cross-cutting transitions that can interrupt either
+worked example:
+
+| Event | Ticket transition | Current stage transition |
+|---|---|---|
+| User clicks "Stop ticket" | → `stopped` | session stopped; stage status frozen at its current value |
+| Workspace setup fails before any stage active | `pending → failed` | n/a (no stage ever ran) |
+| Stage session crashes or agent emits unrecoverable error | → `failed` | → `failed` |
 
 **Acceptance criteria.**
 
