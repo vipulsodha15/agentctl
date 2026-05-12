@@ -780,6 +780,8 @@ function applyEvent(state: State, e: WireEvent): State {
   return next;
 }
 
+const SIDE_PANEL_COLLAPSED_KEY = "agentctl.sidePanel.collapsed";
+
 export function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -788,6 +790,21 @@ export function SessionDetail() {
   const [endBusy, setEndBusy] = useState(false);
   const [costRefreshKey, setCostRefreshKey] = useState(0);
   const [filter, setFilter] = useState<TranscriptFilter>("all");
+  const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDE_PANEL_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDE_PANEL_COLLAPSED_KEY, sideCollapsed ? "1" : "0");
+    } catch {
+      // ignore — storage may be disabled
+    }
+  }, [sideCollapsed]);
 
   // Initial fetch for session metadata (name, status before snapshot lands).
   useEffect(() => {
@@ -874,7 +891,9 @@ export function SessionDetail() {
   if (!id) return null;
 
   return (
-    <section className="session-detail">
+    <section
+      className={`session-detail${sideCollapsed ? " side-collapsed" : ""}`}
+    >
       <div className="session-header">
         <span className="breadcrumb">
           <Link to="/sessions">Sessions</Link>
@@ -969,11 +988,46 @@ export function SessionDetail() {
         )}
       </div>
 
-      <aside className="side">
-        <McpPanel mcps={state.mcps} />
-        <CostPanel sessionId={id} refreshKey={costRefreshKey} />
+      <aside className={`side${sideCollapsed ? " collapsed" : ""}`}>
+        <button
+          type="button"
+          className="side-toggle"
+          onClick={() => setSideCollapsed((v) => !v)}
+          aria-label={sideCollapsed ? "Expand side panel" : "Collapse side panel"}
+          aria-expanded={!sideCollapsed}
+          title={sideCollapsed ? "Expand side panel" : "Collapse side panel"}
+        >
+          <SideChevron direction={sideCollapsed ? "left" : "right"} />
+        </button>
+        {!sideCollapsed && (
+          <>
+            <McpPanel mcps={state.mcps} />
+            <CostPanel sessionId={id} refreshKey={costRefreshKey} />
+          </>
+        )}
       </aside>
     </section>
+  );
+}
+
+function SideChevron({ direction }: { direction: "left" | "right" }) {
+  return (
+    <svg
+      className="chevron-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {direction === "left" ? (
+        <polyline points="15 6 9 12 15 18" />
+      ) : (
+        <polyline points="9 6 15 12 9 18" />
+      )}
+    </svg>
   );
 }
 
