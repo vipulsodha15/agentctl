@@ -54,6 +54,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	if sec, err := secrets.Load(opts.Layout.SecretsFile); err == nil {
 		log.RegisterSecret(sec.AnthropicAPIKey)
+		log.RegisterSecret(sec.AnthropicAuthToken)
 		log.RegisterSecret(sec.GitHubPAT)
 	}
 	if tok, err := secrets.ReadWebToken(opts.Layout.WebTokenFile); err == nil {

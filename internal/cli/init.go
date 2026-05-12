@@ -31,16 +31,18 @@ import (
 )
 
 type initFlags struct {
-	anthropicKey   string
-	githubPAT      string
-	noImportSkills bool
-	importSkills   bool
-	claudePath     string
-	foreground     bool
-	resetToken     string
-	resetWebToken  bool
-	repair         bool
-	skipBuild      bool
+	anthropicKey       string
+	anthropicBaseURL   string
+	anthropicAuthToken string
+	githubPAT          string
+	noImportSkills     bool
+	importSkills       bool
+	claudePath         string
+	foreground         bool
+	resetToken         string
+	resetWebToken      bool
+	repair             bool
+	skipBuild          bool
 }
 
 func runInit(ctx context.Context, env *Env, args []string) int {
@@ -48,6 +50,8 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	fs.SetOutput(env.Stderr)
 	var f initFlags
 	fs.StringVar(&f.anthropicKey, "anthropic-key", "", "use this Anthropic API key (skip prompt)")
+	fs.StringVar(&f.anthropicBaseURL, "anthropic-base-url", "", "use a custom Anthropic-compatible endpoint (e.g. an LLM gateway); requires --anthropic-auth-token")
+	fs.StringVar(&f.anthropicAuthToken, "anthropic-auth-token", "", "bearer token sent as Authorization to --anthropic-base-url (alternative to --anthropic-key)")
 	fs.StringVar(&f.githubPAT, "github-pat", "", "use this GitHub PAT (skip prompt)")
 	fs.BoolVar(&f.noImportSkills, "no-import-claude-skills", false, "skip the Claude Code skills import step")
 	fs.BoolVar(&f.importSkills, "import-claude-skills", false, "force the Claude Code skills import step")
@@ -62,7 +66,9 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl init [flags]")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "First-time setup: verifies Docker, builds the session base image,")
-		fmt.Fprintln(env.Stderr, "prompts for ANTHROPIC_API_KEY and GITHUB_PAT, ensures perms on")
+		fmt.Fprintln(env.Stderr, "prompts for an Anthropic credential (either ANTHROPIC_API_KEY against")
+		fmt.Fprintln(env.Stderr, "api.anthropic.com, or ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN against")
+		fmt.Fprintln(env.Stderr, "a provisioned gateway) and GITHUB_PAT, ensures perms on")
 		fmt.Fprintln(env.Stderr, "~/.config/agentctl, seeds the MCP registry, installs the user service,")
 		fmt.Fprintln(env.Stderr, "and waits for /healthz to come up. Idempotent: re-run to repair drift.")
 		fmt.Fprintln(env.Stderr, "")
@@ -300,27 +306,8 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 	skipAnthropic := os.Getenv("AGENTCTL_SKIP_ANTHROPIC_VALIDATE") == "1"
 	skipGitHub := os.Getenv("AGENTCTL_SKIP_GITHUB_PAT_CHECK") == "1"
 
-	if f.anthropicKey != "" {
-		if !skipAnthropic {
-			if err := validateAnthropic(f.anthropicKey); err != nil {
-				return secrets.Secrets{}, err
-			}
-		}
-		out.AnthropicAPIKey = f.anthropicKey
-	} else if out.AnthropicAPIKey == "" || f.resetToken == "anthropic" {
-		v, err := promptSecret(env, "ANTHROPIC_API_KEY: ")
-		if err != nil {
-			return secrets.Secrets{}, err
-		}
-		if v == "" {
-			return secrets.Secrets{}, fmt.Errorf("ANTHROPIC_API_KEY required (use --anthropic-key)")
-		}
-		if !skipAnthropic {
-			if err := validateAnthropic(v); err != nil {
-				return secrets.Secrets{}, err
-			}
-		}
-		out.AnthropicAPIKey = v
+	if err := resolveAnthropicCreds(&out, env, f, skipAnthropic); err != nil {
+		return secrets.Secrets{}, err
 	}
 
 	if f.githubPAT != "" {
@@ -575,6 +562,135 @@ func indexByte(b []byte, c byte) int {
 		}
 	}
 	return -1
+}
+
+func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipValidate bool) error {
+	if f.anthropicBaseURL != "" || f.anthropicAuthToken != "" {
+		if f.anthropicBaseURL == "" || f.anthropicAuthToken == "" {
+			return fmt.Errorf("--anthropic-base-url and --anthropic-auth-token must be set together")
+		}
+		if f.anthropicKey != "" {
+			return fmt.Errorf("--anthropic-key cannot be combined with --anthropic-base-url/--anthropic-auth-token")
+		}
+		baseURL := normalizeBaseURL(f.anthropicBaseURL)
+		if !skipValidate {
+			if err := validateAnthropicCustom(baseURL, f.anthropicAuthToken); err != nil {
+				return err
+			}
+		}
+		out.AnthropicBaseURL = baseURL
+		out.AnthropicAuthToken = f.anthropicAuthToken
+		out.AnthropicAPIKey = ""
+		return nil
+	}
+
+	if f.anthropicKey != "" {
+		if !skipValidate {
+			if err := validateAnthropic(f.anthropicKey); err != nil {
+				return err
+			}
+		}
+		out.AnthropicAPIKey = f.anthropicKey
+		out.AnthropicBaseURL = ""
+		out.AnthropicAuthToken = ""
+		return nil
+	}
+
+	hasAnyCred := out.AnthropicAPIKey != "" || out.AnthropicAuthToken != ""
+	if hasAnyCred && f.resetToken != "anthropic" {
+		return nil
+	}
+
+	useCustom, err := promptYesNo(env, "Use a custom Anthropic-compatible endpoint (proxy / LLM gateway)? [y/N]: ", false)
+	if err != nil {
+		return err
+	}
+	if useCustom {
+		baseURL, err := promptSecret(env, "ANTHROPIC_BASE_URL (e.g. https://gateway.example.com): ")
+		if err != nil {
+			return err
+		}
+		if baseURL == "" {
+			return fmt.Errorf("ANTHROPIC_BASE_URL required (use --anthropic-base-url)")
+		}
+		token, err := promptSecret(env, "ANTHROPIC_AUTH_TOKEN: ")
+		if err != nil {
+			return err
+		}
+		if token == "" {
+			return fmt.Errorf("ANTHROPIC_AUTH_TOKEN required (use --anthropic-auth-token)")
+		}
+		baseURL = normalizeBaseURL(baseURL)
+		if !skipValidate {
+			if err := validateAnthropicCustom(baseURL, token); err != nil {
+				return err
+			}
+		}
+		out.AnthropicBaseURL = baseURL
+		out.AnthropicAuthToken = token
+		out.AnthropicAPIKey = ""
+		return nil
+	}
+
+	v, err := promptSecret(env, "ANTHROPIC_API_KEY: ")
+	if err != nil {
+		return err
+	}
+	if v == "" {
+		return fmt.Errorf("ANTHROPIC_API_KEY required (use --anthropic-key)")
+	}
+	if !skipValidate {
+		if err := validateAnthropic(v); err != nil {
+			return err
+		}
+	}
+	out.AnthropicAPIKey = v
+	out.AnthropicBaseURL = ""
+	out.AnthropicAuthToken = ""
+	return nil
+}
+
+func normalizeBaseURL(u string) string {
+	return strings.TrimRight(strings.TrimSpace(u), "/")
+}
+
+func promptYesNo(env *Env, prompt string, def bool) (bool, error) {
+	v, err := promptSecret(env, prompt)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return def, nil
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("answer y or n (got %q)", v)
+	}
+}
+
+func validateAnthropicCustom(baseURL, token string) error {
+	req, err := http.NewRequest("GET", baseURL+"/v1/models", nil)
+	if err != nil {
+		return fmt.Errorf("anthropic base url: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("anthropic endpoint %s: %w", baseURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("anthropic auth token rejected by %s (status %d)", baseURL, resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("anthropic endpoint %s status %d", baseURL, resp.StatusCode)
+	}
+	return nil
 }
 
 func validateAnthropic(key string) error {

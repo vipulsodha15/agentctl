@@ -81,6 +81,69 @@ func TestCheckSecretsFreshFailAnthropic(t *testing.T) {
 	}
 }
 
+func TestCheckSecretsFreshCustomEndpointOK(t *testing.T) {
+	t.Setenv(envSkipAnthropic, "")
+	t.Setenv(envSkipGitHub, "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(path, secrets.Secrets{
+		V:                  1,
+		AnthropicBaseURL:   "https://gateway.example.com",
+		AnthropicAuthToken: "bearer-xyz",
+		GitHubPAT:          "ghp_test",
+		GitHubPATKind:      "classic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	doer := &fakeDoer{statusByURL: map[string]int{
+		"https://gateway.example.com/v1/models": 200,
+		"https://api.github.com/user":           200,
+	}}
+	c := checkSecretsFresh(path, doer)
+	if c.Status != StatusOK {
+		t.Fatalf("expected ok, got %s: %s / %s", c.Status, c.Message, c.Detail)
+	}
+	hitGateway := false
+	for _, u := range doer.calls {
+		if u == "https://gateway.example.com/v1/models" {
+			hitGateway = true
+		}
+		if u == "https://api.anthropic.com/v1/models" {
+			t.Errorf("custom endpoint mode should not probe api.anthropic.com; got %v", doer.calls)
+		}
+	}
+	if !hitGateway {
+		t.Errorf("expected probe of custom endpoint; got %v", doer.calls)
+	}
+}
+
+func TestCheckSecretsFreshCustomEndpointRejected(t *testing.T) {
+	t.Setenv(envSkipAnthropic, "")
+	t.Setenv(envSkipGitHub, "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(path, secrets.Secrets{
+		V:                  1,
+		AnthropicBaseURL:   "https://gateway.example.com",
+		AnthropicAuthToken: "bearer-bad",
+		GitHubPAT:          "ghp_test",
+		GitHubPATKind:      "classic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	doer := &fakeDoer{statusByURL: map[string]int{
+		"https://gateway.example.com/v1/models": 401,
+		"https://api.github.com/user":           200,
+	}}
+	c := checkSecretsFresh(path, doer)
+	if c.Status != StatusFail {
+		t.Fatalf("expected fail, got %s", c.Status)
+	}
+	if !strings.Contains(c.Detail, "anthropic") {
+		t.Errorf("expected anthropic in detail; got %q", c.Detail)
+	}
+}
+
 func TestCheckSecretsFreshSkippedBoth(t *testing.T) {
 	t.Setenv(envSkipAnthropic, "1")
 	t.Setenv(envSkipGitHub, "1")

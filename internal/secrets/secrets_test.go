@@ -36,6 +36,30 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadCustomEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.json")
+	s := Secrets{
+		AnthropicBaseURL:   "https://gateway.example.com",
+		AnthropicAuthToken: "bearer-xyz",
+		GitHubPAT:          "ghp_AAAAAAAAAAAAAAAAAAAAA",
+		GitHubPATKind:      "classic",
+	}
+	if err := Save(path, s); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.AnthropicAPIKey != "" {
+		t.Errorf("expected empty api key in custom-endpoint mode, got %q", got.AnthropicAPIKey)
+	}
+	if got.AnthropicBaseURL != s.AnthropicBaseURL || got.AnthropicAuthToken != s.AnthropicAuthToken {
+		t.Errorf("base url/auth token round-trip mismatch")
+	}
+}
+
 func TestGenerateAndReadWebToken(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "web_token")
