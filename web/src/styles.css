@@ -313,8 +313,26 @@ textarea {
   gap: 12px;
   margin-bottom: 20px;
 }
-.page-header h2 {
+.page-header h2,
+.page-header h3 {
   flex: 1;
+  margin: 0;
+}
+.settings-section + .settings-section {
+  margin-top: 32px;
+}
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--c-surface-2);
+  color: var(--c-text-muted, #888);
+  border: 1px solid var(--c-border);
+}
+.muted {
+  color: var(--c-text-muted, #888);
+  font-size: 12px;
 }
 
 /* === Auth gate ==================================================== */

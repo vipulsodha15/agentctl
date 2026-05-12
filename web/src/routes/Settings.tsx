@@ -1,8 +1,29 @@
 import { useEffect, useState } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
-import type { AddMcpRequest, McpEntry, UpdateMcpRequest } from "../types";
+import type {
+  AddMcpRequest,
+  AddSkillRequest,
+  McpEntry,
+  SkillEntry,
+  UpdateMcpRequest,
+} from "../types";
 
-interface FormState {
+export function Settings() {
+  return (
+    <section className="page">
+      <div className="page-header">
+        <h2>Settings</h2>
+      </div>
+      <p className="warning">
+        Changes apply only to future sessions; running sessions are unaffected.
+      </p>
+      <McpSection />
+      <SkillsSection />
+    </section>
+  );
+}
+
+interface McpFormState {
   mode: "add" | "edit";
   name: string;
   url: string;
@@ -13,7 +34,7 @@ interface FormState {
   auth_config_json: string;
 }
 
-const EMPTY_FORM: FormState = {
+const EMPTY_MCP_FORM: McpFormState = {
   mode: "add",
   name: "",
   url: "",
@@ -24,10 +45,10 @@ const EMPTY_FORM: FormState = {
   auth_config_json: "",
 };
 
-export function Settings() {
+function McpSection() {
   const [mcps, setMcps] = useState<McpEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState<FormState | null>(null);
+  const [form, setForm] = useState<McpFormState | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function load() {
@@ -36,11 +57,7 @@ export function Settings() {
       setMcps(r.mcps ?? []);
       setError(null);
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? `${err.code ?? err.status}: ${err.message}`
-          : String(err),
-      );
+      setError(formatErr(err));
     }
   }
 
@@ -49,7 +66,7 @@ export function Settings() {
   }, []);
 
   function startAdd() {
-    setForm({ ...EMPTY_FORM });
+    setForm({ ...EMPTY_MCP_FORM });
   }
 
   function startEdit(entry: McpEntry) {
@@ -81,11 +98,7 @@ export function Settings() {
       });
       await load();
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? `${err.code ?? err.status}: ${err.message}`
-          : String(err),
-      );
+      setError(formatErr(err));
     } finally {
       setBusy(false);
     }
@@ -142,16 +155,13 @@ export function Settings() {
   }
 
   return (
-    <section className="page">
+    <div className="settings-section">
       <div className="page-header">
-        <h2>Settings · MCPs</h2>
+        <h3>MCPs</h3>
         <button className="primary" onClick={startAdd} disabled={busy}>
           + Add MCP
         </button>
       </div>
-      <p className="warning">
-        Changes apply only to future sessions; running sessions are unaffected.
-      </p>
       {error && <div className="error-text">{error}</div>}
       {mcps === null ? (
         <div className="empty">Loading…</div>
@@ -211,9 +221,7 @@ export function Settings() {
             <input
               type="text"
               value={form.name}
-              onChange={(e) =>
-                setForm({ ...form, name: e.target.value })
-              }
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
               disabled={form.mode === "edit"}
             />
           </div>
@@ -300,6 +308,237 @@ export function Settings() {
           </div>
         </form>
       )}
-    </section>
+    </div>
   );
+}
+
+interface SkillFormState {
+  name: string;
+  description: string;
+  skill_md: string;
+  force: boolean;
+}
+
+const SKILL_TEMPLATE = `---
+name: my-skill
+description: What this skill does and when Claude should use it.
+---
+
+## Instructions
+
+Step-by-step guidance Claude follows when this skill runs.
+`;
+
+const EMPTY_SKILL_FORM: SkillFormState = {
+  name: "",
+  description: "",
+  skill_md: SKILL_TEMPLATE,
+  force: false,
+};
+
+function SkillsSection() {
+  const [skills, setSkills] = useState<SkillEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useState<SkillFormState | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      const r = await apiJson<{ skills: SkillEntry[] }>("/v1/skills");
+      setSkills(r.skills ?? []);
+      setError(null);
+    } catch (err) {
+      setError(formatErr(err));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  function startAdd() {
+    setForm({ ...EMPTY_SKILL_FORM });
+  }
+
+  async function onRemove(entry: SkillEntry) {
+    if (
+      !window.confirm(
+        `Remove custom skill "${entry.name}"? Running sessions are unaffected.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiJson(`/v1/skills/${encodeURIComponent(entry.name)}`, {
+        method: "DELETE",
+      });
+      await load();
+    } catch (err) {
+      setError(formatErr(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSubmitForm(e: React.FormEvent) {
+    e.preventDefault();
+    if (!form) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const name = form.name.trim();
+      if (!name) throw new Error("name is required");
+      const skill_md = form.skill_md.trim();
+      const description = form.description.trim();
+      if (!skill_md && !description) {
+        throw new Error("provide SKILL.md content or a description");
+      }
+      const req: AddSkillRequest = {
+        name,
+        description: description || undefined,
+        skill_md: skill_md || undefined,
+        force: form.force,
+      };
+      await apiJson("/v1/skills", { method: "POST", ...jsonBody(req) });
+      setForm(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="settings-section" style={{ marginTop: 32 }}>
+      <div className="page-header">
+        <h3>Skills</h3>
+        <button className="primary" onClick={startAdd} disabled={busy}>
+          + Add skill
+        </button>
+      </div>
+      {error && <div className="error-text">{error}</div>}
+      {skills === null ? (
+        <div className="empty">Loading…</div>
+      ) : skills.length === 0 ? (
+        <div className="empty">No skills installed.</div>
+      ) : (
+        <table className="session-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Source</th>
+              <th>Description</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {skills.map((s) => (
+              <tr key={s.name}>
+                <td>
+                  <strong>{s.name}</strong>
+                  {s.overrides && (
+                    <span className="badge" style={{ marginLeft: 6 }}>
+                      overrides built-in
+                    </span>
+                  )}
+                </td>
+                <td>{s.source ?? "—"}</td>
+                <td>{s.description}</td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  {s.source === "custom" ? (
+                    <button
+                      className="danger"
+                      onClick={() => onRemove(s)}
+                      disabled={busy}
+                    >
+                      Remove
+                    </button>
+                  ) : (
+                    <span className="muted">read-only</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {form && (
+        <form
+          onSubmit={onSubmitForm}
+          className="form-grid"
+          style={{ marginTop: 16 }}
+        >
+          <h3>Add skill</h3>
+          <div className="field">
+            <label>Name</label>
+            <input
+              type="text"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="my-skill"
+            />
+          </div>
+          <div className="field">
+            <label>Description (used only if SKILL.md is empty)</label>
+            <input
+              type="text"
+              value={form.description}
+              onChange={(e) =>
+                setForm({ ...form, description: e.target.value })
+              }
+              placeholder="What this skill does and when to use it."
+            />
+          </div>
+          <div className="field">
+            <label>
+              SKILL.md (full file, with <code>---</code> YAML front matter)
+            </label>
+            <textarea
+              rows={16}
+              value={form.skill_md}
+              onChange={(e) =>
+                setForm({ ...form, skill_md: e.target.value })
+              }
+              spellCheck={false}
+              style={{ fontFamily: "monospace" }}
+            />
+          </div>
+          <div className="field">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={form.force}
+                onChange={(e) =>
+                  setForm({ ...form, force: e.target.checked })
+                }
+              />
+              <span>Overwrite if a skill with this name already exists</span>
+            </label>
+          </div>
+          <div className="toolbar">
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? "Saving…" : "Add"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setForm(null)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function formatErr(err: unknown): string {
+  if (err instanceof ApiError) {
+    return `${err.code ?? err.status}: ${err.message}`;
+  }
+  return String(err);
 }
