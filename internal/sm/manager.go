@@ -2,6 +2,7 @@ package sm
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ type Manager interface {
 	ExportPatch(ctx context.Context, sessionID string, req DiffRequest) (DiffStream, error)
 	ExportPush(ctx context.Context, sessionID string, req PushRequest) (PushResult, error)
 	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
+	Rehydrate(ctx context.Context) error
 }
 
 type Stream = fan.Stream
@@ -769,6 +771,170 @@ func (m *manager) List(_ context.Context) ([]proto.SessionSummary, error) {
 	}
 	m.mu.Unlock()
 	return out, nil
+}
+
+// Rehydrate reattaches in-memory actors for every active session row in the
+// store. agentd's recovery pass updates the sessions table but never rebuilt
+// the actor map, so on every daemon restart `agentctl ls` and the web UI
+// looked empty even though the rows (and the bind-mounted /work volumes)
+// survived. Each rehydrated session lands in `stopped` state: the on-disk
+// workspace is preserved, and the next Send auto-Restarts the container via
+// the path added in commit 2bae1c8.
+//
+// Sessions left in `running` (recovery's Adopt-succeeds case) are normalized
+// to `stopped` here — the live shim's control conn isn't reattached to the
+// fresh actor, so the orphan container will be torn down by the user's first
+// Restart (which Stop+Removes the snapshotted container_id).
+func (m *manager) Rehydrate(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+	rows, err := m.store.DB().QueryContext(ctx, `SELECT id, name, status, created_at, last_activity_at, container_id, image_id, network_id, model, mem_limit_bytes, cpu_limit_cores, mcp_set_json, repos_json, session_token, last_error
+        FROM sessions
+        WHERE status IN ('starting','running','stopped','error')`)
+	if err != nil {
+		return fmt.Errorf("rehydrate: query sessions: %w", err)
+	}
+	type rehydrateRow struct {
+		id, name, status, createdAt, lastActivityAt, imageID, model, mcpSetJSON, reposJSON, sessionToken string
+		containerID, networkID, lastError                                                                sql.NullString
+		memLimitBytes                                                                                    int64
+		cpuLimitCores                                                                                    float64
+	}
+	var batch []rehydrateRow
+	for rows.Next() {
+		var r rehydrateRow
+		if err := rows.Scan(&r.id, &r.name, &r.status, &r.createdAt, &r.lastActivityAt, &r.containerID, &r.imageID, &r.networkID, &r.model, &r.memLimitBytes, &r.cpuLimitCores, &r.mcpSetJSON, &r.reposJSON, &r.sessionToken, &r.lastError); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("rehydrate: scan: %w", err)
+		}
+		batch = append(batch, r)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("rehydrate: rows: %w", err)
+	}
+	_ = rows.Close()
+
+	pat := ""
+	if m.opts.SecretsPath != "" {
+		if sec, serr := secrets.Load(m.opts.SecretsPath); serr == nil {
+			pat = sec.GitHubPAT
+		}
+	}
+
+	rehydrated := 0
+	for _, r := range batch {
+		dir := filepath.Join(m.opts.SessionsDir, r.id)
+		if _, err := os.Stat(dir); err != nil {
+			m.logger.Warn("session.rehydrate_skipped",
+				slog.String("session_id", r.id),
+				slog.String("reason", "session_dir_missing"),
+				slog.String("dir", dir))
+			continue
+		}
+		createdAt, _ := time.Parse(time.RFC3339Nano, r.createdAt)
+		lastActivityAt, _ := time.Parse(time.RFC3339Nano, r.lastActivityAt)
+		var mcpNames []string
+		if r.mcpSetJSON != "" {
+			_ = json.Unmarshal([]byte(r.mcpSetJSON), &mcpNames)
+		}
+		if mcpNames == nil {
+			mcpNames = []string{}
+		}
+		var reposState []proto.RepoState
+		if r.reposJSON != "" {
+			_ = json.Unmarshal([]byte(r.reposJSON), &reposState)
+		}
+		resolvedEntries := m.resolveMCPs(ctx, mcpNames, nil)
+
+		logger, err := agentlog.NewSessionLogger(agentlog.SessionLogOptions{Dir: dir})
+		if err != nil {
+			m.logger.Warn("session.rehydrate_log_failed",
+				slog.String("session_id", r.id),
+				slog.String("error", err.Error()))
+			continue
+		}
+
+		agentlog.RegisterSecret(r.sessionToken)
+
+		summary := proto.SessionSummary{
+			ID:             r.id,
+			Name:           r.name,
+			Status:         "stopped",
+			CreatedAt:      createdAt,
+			LastActivityAt: lastActivityAt,
+			ImageID:        r.imageID,
+			Model:          r.model,
+			MCPs:           mcpNames,
+			Repos:          repoNames(reposState),
+			MemLimitBytes:  r.memLimitBytes,
+			CPULimitCores:  r.cpuLimitCores,
+		}
+
+		a := newActor(actorOptions{
+			ID:              r.id,
+			Summary:         summary,
+			SessionDir:      dir,
+			Hub:             m.hub,
+			Logger:          logger.Logger(),
+			DaemonLogger:    m.logger,
+			SessionLogger:   logger,
+			Now:             m.now,
+			SnapshotTimeout: m.opts.SnapshotTimeout,
+			ShutdownGrace:   m.opts.ShutdownGrace,
+			Containers:      m.opts.Containers,
+			Control:         m.opts.Control,
+			SessionToken:    r.sessionToken,
+			Store:           m.store,
+			Repos:           reposState,
+			ResolvedMCPs:    resolvedEntries,
+			GitHubPAT:       pat,
+			Usage:           m.opts.Usage,
+		})
+		if r.containerID.Valid {
+			a.containerID = r.containerID.String
+		}
+		if r.networkID.Valid {
+			a.networkID = r.networkID.String
+		}
+		if r.lastError.Valid {
+			a.lastError = r.lastError.String
+		}
+
+		if r.status != "stopped" {
+			if _, err := m.store.DB().ExecContext(ctx,
+				`UPDATE sessions SET status='stopped' WHERE id=?`, r.id); err != nil {
+				m.logger.Warn("session.rehydrate_status_update_failed",
+					slog.String("session_id", r.id),
+					slog.String("error", err.Error()))
+			}
+			detail, _ := json.Marshal(map[string]string{"from": r.status})
+			_, _ = m.store.DB().ExecContext(ctx,
+				`INSERT INTO session_lifecycle (session_id, at, event, detail_json) VALUES (?, ?, 'rehydrated', ?)`,
+				r.id, m.now().Format(time.RFC3339Nano), string(detail))
+		}
+
+		m.mu.Lock()
+		if _, exists := m.actors[r.id]; exists {
+			m.mu.Unlock()
+			_ = logger.Close()
+			continue
+		}
+		m.actors[r.id] = a
+		m.mu.Unlock()
+		a.start()
+		rehydrated++
+
+		m.logger.Info("session.rehydrated",
+			slog.String("session_id", r.id),
+			slog.String("name", r.name),
+			slog.String("prev_status", r.status))
+	}
+	m.logger.Info("manager.rehydrate.done",
+		slog.Int("found", len(batch)),
+		slog.Int("rehydrated", rehydrated))
+	return nil
 }
 
 func (m *manager) Get(_ context.Context, sessionID string) (proto.SessionDetail, error) {

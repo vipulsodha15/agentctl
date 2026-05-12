@@ -162,6 +162,10 @@ func Run(ctx context.Context, opts Options) error {
 		readoptSessions(ctx, manager, ccAdapt, recoverLog, report.Adoptions)
 	}
 
+	if err := manager.Rehydrate(ctx); err != nil {
+		logger.Warn("manager.rehydrate_failed", slog.String("error", err.Error()))
+	}
+
 	logStream := &log.SessionLogStreamer{SessionsDir: opts.Layout.SessionsDir}
 
 	var containerLogStream socksrv.ContainerLogStreamer
