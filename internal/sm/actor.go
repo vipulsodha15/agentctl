@@ -2,6 +2,7 @@ package sm
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -126,10 +127,11 @@ type actor struct {
 	networkID              string
 	networkName            string
 	lastError              string
+	nextMsgSeq             int64
 }
 
 func newActor(opts actorOptions) *actor {
-	return &actor{
+	a := &actor{
 		opts:            opts,
 		mailbox:         make(chan mboxItem, mailboxSize),
 		stopCh:          make(chan struct{}),
@@ -141,6 +143,19 @@ func newActor(opts actorOptions) *actor {
 		pendingDiffs:    map[string]*pendingDiff{},
 		pendingPush:     map[string]chan ControlFrame{},
 	}
+	// Seed the monotonic message-record seq from the DB so reattaches and
+	// daemon restarts continue past the last persisted record. Empty/new
+	// sessions naturally start at 0.
+	if opts.Store != nil {
+		var maxSeq sql.NullInt64
+		_ = opts.Store.DB().QueryRow(
+			`SELECT MAX(seq) FROM messages WHERE session_id = ?`, opts.ID,
+		).Scan(&maxSeq)
+		if maxSeq.Valid {
+			a.nextMsgSeq = maxSeq.Int64 + 1
+		}
+	}
+	return a
 }
 
 func (a *actor) start() {
@@ -436,6 +451,8 @@ func (a *actor) handleControlFrame(fr ControlFrame) {
 		a.broadcast(proto.EventSessionError, fr.Data)
 	case RuntimeSnapshot:
 		a.routeSnapshotReply(fr)
+	case RuntimeMessageRecord:
+		a.handleMessageRecord(fr)
 	case RuntimeDiffChunk:
 		a.routeDiffChunk(fr)
 	case RuntimeDiffEnd:
@@ -575,52 +592,136 @@ func (a *actor) routeSnapshotReply(fr ControlFrame) {
 	}
 }
 
+// loadConversationFromStore returns the stored JSONL records for this
+// session as a raw JSON array. Returns (nil, nil) when the session has no
+// mirrored history yet — the caller should fall back to asking the shim.
+func (a *actor) loadConversationFromStore() (json.RawMessage, error) {
+	if a.opts.Store == nil {
+		return nil, nil
+	}
+	rows, err := a.opts.Store.DB().Query(
+		`SELECT record_json FROM messages WHERE session_id = ? ORDER BY seq`,
+		a.opts.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	buf := []byte{'['}
+	first := true
+	for rows.Next() {
+		var rec string
+		if err := rows.Scan(&rec); err != nil {
+			return nil, err
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, rec...)
+		first = false
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if first {
+		return nil, nil
+	}
+	buf = append(buf, ']')
+	return buf, nil
+}
+
+// handleMessageRecord persists a single SDK JSONL record the shim shipped
+// after a turn finished. The dedup index on (session_id, record_uuid) makes
+// re-sends after a shim reconnect a no-op, so we don't have to track which
+// records the daemon has already seen on the shim side.
+func (a *actor) handleMessageRecord(fr ControlFrame) {
+	if a.opts.Store == nil {
+		return
+	}
+	var payload struct {
+		Record json.RawMessage `json:"record"`
+	}
+	if err := json.Unmarshal(fr.Data, &payload); err != nil || len(payload.Record) == 0 {
+		a.opts.Logger.Warn("control.malformed_message_record", slog.String("session_id", a.opts.ID))
+		return
+	}
+	var uuidProbe struct {
+		UUID string `json:"uuid"`
+	}
+	_ = json.Unmarshal(payload.Record, &uuidProbe)
+	var uuidArg any
+	if uuidProbe.UUID != "" {
+		uuidArg = uuidProbe.UUID
+	}
+	seq := a.nextMsgSeq
+	res, err := a.opts.Store.DB().Exec(
+		`INSERT OR IGNORE INTO messages (session_id, seq, received_at, record_uuid, record_json)
+		 VALUES (?, ?, ?, ?, ?)`,
+		a.opts.ID, seq, a.opts.Now().Format(time.RFC3339Nano), uuidArg, string(payload.Record),
+	)
+	if err != nil {
+		a.opts.Logger.Warn("control.message_record_insert_failed",
+			slog.String("session_id", a.opts.ID), slog.String("error", err.Error()))
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		a.nextMsgSeq = seq + 1
+	}
+}
+
 func (a *actor) snapshotEvent(ctx context.Context) (*proto.Event, error) {
 	conv := json.RawMessage(`[]`)
-	a.mu.Lock()
-	conn := a.control
-	a.mu.Unlock()
-	if conn != nil {
-		reqID := ulidgen.New()
-		ch := make(chan ControlFrame, 1)
+	// SQLite is the source of truth: the shim mirrors each JSONL line via
+	// runtime.message_record, so history survives the container being
+	// stopped, swept on idle, or moved to another node. We only ask the
+	// shim if the DB has nothing yet — that path is the back-compat seam
+	// for sessions that pre-date this mirror (no rows; shim still alive).
+	if records, err := a.loadConversationFromStore(); err == nil && records != nil {
+		conv = records
+	} else {
 		a.mu.Lock()
-		a.pendingSnap[reqID] = ch
+		conn := a.control
 		a.mu.Unlock()
-		if err := conn.Send(ControlFrame{
-			V:    1,
-			Kind: AgentdSnapshotRequest,
-			TS:   a.opts.Now(),
-			Data: mustJSON(map[string]string{"request_id": reqID}),
-		}); err != nil {
+		if conn != nil {
+			reqID := ulidgen.New()
+			ch := make(chan ControlFrame, 1)
 			a.mu.Lock()
-			delete(a.pendingSnap, reqID)
+			a.pendingSnap[reqID] = ch
 			a.mu.Unlock()
-			return nil, fmt.Errorf("snapshot send: %w", err)
-		}
-		timeout := a.opts.SnapshotTimeout
-		if timeout == 0 {
-			timeout = 10 * time.Second
-		}
-		select {
-		case fr := <-ch:
-			// Shim replies with {request_id, messages: [...]}; the wire
-			// `conversation` field is the messages array itself.
-			var payload struct {
-				Messages json.RawMessage `json:"messages"`
+			if err := conn.Send(ControlFrame{
+				V:    1,
+				Kind: AgentdSnapshotRequest,
+				TS:   a.opts.Now(),
+				Data: mustJSON(map[string]string{"request_id": reqID}),
+			}); err != nil {
+				a.mu.Lock()
+				delete(a.pendingSnap, reqID)
+				a.mu.Unlock()
+				return nil, fmt.Errorf("snapshot send: %w", err)
 			}
-			if err := json.Unmarshal(fr.Data, &payload); err == nil && len(payload.Messages) > 0 {
-				conv = payload.Messages
+			timeout := a.opts.SnapshotTimeout
+			if timeout == 0 {
+				timeout = 10 * time.Second
 			}
-		case <-time.After(timeout):
-			a.mu.Lock()
-			delete(a.pendingSnap, reqID)
-			a.mu.Unlock()
-			return nil, fmt.Errorf("snapshot timeout after %s", timeout)
-		case <-ctx.Done():
-			a.mu.Lock()
-			delete(a.pendingSnap, reqID)
-			a.mu.Unlock()
-			return nil, ctx.Err()
+			select {
+			case fr := <-ch:
+				var payload struct {
+					Messages json.RawMessage `json:"messages"`
+				}
+				if err := json.Unmarshal(fr.Data, &payload); err == nil && len(payload.Messages) > 0 {
+					conv = payload.Messages
+				}
+			case <-time.After(timeout):
+				a.mu.Lock()
+				delete(a.pendingSnap, reqID)
+				a.mu.Unlock()
+				return nil, fmt.Errorf("snapshot timeout after %s", timeout)
+			case <-ctx.Done():
+				a.mu.Lock()
+				delete(a.pendingSnap, reqID)
+				a.mu.Unlock()
+				return nil, ctx.Err()
+			}
 		}
 	}
 	a.mu.RLock()

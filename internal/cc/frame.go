@@ -18,15 +18,16 @@ const ProtocolVersion = 1
 
 // Frame kinds (container -> agentd).
 const (
-	KindHello       = "runtime.hello"
-	KindReady       = "runtime.ready"
-	KindEvent       = "runtime.event"
-	KindError       = "runtime.error"
-	KindSessionID   = "runtime.session_id"
-	KindHeartbeat   = "runtime.heartbeat"
-	KindSnapshot    = "runtime.snapshot"
-	KindRepoChanged = "repo.changed"
-	KindThrottled   = "runtime.throttled"
+	KindHello         = "runtime.hello"
+	KindReady         = "runtime.ready"
+	KindEvent         = "runtime.event"
+	KindError         = "runtime.error"
+	KindSessionID     = "runtime.session_id"
+	KindHeartbeat     = "runtime.heartbeat"
+	KindSnapshot      = "runtime.snapshot"
+	KindMessageRecord = "runtime.message_record"
+	KindRepoChanged   = "repo.changed"
+	KindThrottled     = "runtime.throttled"
 )
 
 // Frame kinds (agentd -> container).

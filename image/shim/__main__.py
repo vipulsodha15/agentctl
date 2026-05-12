@@ -122,6 +122,7 @@ class Shim:
             ),
             emit_event=self._emit_event,
             emit_session_id=self._emit_session_id,
+            emit_message_record=self._emit_message_record,
         )
         self._driver.start()
 
@@ -318,6 +319,9 @@ class Shim:
     def _emit_session_id(self, sid: str) -> None:
         self._sdk_session_id = sid
         self._safe_send(control.KIND_SESSION_ID, {"sdk_session_id": sid})
+
+    def _emit_message_record(self, record: dict) -> None:
+        self._safe_send(control.KIND_MESSAGE_RECORD, {"record": record})
 
     def _safe_send(self, kind: str, data: dict) -> None:
         if self._client is None:
