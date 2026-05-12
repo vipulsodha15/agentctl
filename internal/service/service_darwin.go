@@ -31,6 +31,10 @@ const darwinPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
   <key>EnvironmentVariables</key>
   <dict>
     <key>AGENTCTL_HOME</key>   <string>{{HOME}}</string>
+    <!-- launchd's default PATH omits /usr/local/bin and /opt/homebrew/bin,
+         where Docker Desktop and Homebrew place their CLIs. Without this,
+         agentd's docker probe (and any other binary lookup) fails. -->
+    <key>PATH</key>            <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>StandardOutPath</key>   <string>{{HOME}}/Library/Logs/agentctl/agentd.log</string>
   <key>StandardErrorPath</key> <string>{{HOME}}/Library/Logs/agentctl/agentd.log</string>

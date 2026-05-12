@@ -192,7 +192,11 @@ class Shim:
     def _handle_message(self, data: dict) -> None:
         if self._driver is None:
             return
-        turn_id = data.get("message_id") or data.get("turn_id") or ""
+        # Prefer the daemon's turn_id (the same one stamped on the
+        # broadcast turn.start) so every runtime.event the shim emits
+        # for this turn matches what clients saw on turn.start. Older
+        # daemons didn't send turn_id, so fall back to message_id.
+        turn_id = data.get("turn_id") or data.get("message_id") or ""
         content = data.get("content") or ""
         self._driver.submit_turn(turn_id=turn_id, content=content)
 

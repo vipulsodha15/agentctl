@@ -44,8 +44,6 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
   }
 
   function onPickSkill(name: string) {
-    // Replace the leading /<typed prefix> with /<name> and a trailing space
-    // so the user can immediately type arguments.
     const rest = value.includes(" ") ? value.slice(value.indexOf(" ")) : "";
     const next = `/${name} ${rest.trimStart()}`.replace(/\s+$/, " ");
     setValue(next);
@@ -82,6 +80,8 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
     }
   }
 
+  const disabled = sending || inFlight || value.trim() === "";
+
   return (
     <div className="input-area">
       <SkillAutocomplete
@@ -89,30 +89,73 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
         value={value}
         onPick={onPickSkill}
       />
-      <textarea
-        ref={taRef}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder={
-          inFlight
-            ? "Type to queue (will send when current turn ends)…"
-            : "Type a message — Enter to send, Shift+Enter for newline. / for skills."
-        }
-      />
-      <div className="controls">
-        <button
-          className="primary"
-          onClick={() => void send()}
-          disabled={sending || inFlight || value.trim() === ""}
-        >
-          {sending ? "Sending…" : "Send"}
-        </button>
-        <span className="queue-indicator">
-          {queueDepth > 0 ? `${queueDepth} queued` : ""}
-        </span>
+      <div className="input-shell">
+        <textarea
+          ref={taRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={
+            inFlight
+              ? "Type to queue — will send when the current turn ends…"
+              : "Message the agent. Enter to send, Shift+Enter for newline. Press / for skills."
+          }
+        />
+        <div className="controls">
+          <span className="hint">
+            <kbd
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 10.5,
+                background: "var(--c-surface-2)",
+                padding: "1px 5px",
+                borderRadius: 4,
+                border: "1px solid var(--c-border)",
+              }}
+            >
+              ⏎
+            </kbd>{" "}
+            send ·{" "}
+            <kbd
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 10.5,
+                background: "var(--c-surface-2)",
+                padding: "1px 5px",
+                borderRadius: 4,
+                border: "1px solid var(--c-border)",
+              }}
+            >
+              ⇧⏎
+            </kbd>{" "}
+            newline
+          </span>
+          {queueDepth > 0 && (
+            <span className="queue-indicator">{queueDepth} queued</span>
+          )}
+          <button
+            className="send-btn"
+            onClick={() => void send()}
+            disabled={disabled}
+          >
+            {sending ? "Sending…" : "Send"}
+            {!sending && (
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M5 12h14M13 5l7 7-7 7" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
-      {error && <div className="error-text">{error}</div>}
+      {error && <div className="error-text input-error">{error}</div>}
     </div>
   );
 }
@@ -126,7 +169,6 @@ function clientId(): string {
 }
 
 function cryptoRandomId(): string {
-  // Avoid pulling in a ULID lib; the server treats this as opaque.
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   let out = "";

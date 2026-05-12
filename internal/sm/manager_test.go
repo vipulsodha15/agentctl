@@ -62,6 +62,56 @@ func TestCreateSendInOrder(t *testing.T) {
 	}
 }
 
+// TestSendBeforeRuntimeReady reproduces the bug where messages sent during
+// container startup (after Create returned but before the shim's RuntimeReady
+// frame) were lost: handleSend set inFlight while a.control was either nil or
+// pointed at a shim that wasn't yet reading frames, the AgentdMessage frame
+// was silently dropped, and the session hung in_flight forever.
+func TestSendBeforeRuntimeReady(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := mgr.Attach(ctx, r.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	mustEvent(t, stream, proto.EventSessionSnapshot)
+
+	// Inject the control conn but do NOT send RuntimeReady yet — this models
+	// the window between TCP accept and the shim entering its inbound loop.
+	conn := newFakeConn()
+	fc.mu.Lock()
+	fc.conns[r.SessionID] = conn
+	fc.mu.Unlock()
+	mm := mgr.(*manager)
+	a := mm.actorFor(r.SessionID)
+	a.InjectControlConn(conn)
+
+	// Send while not-yet-ready. Should be queued, not lost.
+	res, err := mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "early", ClientID: "cli-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Queued || res.QueueDepth != 1 {
+		t.Fatalf("expected message to be queued (depth=1), got %+v", res)
+	}
+	mustEvent(t, stream, proto.EventQueueDepth)
+
+	// Now the shim becomes ready — the queued message should fire.
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeReady, TS: time.Now().UTC(), Data: json.RawMessage(`{}`)}
+	mustEvent(t, stream, proto.EventSessionRunning)
+	mustEvent(t, stream, proto.EventQueueDepth)
+	mustEvent(t, stream, proto.EventUserMessage)
+	mustEvent(t, stream, proto.EventTurnStart)
+	if got := conn.expect(t, AgentdMessage); got == "" {
+		t.Fatal("queued message never reached the shim after RuntimeReady")
+	}
+}
+
 func TestQueueWhenInFlight(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
@@ -585,7 +635,29 @@ func (f *fakeControl) attach(t *testing.T, sessionID string, mgr Manager) *fakeC
 		t.Fatalf("no actor for %s", sessionID)
 	}
 	a.InjectControlConn(conn)
+	// Mirror real shim behaviour: announce that we are ready. Without this the
+	// actor parks Send() messages in its queue until the runtime is reachable,
+	// which would break tests that send right after attach.
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeReady, TS: time.Now().UTC(), Data: json.RawMessage(`{}`)}
+	// Wait for the actor to process it so subsequent Send() calls see ready.
+	if !waitForReady(a, 2*time.Second) {
+		t.Fatalf("actor did not become runtime-ready")
+	}
 	return conn
+}
+
+func waitForReady(a *actor, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		a.mu.RLock()
+		ready := a.runtimeReady
+		a.mu.RUnlock()
+		if ready {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return false
 }
 
 type fakeConn struct {

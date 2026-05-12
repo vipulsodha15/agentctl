@@ -26,9 +26,21 @@ interface State {
   warnings: string[];
   // Track event ids we have already applied (at-least-once delivery, ADR 0015).
   seenEventIds: Set<string>;
-  // The id of the in-flight assistant bubble (keyed by turn_id) so we can
-  // replace it with the canonical assistant.message at turn end.
-  inFlightAssistantByTurn: Record<string, string>;
+  // The currently-open assistant bubble id per turn. Set on the first
+  // delta/non-empty assistant.message for a turn; CLEARED on every
+  // assistant.message so the next delta in the same turn opens a fresh
+  // bubble. An SDK turn can emit multiple AssistantMessage records around
+  // a tool round-trip; each one becomes its own bubble.
+  openBubbleByTurn: Record<string, string>;
+  // Number of in-flight turns. turn.start increments; turn.end/cancelled
+  // decrements (clamped at 0). We use a counter (not a turn_id set)
+  // because the daemon's turn.start.turn_id historically did NOT match
+  // the shim's turn.end.turn_id — clients can't reliably pair them.
+  // The daemon runs turns serially, so a counter is enough.
+  inFlightCount: number;
+  // tool_use_id → tool name, populated as tool.call events arrive so we
+  // can resolve the tool name on the matching tool.result.
+  toolNames: Record<string, string>;
   connected: boolean;
   disconnectReason: string | null;
 }
@@ -49,7 +61,9 @@ const INITIAL: State = {
   messages: [],
   warnings: [],
   seenEventIds: new Set(),
-  inFlightAssistantByTurn: {},
+  openBubbleByTurn: {},
+  inFlightCount: 0,
+  toolNames: {},
   connected: false,
   disconnectReason: null,
 };
@@ -73,86 +87,147 @@ function reducer(state: State, action: Action): State {
 
 function applySnapshot(state: State, data: SnapshotData): State {
   // The snapshot wins: discard local mid-turn rendering state and rebuild.
-  const messages = normalizeConversation(data.conversation ?? []);
+  const rawConv = (data as { conversation?: unknown }).conversation;
+  const convArray: unknown[] = Array.isArray(rawConv)
+    ? rawConv
+    : Array.isArray((rawConv as { messages?: unknown[] } | null)?.messages)
+      ? ((rawConv as { messages: unknown[] }).messages)
+      : [];
+  const { messages, toolNames } = normalizeConversation(convArray);
+  // SessionSnapshotData.in_flight (proto.go) is a turn_id string when in-flight,
+  // empty otherwise — the local type declares it as boolean for historical
+  // reasons. Coerce defensively.
+  const rawInFlight = (data as unknown as { in_flight?: unknown }).in_flight;
+  const isInFlight =
+    (typeof rawInFlight === "string" && rawInFlight !== "") ||
+    rawInFlight === true;
   return {
     ...state,
     status: data.session?.status ?? state.status,
     name: data.session?.name ?? state.name,
-    inFlight: !!data.in_flight,
+    inFlight: isInFlight,
     queueDepth: data.queue_depth ?? 0,
-    mcps: data.mcps_status ?? [],
+    mcps: normalizeMcps(data.mcps_status),
     messages,
     warnings: [],
     seenEventIds: new Set(),
-    inFlightAssistantByTurn: {},
+    openBubbleByTurn: {},
+    inFlightCount: isInFlight ? 1 : 0,
+    toolNames,
   };
 }
 
-// The runtime.snapshot from the shim is opaque to agentd, but for rendering
-// we look for common fields. The structure is best-effort; unknown items are
-// skipped.
-function normalizeConversation(raw: unknown[]): ConversationMessage[] {
-  const out: ConversationMessage[] = [];
-  let i = 0;
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const o = item as Record<string, unknown>;
-    const role = typeof o.role === "string" ? o.role : undefined;
-    const text = stringContent(o.content) ?? stringContent(o.text);
-    if (role === "user" && text != null) {
-      out.push({
-        id: typeof o.id === "string" ? o.id : `snap-u-${i}`,
-        kind: "user",
-        text,
-      });
-    } else if (role === "assistant" && text != null) {
-      out.push({
-        id: typeof o.id === "string" ? o.id : `snap-a-${i}`,
-        kind: "assistant",
-        text,
-      });
-    } else if (
-      typeof o.tool === "string" &&
-      (o.input !== undefined || o.output !== undefined)
-    ) {
-      // Tool entries (best-effort).
-      if (o.input !== undefined) {
-        out.push({
-          id: `snap-tc-${i}`,
-          kind: "tool_call",
-          tool: o.tool,
-          text: stableStringify(o.input),
-        });
-      }
-      if (o.output !== undefined) {
-        out.push({
-          id: `snap-tr-${i}`,
-          kind: "tool_result",
-          tool: o.tool,
-          is_error: !!o.is_error,
-          text: stableStringify(o.output),
-        });
-      }
-    }
-    i++;
+// mcps_status is sent as map[name]status on the wire (proto.SessionSnapshotData),
+// but McpPanel renders an array of McpStatus objects. Tolerate either shape.
+function normalizeMcps(raw: unknown): McpStatus[] {
+  if (Array.isArray(raw)) return raw as McpStatus[];
+  if (raw && typeof raw === "object") {
+    return Object.entries(raw as Record<string, unknown>).map(([name, v]) => ({
+      name,
+      status: (typeof v === "string" ? v : "skipped") as McpStatus["status"],
+    }));
   }
-  return out;
+  return [];
 }
 
-function stringContent(v: unknown): string | null {
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) {
-    // Common SDK shape: array of {type:"text", text:"..."}.
-    const parts: string[] = [];
-    for (const part of v) {
-      if (part && typeof part === "object") {
+// The runtime.snapshot from the shim is the SDK's JSONL records verbatim:
+//   {type:"user",      message:{role,content:string|parts}, uuid, ...}
+//   {type:"assistant", message:{role,content:[{type:"text"|"thinking"|"tool_use"|...}]}, uuid, ...}
+//   {type:"attachment"|"queue-operation"|"last-prompt", ...}   ← skip
+// Tool results come back as a user message whose content array has
+// {type:"tool_result", tool_use_id, content, is_error}.
+function normalizeConversation(raw: unknown[]): {
+  messages: ConversationMessage[];
+  toolNames: Record<string, string>;
+} {
+  const out: ConversationMessage[] = [];
+  const toolNames: Record<string, string> = {};
+  let i = 0;
+  for (const item of raw) {
+    i++;
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const recType = typeof o.type === "string" ? (o.type as string) : "";
+    if (recType !== "user" && recType !== "assistant") continue;
+    const msg =
+      o.message && typeof o.message === "object"
+        ? (o.message as Record<string, unknown>)
+        : null;
+    if (!msg) continue;
+    const role = typeof msg.role === "string" ? (msg.role as string) : recType;
+    const content = msg.content;
+    const baseId = typeof o.uuid === "string" ? (o.uuid as string) : `snap-${i}`;
+
+    if (typeof content === "string") {
+      if (role === "user") {
+        out.push({ id: baseId, kind: "user", text: content });
+      } else if (role === "assistant") {
+        out.push({ id: baseId, kind: "assistant", text: content });
+      }
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    if (role === "assistant") {
+      let textParts = "";
+      let partIdx = 0;
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
-        if (typeof p.text === "string") parts.push(p.text);
+        const t = typeof p.type === "string" ? (p.type as string) : "";
+        if (t === "text" && typeof p.text === "string") {
+          textParts += textParts ? "\n" + p.text : p.text;
+        } else if (t === "tool_use") {
+          if (textParts) {
+            out.push({ id: `${baseId}-t${partIdx++}`, kind: "assistant", text: textParts });
+            textParts = "";
+          }
+          const toolUseId = typeof p.id === "string" ? (p.id as string) : "";
+          const name = typeof p.name === "string" ? (p.name as string) : "?";
+          if (toolUseId) toolNames[toolUseId] = name;
+          out.push({
+            id: toolUseId || `${baseId}-tc${partIdx++}`,
+            kind: "tool_call",
+            tool: name,
+            text: stableStringify(p.input ?? {}),
+          });
+        }
+        // thinking / server-side parts are intentionally ignored.
+      }
+      if (textParts) {
+        out.push({ id: `${baseId}-t${partIdx}`, kind: "assistant", text: textParts });
+      }
+    } else if (role === "user") {
+      let userText = "";
+      let partIdx = 0;
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
+        const p = part as Record<string, unknown>;
+        const t = typeof p.type === "string" ? (p.type as string) : "";
+        if (t === "text" && typeof p.text === "string") {
+          userText += userText ? "\n" + p.text : p.text;
+        } else if (t === "tool_result") {
+          if (userText) {
+            out.push({ id: `${baseId}-u${partIdx++}`, kind: "user", text: userText });
+            userText = "";
+          }
+          const useId = typeof p.tool_use_id === "string" ? (p.tool_use_id as string) : "";
+          const tool = useId && toolNames[useId] ? toolNames[useId] : "";
+          out.push({
+            id: useId || `${baseId}-tr${partIdx++}`,
+            kind: "tool_result",
+            tool,
+            is_error: !!p.is_error,
+            text: typeof p.content === "string" ? p.content : stableStringify(p.content ?? ""),
+          });
+        }
+      }
+      if (userText) {
+        out.push({ id: `${baseId}-u${partIdx}`, kind: "user", text: userText });
       }
     }
-    if (parts.length > 0) return parts.join("");
   }
-  return null;
+  return { messages: out, toolNames };
 }
 
 function stableStringify(v: unknown): string {
@@ -190,47 +265,25 @@ function applyEvent(state: State, e: WireEvent): State {
       break;
     }
     case "turn.start": {
-      const d = e.data as { turn_id?: string };
-      if (d.turn_id) {
-        const bubbleId = `a-${d.turn_id}`;
-        if (!next.inFlightAssistantByTurn[d.turn_id]) {
-          next = {
-            ...next,
-            inFlight: true,
-            inFlightAssistantByTurn: {
-              ...next.inFlightAssistantByTurn,
-              [d.turn_id]: bubbleId,
-            },
-            messages: [
-              ...next.messages,
-              {
-                id: bubbleId,
-                kind: "assistant",
-                text: "",
-                inFlight: true,
-                turn_id: d.turn_id,
-              },
-            ],
-          };
-        } else {
-          next = { ...next, inFlight: true };
-        }
-      } else {
-        next = { ...next, inFlight: true };
-      }
+      // Just bump the in-flight counter. Don't pre-create an assistant
+      // bubble — the SDK may emit zero or many AssistantMessage records
+      // for a turn (tool-use-only messages produce no text). Bubbles are
+      // created lazily on the first delta / non-empty assistant.message.
+      const count = next.inFlightCount + 1;
+      next = { ...next, inFlightCount: count, inFlight: count > 0 };
       break;
     }
     case "assistant.delta": {
       const d = e.data as { turn_id?: string; delta?: string };
       if (!d.turn_id || !d.delta) break;
-      const bubbleId = next.inFlightAssistantByTurn[d.turn_id];
+      const bubbleId = next.openBubbleByTurn[d.turn_id];
       if (!bubbleId) {
-        // turn.start was not seen; create a bubble lazily.
-        const newId = `a-${d.turn_id}`;
+        // Open a new bubble for this slice of the turn.
+        const newId = `a-${d.turn_id}-${id ?? next.messages.length}`;
         next = {
           ...next,
-          inFlightAssistantByTurn: {
-            ...next.inFlightAssistantByTurn,
+          openBubbleByTurn: {
+            ...next.openBubbleByTurn,
             [d.turn_id]: newId,
           },
           messages: [
@@ -255,28 +308,47 @@ function applyEvent(state: State, e: WireEvent): State {
       break;
     }
     case "assistant.message": {
-      // Final canonical text — replaces accumulated deltas.
+      // Canonical text for one AssistantMessage record. An SDK turn can
+      // emit several of these around a tool round-trip; each finalizes
+      // the currently-open bubble (if any) and clears the open-bubble
+      // pointer so a subsequent delta opens a fresh bubble.
       const d = e.data as { turn_id?: string; content?: string };
       if (!d.turn_id) break;
-      const bubbleId = next.inFlightAssistantByTurn[d.turn_id];
+      const content = d.content ?? "";
+      const bubbleId = next.openBubbleByTurn[d.turn_id];
       if (bubbleId) {
         next = {
           ...next,
           messages: next.messages.map((m) =>
             m.id === bubbleId
-              ? { ...m, text: d.content ?? m.text, inFlight: false }
+              ? {
+                  ...m,
+                  // Empty content (tool-use-only AssistantMessage) keeps
+                  // whatever deltas we already accumulated; non-empty
+                  // content replaces with the canonical text.
+                  text: content !== "" ? content : m.text,
+                  inFlight: false,
+                }
               : m,
           ),
         };
-      } else {
+        // Clear the open-bubble pointer so the next delta in this turn
+        // opens a NEW bubble (separate from any tool calls in between).
+        const map = { ...next.openBubbleByTurn };
+        delete map[d.turn_id];
+        next = { ...next, openBubbleByTurn: map };
+      } else if (content !== "") {
+        // No bubble was open AND the message has text — create a sealed
+        // bubble directly. Tool-use-only messages (empty content with no
+        // open bubble) are intentionally skipped.
         next = {
           ...next,
           messages: [
             ...next.messages,
             {
-              id: `a-${d.turn_id}`,
+              id: `a-${d.turn_id}-${id ?? next.messages.length}`,
               kind: "assistant",
-              text: d.content ?? "",
+              text: content,
               turn_id: d.turn_id,
             },
           ],
@@ -287,40 +359,84 @@ function applyEvent(state: State, e: WireEvent): State {
     case "turn.end":
     case "turn.cancelled": {
       const d = e.data as { turn_id?: string };
-      const newMap = { ...next.inFlightAssistantByTurn };
-      if (d.turn_id) {
-        const bubbleId = newMap[d.turn_id];
-        if (bubbleId) {
-          next = {
-            ...next,
-            messages: next.messages.map((m) =>
-              m.id === bubbleId ? { ...m, inFlight: false } : m,
-            ),
-          };
-        }
-        delete newMap[d.turn_id];
+      const count = Math.max(0, next.inFlightCount - 1);
+      let openMap = next.openBubbleByTurn;
+      // Prefer an exact turn_id match; otherwise, when the counter hits 0,
+      // seal ALL leftover open bubbles. This handles older shim/daemon
+      // builds where turn.start.turn_id != turn.end.turn_id, so an
+      // exact-match cleanup would never fire.
+      if (d.turn_id && openMap[d.turn_id]) {
+        const bubbleId = openMap[d.turn_id];
+        next = {
+          ...next,
+          messages: next.messages.map((m) =>
+            m.id === bubbleId ? { ...m, inFlight: false } : m,
+          ),
+        };
+        const m = { ...openMap };
+        delete m[d.turn_id];
+        openMap = m;
+      } else if (count === 0 && Object.keys(openMap).length > 0) {
+        const open = new Set(Object.values(openMap));
+        next = {
+          ...next,
+          messages: next.messages.map((m) =>
+            open.has(m.id) ? { ...m, inFlight: false } : m,
+          ),
+        };
+        openMap = {};
       }
       next = {
         ...next,
-        inFlight: Object.keys(newMap).length > 0,
-        inFlightAssistantByTurn: newMap,
+        openBubbleByTurn: openMap,
+        inFlightCount: count,
+        inFlight: count > 0,
       };
       break;
     }
     case "tool.call": {
+      // Shim emits: { turn_id, tool_use_id, name, input }
+      // Older payloads may use `tool` instead of `name`; accept both.
       const d = e.data as {
         turn_id?: string;
         tool?: string;
+        name?: string;
+        tool_use_id?: string;
         input?: unknown;
       };
+      const toolName = d.tool ?? d.name ?? "?";
+      const useId = d.tool_use_id ?? "";
+
+      // Close any bubble currently open for this turn so the tool call
+      // renders AFTER the assistant text that triggered it.
+      let openMap = next.openBubbleByTurn;
+      if (d.turn_id && openMap[d.turn_id]) {
+        const sealed = openMap[d.turn_id];
+        next = {
+          ...next,
+          messages: next.messages.map((m) =>
+            m.id === sealed ? { ...m, inFlight: false } : m,
+          ),
+        };
+        const m = { ...openMap };
+        delete m[d.turn_id];
+        openMap = m;
+      }
+
+      const nextToolNames = useId
+        ? { ...next.toolNames, [useId]: toolName }
+        : next.toolNames;
+
       next = {
         ...next,
+        openBubbleByTurn: openMap,
+        toolNames: nextToolNames,
         messages: [
           ...next.messages,
           {
-            id: `tc-${id ?? Math.random()}`,
+            id: useId ? `tc-${useId}` : `tc-${id ?? Math.random()}`,
             kind: "tool_call",
-            tool: d.tool ?? "?",
+            tool: toolName,
             text: stableStringify(d.input ?? {}),
             turn_id: d.turn_id,
           },
@@ -329,21 +445,31 @@ function applyEvent(state: State, e: WireEvent): State {
       break;
     }
     case "tool.result": {
+      // Shim emits: { turn_id, tool_use_id, content, is_error }
+      // Older payloads may use `output` and/or `tool`; accept both.
       const d = e.data as {
         turn_id?: string;
         tool?: string;
+        tool_use_id?: string;
         output?: unknown;
+        content?: unknown;
         is_error?: boolean;
       };
+      const useId = d.tool_use_id ?? "";
+      const toolName =
+        d.tool ?? (useId ? next.toolNames[useId] : undefined) ?? "";
+      const body = d.content !== undefined ? d.content : d.output;
+      const text =
+        typeof body === "string" ? body : stableStringify(body ?? "");
       next = {
         ...next,
         messages: [
           ...next.messages,
           {
-            id: `tr-${id ?? Math.random()}`,
+            id: useId ? `tr-${useId}` : `tr-${id ?? Math.random()}`,
             kind: "tool_result",
-            tool: d.tool ?? "",
-            text: stableStringify(d.output ?? ""),
+            tool: toolName,
+            text,
             is_error: !!d.is_error,
             turn_id: d.turn_id,
           },
@@ -526,21 +652,33 @@ export function SessionDetail() {
 
   return (
     <section className="session-detail">
-      <div className="header">
-        <Link to="/sessions">← Sessions</Link>
-        <strong>{state.name || id}</strong>
+      <div className="session-header">
+        <span className="breadcrumb">
+          <Link to="/sessions">Sessions</Link>
+          <span aria-hidden>/</span>
+        </span>
+        <span className="session-title" title={state.name || id}>
+          {state.name || id}
+        </span>
         <span className={`status-badge ${state.status}`}>{state.status}</span>
-        {state.queueDepth > 0 && (
-          <span style={{ color: "var(--fg-mute)", fontSize: 13 }}>
-            {state.queueDepth} queued
+        {state.inFlight && (
+          <span className="responding-pill" aria-live="polite">
+            <span className="bdot" />
+            <span className="bdot" />
+            <span className="bdot" />
+            <span className="label">Responding</span>
           </span>
+        )}
+        {state.queueDepth > 0 && (
+          <span className="queue-pill">{state.queueDepth} queued</span>
         )}
         {!state.connected && state.disconnectReason && (
-          <span className="warning" style={{ margin: 0 }}>
-            reconnecting… ({state.disconnectReason})
+          <span className="reconnect-pill">
+            <span className="streaming-dot" aria-hidden />
+            reconnecting…
           </span>
         )}
-        <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+        <span className="actions">
           <StopButton sessionId={id} inFlight={state.inFlight} />
           <button className="danger" onClick={onEnd} disabled={endBusy}>
             {endBusy ? "Ending…" : "End session"}
@@ -548,7 +686,11 @@ export function SessionDetail() {
         </span>
       </div>
 
-      <div className="conversation">
+      <div
+        className={`conv-card${
+          state.inFlight && tab === "conversation" ? " in-flight" : ""
+        }`}
+      >
         <div className="tabs">
           <button
             className={tab === "conversation" ? "active" : ""}
@@ -567,18 +709,22 @@ export function SessionDetail() {
           <ConversationView
             messages={visibleMessages}
             warnings={state.warnings}
+            inFlight={state.inFlight}
           />
         ) : (
-          <ChangesPanel sessionId={id} />
+          <div className="conversation">
+            <ChangesPanel sessionId={id} />
+          </div>
         )}
-      </div>
-
-      <div className="input-area">
-        <MessageInput
-          sessionId={id}
-          inFlight={state.inFlight}
-          queueDepth={state.queueDepth}
-        />
+        {tab === "conversation" && (
+          <div className="input-area-wrap">
+            <MessageInput
+              sessionId={id}
+              inFlight={state.inFlight}
+              queueDepth={state.queueDepth}
+            />
+          </div>
+        )}
       </div>
 
       <aside className="side">

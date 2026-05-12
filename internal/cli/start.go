@@ -26,6 +26,7 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 		memBytes int64
 		cpuLimit float64
 	)
+	plain := fs.Bool("plain", false, "use line-based streaming output instead of the TUI")
 	fs.StringVar(&name, "name", "", "human-readable name for the session")
 	fs.StringVar(&mcpsCSV, "mcps", "", "comma-separated MCP names to enable (default: registry defaults)")
 	fs.StringVar(&noMCPCSV, "no-mcp", "", "comma-separated MCP names to exclude")
@@ -34,15 +35,18 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 	fs.Int64Var(&memBytes, "mem-limit", 0, "container memory limit in bytes (0 = config default)")
 	fs.Float64Var(&cpuLimit, "cpu-limit", 0, "container CPU limit in cores (0 = config default)")
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: agentctl start [--name NAME] [--mcps a,b] [--no-mcp x] [--repo URL ...] [--model MODEL] [--mem-limit N] [--cpu-limit N]")
+		fmt.Fprintln(env.Stderr, "Usage: agentctl start [--plain] [--name NAME] [--mcps a,b] [--no-mcp x] [--repo URL ...] [--model MODEL] [--mem-limit N] [--cpu-limit N]")
 		fmt.Fprintln(env.Stderr, "")
-		fmt.Fprintln(env.Stderr, "Creates a new session, attaches to its event stream, and renders messages live.")
-		fmt.Fprintln(env.Stderr, "Type a message + Enter to send. Ctrl-D / Ctrl-C detaches; the session keeps running.")
+		fmt.Fprintln(env.Stderr, "Creates a new session and attaches to its event stream. On a TTY a")
+		fmt.Fprintln(env.Stderr, "fullscreen TUI is shown (markdown, tool blocks, status bar, input box).")
+		fmt.Fprintln(env.Stderr, "When piped or with --plain, falls back to line-based streaming output and")
+		fmt.Fprintln(env.Stderr, "reads stdin for messages. Ctrl-D / Ctrl-C detaches; the session keeps running.")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Examples:")
 		fmt.Fprintln(env.Stderr, "  agentctl start --repo https://github.com/me/repo.git")
 		fmt.Fprintln(env.Stderr, "  agentctl start --name auth-refactor --mcps github,internal-jira")
 		fmt.Fprintln(env.Stderr, "  agentctl start --no-mcp github --model claude-opus-4-7")
+		fmt.Fprintln(env.Stderr, "  agentctl start --plain | tee transcript.log")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
@@ -74,22 +78,28 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 		return ExitGeneric
 	}
 	webURL := fmt.Sprintf("http://%s/sessions/%s", cfg.Agentd.WebAddr, resp.SessionID)
-	fmt.Fprintf(env.Stdout, "session %s\nweb:     %s\n", resp.SessionID, webURL)
-
-	stdinDone := make(chan struct{})
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
-	go func() {
-		defer close(stdinDone)
-		readStdinAndSend(streamCtx, c, resp.SessionID, env.Stdin, env.Stderr)
+	if *plain || !stdoutIsTTY(env) {
+		fmt.Fprintf(env.Stdout, "session %s\nweb:     %s\n", resp.SessionID, webURL)
+		stdinDone := make(chan struct{})
+		go func() {
+			defer close(stdinDone)
+			readStdinAndSend(streamCtx, env.Layout.SocketFile, resp.SessionID, env.Stdin, env.Stderr)
+			cancelStream()
+		}()
+		code := attachAndRender(streamCtx, c, resp.SessionID, env)
 		cancelStream()
-	}()
-
-	code := attachAndRender(streamCtx, c, resp.SessionID, env)
-	cancelStream()
-	<-stdinDone
-	return code
+		if ctx.Err() == nil {
+			<-stdinDone
+		}
+		return code
+	}
+	// TUI takes over the screen; print the session id/url to stderr so it
+	// survives in the scrollback after detach.
+	fmt.Fprintf(env.Stderr, "session %s · %s\n", resp.SessionID, webURL)
+	return attachAndRunTUI(streamCtx, c, resp.SessionID, env)
 }
 
 func splitCSV(s string) []string {
@@ -113,7 +123,19 @@ type stringList []string
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
-func readStdinAndSend(ctx context.Context, c *cliclient.Client, sessionID string, in io.Reader, errw io.Writer) {
+// readStdinAndSend forwards each line of stdin as a SendMessage RPC. It opens
+// its own socket connection rather than sharing one with the attach stream:
+// Call() sets a per-request read deadline, and a shared conn would let that
+// deadline fire on the stream goroutine's blocking Recv (surfaced as "attach:
+// i/o timeout") while also racing the two goroutines for inbound frames.
+func readStdinAndSend(ctx context.Context, socketPath, sessionID string, in io.Reader, errw io.Writer) {
+	sender, err := cliclient.Dial(socketPath, 3*time.Second)
+	if err != nil {
+		fmt.Fprintf(errw, "send: %v\n", err)
+		return
+	}
+	defer func() { _ = sender.Close() }()
+
 	br := bufio.NewReader(in)
 	for {
 		select {
@@ -125,7 +147,7 @@ func readStdinAndSend(ctx context.Context, c *cliclient.Client, sessionID string
 		line = strings.TrimRight(line, "\r\n")
 		if line != "" {
 			var resp proto.SendMessageResponse
-			if cerr := c.Call(proto.OpSendMessage, proto.SendMessageRequest{
+			if cerr := sender.Call(proto.OpSendMessage, proto.SendMessageRequest{
 				SessionID: sessionID, Content: line, ClientID: "cli",
 			}, &resp, 5*time.Second); cerr != nil {
 				fmt.Fprintf(errw, "send: %v\n", cerr)

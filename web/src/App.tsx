@@ -26,17 +26,35 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="app-header">
-        <span className="brand">agentctl</span>
+      <aside className="app-sidebar">
+        <div className="brand">
+          <span className="logo">a</span>
+          <span>agentctl</span>
+        </div>
+        <div className="section-label">Workspace</div>
         <nav>
           <NavLink to="/sessions" end>
-            Sessions
+            <IconSessions />
+            <span>Sessions</span>
           </NavLink>
-          <NavLink to="/new">New session</NavLink>
-          <NavLink to="/usage">Usage</NavLink>
-          <NavLink to="/settings">Settings</NavLink>
+          <NavLink to="/new">
+            <IconPlus />
+            <span>New session</span>
+          </NavLink>
+          <NavLink to="/usage">
+            <IconChart />
+            <span>Usage</span>
+          </NavLink>
+          <NavLink to="/settings">
+            <IconCog />
+            <span>Settings</span>
+          </NavLink>
         </nav>
-      </header>
+        <div className="sidebar-footer">
+          <span>Coding agent</span>
+          <span>v0.1 · local daemon</span>
+        </div>
+      </aside>
       <main className="app-main">
         <Routes>
           <Route path="/" element={<Navigate to="/sessions" replace />} />
@@ -49,5 +67,78 @@ export function App() {
         </Routes>
       </main>
     </div>
+  );
+}
+
+function IconSessions() {
+  return (
+    <svg
+      className="nav-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="3" y="4" width="18" height="4" rx="1.5" />
+      <rect x="3" y="10" width="18" height="4" rx="1.5" />
+      <rect x="3" y="16" width="18" height="4" rx="1.5" />
+    </svg>
+  );
+}
+
+function IconPlus() {
+  return (
+    <svg
+      className="nav-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="3" y="3" width="18" height="18" rx="3" />
+      <path d="M12 8v8M8 12h8" />
+    </svg>
+  );
+}
+
+function IconChart() {
+  return (
+    <svg
+      className="nav-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 3v18h18" />
+      <path d="M7 14v3M12 9v8M17 5v12" />
+    </svg>
+  );
+}
+
+function IconCog() {
+  return (
+    <svg
+      className="nav-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4.9a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.5a7 7 0 0 0-2 1.2l-2.4-.9-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-.9a7 7 0 0 0 2 1.2L10 21h4l.5-2.5a7 7 0 0 0 2-1.2l2.4.9 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z" />
+    </svg>
   );
 }

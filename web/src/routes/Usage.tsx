@@ -56,9 +56,9 @@ export function Usage() {
   }, [range]);
 
   return (
-    <section>
-      <div className="toolbar">
-        <h2 style={{ margin: 0 }}>Usage</h2>
+    <section className="page">
+      <div className="page-header">
+        <h2>Usage</h2>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           {PRESETS.map((p) => (
             <button
@@ -95,18 +95,18 @@ export function Usage() {
         <div>
           <div className="panel" style={{ marginBottom: 16 }}>
             <h3>Total</h3>
-            <div style={{ fontSize: 28, fontFamily: "ui-monospace, monospace" }}>
+            <div className="cost-amount" style={{ fontSize: 32 }}>
               {formatUSD(data.cost_usd)}
               {data.has_unknown_model && (
                 <span
                   title="Some turns used a model not in the price table."
-                  style={{ marginLeft: 6, color: "var(--warn)" }}
+                  style={{ marginLeft: 6, color: "var(--c-warn)", fontSize: 20 }}
                 >
                   *
                 </span>
               )}
             </div>
-            <div className="empty" style={{ marginTop: 4 }}>
+            <div className="cost-meta">
               {data.turns} {data.turns === 1 ? "turn" : "turns"} ·{" "}
               {compact(data.input_tokens)} in / {compact(data.output_tokens)} out ·{" "}
               {humanRange(data.start, data.end)}

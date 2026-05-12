@@ -58,6 +58,7 @@ func commands() []Command {
 		{Name: "update", Group: groupSetup, Summary: "Rebuild the session base image and repin its id.", Run: runUpdate},
 		{Name: "config", Group: groupSetup, Summary: "Read or write a config.toml key.", Run: runConfig},
 		{Name: "ui", Group: groupSetup, Summary: "Open the local Web UI in a browser.", Run: runUI},
+		{Name: "service", Group: groupSetup, Summary: "Control the agentd OS service (status/start/stop/restart).", Run: runService},
 
 		{Name: "start", Group: groupSessions, Summary: "Create a session and attach to its event stream.", Run: runStart},
 		{Name: "attach", Group: groupSessions, Summary: "Attach to a running session's event stream.", Run: runAttach},

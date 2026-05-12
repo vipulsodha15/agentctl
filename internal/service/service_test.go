@@ -91,5 +91,8 @@ func TestUnitInvokesAgentdSubcommand(t *testing.T) {
 		if !strings.Contains(got, "<string>agentd</string>") {
 			t.Errorf("plist missing the agentd subcommand arg\n--- got ---\n%s", got)
 		}
+		if !strings.Contains(got, "<key>PATH</key>") {
+			t.Errorf("plist must set PATH so docker (in /usr/local/bin or /opt/homebrew/bin) is reachable\n--- got ---\n%s", got)
+		}
 	}
 }

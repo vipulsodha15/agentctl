@@ -194,7 +194,10 @@ class RuntimeDriver:
             self._emit(EVENT_TURN_END, {"turn_id": turn_id, "ok": False, "error": str(exc)})
             return
 
-        self._emit(EVENT_TURN_START, {"turn_id": turn_id, "model": self._cfg.model})
+        # agentd's actor broadcasts turn.start the moment it hands the message
+        # to the shim; re-emitting here produced a duplicate frame that the CLI
+        # renders as a second blank `assistant: ` line. Keep turn.end as our
+        # responsibility — the actor uses it to settle in-flight state.
 
         try:
             await client.query(content)
@@ -243,15 +246,28 @@ def translate_message(message: Any, *, turn_id: str) -> list[tuple[str, dict]]:
 
     out: list[tuple[str, dict]] = []
     cls = type(message).__name__
+    # claude-agent-sdk 0.1.x delivers token-level partials as `StreamEvent`s
+    # whose `.event` mirrors the raw Anthropic streaming wire format. Older
+    # names (AssistantDelta / PartialAssistantMessage / TextDelta) are kept
+    # for forward compatibility with future SDKs.
+    if cls == "StreamEvent":
+        text = _stream_event_text(getattr(message, "event", None))
+        if text:
+            out.append((EVENT_ASSISTANT_DELTA, {"turn_id": turn_id, "delta": text}))
+        return out
     if cls in ("AssistantDelta", "PartialAssistantMessage", "TextDelta"):
-        text = getattr(message, "text", None) or getattr(message, "delta", "")
-        out.append((EVENT_ASSISTANT_DELTA, {"turn_id": turn_id, "text": text}))
+        text = getattr(message, "text", None) or getattr(message, "delta", "") or ""
+        # Wire keys are fixed by architecture/api.md §5: assistant.delta carries
+        # `delta`, assistant.message carries `content`. Don't rename to `text` —
+        # the Go CLI/web renderers unmarshal these by tag and silently drop a
+        # mis-named field, leaving the assistant lines blank.
+        out.append((EVENT_ASSISTANT_DELTA, {"turn_id": turn_id, "delta": text}))
         return out
     if cls in ("AssistantMessage", "AssistantFinal"):
         text = getattr(message, "text", None)
         if text is None:
             text = _coerce_assistant_text(getattr(message, "content", None))
-        out.append((EVENT_ASSISTANT_MESSAGE, {"turn_id": turn_id, "text": text or ""}))
+        out.append((EVENT_ASSISTANT_MESSAGE, {"turn_id": turn_id, "content": text or ""}))
         usage = getattr(message, "usage", None)
         if usage is not None:
             out.append((EVENT_USAGE, {"turn_id": turn_id, "model": getattr(message, "model", ""), **_usage_dict(usage)}))
@@ -302,6 +318,33 @@ def _usage_dict(usage: Any) -> dict:
         "cache_read_tokens": _g("cache_read_input_tokens") or _g("cache_read_tokens"),
         "cache_write_tokens": _g("cache_creation_input_tokens") or _g("cache_write_tokens"),
     }
+
+
+def _stream_event_text(event: Any) -> str:
+    """Pull the text fragment out of an Anthropic streaming event.
+
+    The shape mirrors the Anthropic Messages streaming spec. We only forward
+    text from ``content_block_delta`` (type ``text_delta``) and the initial
+    ``content_block_start`` (when the block already carries seed text).
+    Tool-use blocks, thinking, and message-level deltas have no user-visible
+    text and are skipped.
+    """
+
+    if not isinstance(event, dict):
+        return ""
+    etype = event.get("type")
+    if etype == "content_block_delta":
+        delta = event.get("delta") or {}
+        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+            text = delta.get("text")
+            return text if isinstance(text, str) else ""
+        return ""
+    if etype == "content_block_start":
+        block = event.get("content_block") or {}
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            return text if isinstance(text, str) else ""
+    return ""
 
 
 def _coerce_assistant_text(content: Any) -> str:

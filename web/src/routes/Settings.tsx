@@ -142,17 +142,17 @@ export function Settings() {
   }
 
   return (
-    <section>
-      <h2>Settings — MCPs</h2>
+    <section className="page">
+      <div className="page-header">
+        <h2>Settings · MCPs</h2>
+        <button className="primary" onClick={startAdd} disabled={busy}>
+          + Add MCP
+        </button>
+      </div>
       <p className="warning">
         Changes apply only to future sessions; running sessions are unaffected.
       </p>
       {error && <div className="error-text">{error}</div>}
-      <div className="toolbar">
-        <button className="primary" onClick={startAdd} disabled={busy}>
-          Add MCP
-        </button>
-      </div>
       {mcps === null ? (
         <div className="empty">Loading…</div>
       ) : mcps.length === 0 ? (

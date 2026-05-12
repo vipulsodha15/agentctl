@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/agentctl/agentctl/internal/cli/tui"
 	"github.com/agentctl/agentctl/internal/cliclient"
 	"github.com/agentctl/agentctl/internal/proto"
 )
 
 type streamRenderer struct {
-	stdout io.Writer
-	stderr io.Writer
-	open   bool
+	stdout      io.Writer
+	stderr      io.Writer
+	open        bool
+	deltaSeen   bool
 }
 
 func newRenderer(stdout, stderr io.Writer) *streamRenderer {
@@ -59,12 +61,23 @@ func (r *streamRenderer) handle(ev proto.Event) {
 		r.closeAssistantLine()
 		fmt.Fprint(r.stdout, "assistant: ")
 		r.open = true
+		r.deltaSeen = false
 	case proto.EventAssistantDelta:
 		var d proto.AssistantDeltaData
 		_ = json.Unmarshal(ev.Data, &d)
-		fmt.Fprint(r.stdout, d.Delta)
+		if d.Delta != "" {
+			fmt.Fprint(r.stdout, d.Delta)
+			r.deltaSeen = true
+		}
 	case proto.EventAssistantMessage:
-		// final text already streamed via deltas; close the line.
+		// Final text — usually already streamed via deltas; print it here if
+		// no deltas arrived (older runtimes that don't stream partials, or a
+		// future shim that opts out of include_partial_messages).
+		var d proto.AssistantMessageData
+		_ = json.Unmarshal(ev.Data, &d)
+		if !r.deltaSeen && d.Content != "" {
+			fmt.Fprint(r.stdout, d.Content)
+		}
 		r.closeAssistantLine()
 	case proto.EventTurnEnd:
 		r.closeAssistantLine()
@@ -106,16 +119,25 @@ func attachAndRender(ctx context.Context, c *cliclient.Client, sessionID string,
 		fmt.Fprintf(env.Stderr, "attach: %v\n", err)
 		return ExitGeneric
 	}
-	r := newRenderer(env.Stdout, env.Stderr)
-	for {
+	// stream.Recv blocks in a unix-socket read; the only reliable way to
+	// unblock it on Ctrl+C is to close the underlying connection so the read
+	// returns an error.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
 		select {
 		case <-ctx.Done():
-			stream.Close()
-			return ExitOK
-		default:
+			_ = c.Close()
+		case <-stopWatch:
 		}
+	}()
+	r := newRenderer(env.Stdout, env.Stderr)
+	for {
 		fr := stream.Recv()
 		if fr.Err != nil {
+			if ctx.Err() != nil {
+				return ExitOK
+			}
 			fmt.Fprintf(env.Stderr, "attach: %v\n", fr.Err)
 			return ExitGeneric
 		}
@@ -131,4 +153,16 @@ func attachAndRender(ctx context.Context, c *cliclient.Client, sessionID string,
 		}
 		r.handle(ev)
 	}
+}
+
+// attachAndRunTUI runs the fullscreen Bubble Tea TUI. It owns its own RPC
+// sender (separate connection from `c`, the attach-stream conn).
+func attachAndRunTUI(ctx context.Context, c *cliclient.Client, sessionID string, env *Env) int {
+	sender := newRPCSender(env.Layout.SocketFile, sessionID)
+	defer sender.Close()
+	code := tui.Run(ctx, c, sessionID, sender, env.Stderr)
+	if code == 0 {
+		return ExitOK
+	}
+	return ExitGeneric
 }

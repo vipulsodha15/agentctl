@@ -59,8 +59,30 @@ export function attach(
     ws.onmessage = (msg) => {
       if (typeof msg.data !== "string") return;
       try {
-        const parsed = JSON.parse(msg.data) as WireEvent;
-        opts.onEvent(parsed);
+        const raw = JSON.parse(msg.data) as
+          | (WireEvent & { data?: unknown })
+          | { kind?: string; data?: unknown };
+        // Per api.md §3.5, the server wraps each delivery in a §2.2 frame
+        // envelope: {v, id, kind: "event"|"stream_chunk"|"stream_end"|"error",
+        // data: <inner>}. Unwrap so consumers see the inner event's own
+        // `kind` (e.g. "session.snapshot", "assistant.delta").
+        const outerKind = (raw as { kind?: string }).kind;
+        if (outerKind === "event" || outerKind === "stream_chunk") {
+          const inner = (raw as { data?: unknown }).data;
+          if (inner && typeof inner === "object" && "kind" in (inner as object)) {
+            opts.onEvent(inner as WireEvent);
+            return;
+          }
+        }
+        if (outerKind === "stream_end" || outerKind === "error") {
+          opts.onEvent({
+            kind: outerKind,
+            data: (raw as { data?: unknown }).data ?? {},
+          } as WireEvent);
+          return;
+        }
+        // Older / direct shape: the message is already an inner event.
+        opts.onEvent(raw as WireEvent);
       } catch {
         // ignore malformed frames (forward-compat per api.md §2.5)
       }

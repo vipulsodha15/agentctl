@@ -21,6 +21,19 @@ RUN apt-get update \
       pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (`gh`) so agents can use `gh pr create`, `gh issue`, etc. The
+# container already gets a $GITHUB_TOKEN injected by agentd; `gh` picks that
+# up automatically (no `gh auth login` required).
+RUN install -d -m 0755 /usr/share/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get update \
  && apt-get install -y --no-install-recommends nodejs python3 python3-pip python3-venv \

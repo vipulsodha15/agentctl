@@ -49,18 +49,26 @@ export function SessionList() {
   }, []);
 
   return (
-    <section>
-      <div className="toolbar">
-        <h2 style={{ margin: 0 }}>Sessions</h2>
+    <section className="page">
+      <div className="page-header">
+        <h2>Sessions</h2>
         <Link to="/new">
-          <button className="primary">New session</button>
+          <button className="primary">+ New session</button>
         </Link>
       </div>
       {error && <div className="error-text">{error}</div>}
       {rows === null && !error && <div className="empty">Loading…</div>}
       {rows && rows.length === 0 && (
-        <div className="empty">
-          No sessions yet. Start one from the CLI or click "New session".
+        <div
+          className="panel"
+          style={{ textAlign: "center", padding: "48px 24px" }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>
+            No sessions yet
+          </div>
+          <div className="empty" style={{ padding: 0 }}>
+            Start one from the CLI or click <strong>+ New session</strong>.
+          </div>
         </div>
       )}
       {rows && rows.length > 0 && (

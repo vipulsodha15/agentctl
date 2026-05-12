@@ -189,7 +189,7 @@ type GetContainerLogsRequest struct {
 }
 
 type SessionSummary struct {
-	ID             string    `json:"id"`
+	ID             string    `json:"session_id"`
 	Name           string    `json:"name"`
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`

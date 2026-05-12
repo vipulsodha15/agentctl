@@ -94,8 +94,10 @@ export function NewSession() {
   }
 
   return (
-    <section className="form-grid">
-      <h2>New session</h2>
+    <section className="page form-grid">
+      <div className="page-header">
+        <h2>New session</h2>
+      </div>
       <form onSubmit={onSubmit}>
         <div className="field">
           <label htmlFor="name">Name</label>

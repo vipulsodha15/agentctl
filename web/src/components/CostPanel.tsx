@@ -45,18 +45,18 @@ export function CostPanel({ sessionId, refreshKey }: Props) {
       {!error && !data && <div className="empty">Loading…</div>}
       {data && (
         <div>
-          <div style={{ fontSize: 22, fontFamily: "ui-monospace, monospace" }}>
+          <div className="cost-amount">
             {formatUSD(data.cost_usd)}
             {data.has_unknown_model && (
               <span
                 title="Some turns used a model not in the price table."
-                style={{ marginLeft: 6, color: "var(--warn)" }}
+                style={{ marginLeft: 6, color: "var(--c-warn)", fontSize: 18 }}
               >
                 *
               </span>
             )}
           </div>
-          <div className="empty" style={{ marginTop: 2 }}>
+          <div className="cost-meta">
             {data.turns} {data.turns === 1 ? "turn" : "turns"} ·{" "}
             {compact(data.input_tokens)} in / {compact(data.output_tokens)} out
           </div>

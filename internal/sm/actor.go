@@ -117,6 +117,7 @@ type actor struct {
 	skillCollisionsEmitted bool
 	repos                  []proto.RepoState
 	control                ControlConn
+	runtimeReady           bool
 	terminated             bool
 	pendingSnap            map[string]chan ControlFrame
 	pendingDiffs           map[string]*pendingDiff
@@ -247,7 +248,13 @@ func (a *actor) handleSend(s *sendItem) {
 	a.mu.Lock()
 	defer func() { a.mu.Unlock() }()
 	a.summary.LastActivityAt = a.opts.Now()
-	if a.inFlight == "" {
+	// Starting a turn requires the shim to have sent RuntimeReady — otherwise
+	// the AgentdMessage frame either has no control conn to land on (a.control
+	// nil) or hits the shim before it enters its inbound loop, and the message
+	// is silently lost. In either case we'd set inFlight without anything
+	// running, so the session hangs. Defer to the queue and let the
+	// RuntimeReady handler start the first turn.
+	if a.inFlight == "" && a.runtimeReady {
 		turnID := ulidgen.WithPrefix("turn")
 		a.inFlight = turnID
 		a.currentTurn = turnID
@@ -355,6 +362,7 @@ func (a *actor) handleControlConn(conn ControlConn) {
 func (a *actor) handleControlClosed() {
 	a.mu.Lock()
 	a.control = nil
+	a.runtimeReady = false
 	a.mu.Unlock()
 	a.opts.Logger.Info("session.control_disconnected")
 }
@@ -377,10 +385,24 @@ func (a *actor) handleControlFrame(fr ControlFrame) {
 	case RuntimeReady:
 		a.mu.Lock()
 		a.summary.Status = "running"
+		a.runtimeReady = true
+		// Pop the first queued message (if any) so messages typed during
+		// container start get a turn now that the shim is reading frames.
+		var pending *queuedMessage
+		if a.inFlight == "" && len(a.queue) > 0 {
+			head := a.queue[0]
+			a.queue = a.queue[1:]
+			a.summary.QueueDepth = len(a.queue)
+			pending = &head
+		}
 		a.mu.Unlock()
 		a.broadcast(proto.EventSessionRunning, mustJSON(map[string]any{}))
 		if a.opts.Store != nil {
 			_, _ = a.opts.Store.DB().Exec(`UPDATE sessions SET status='running' WHERE id=?`, a.opts.ID)
+		}
+		if pending != nil {
+			a.broadcast(proto.EventQueueDepth, mustJSON(proto.QueueDepthData{Depth: a.queueDepth()}))
+			a.startTurnFor(*pending)
 		}
 	case RuntimeEvent:
 		a.handleRuntimeEvent(fr)
@@ -503,8 +525,13 @@ func (a *actor) startTurnFor(q queuedMessage) {
 	a.broadcastLocked(proto.EventTurnStart, mustJSON(proto.TurnStartData{
 		TurnID: turnID, MessageID: q.messageID, Model: a.summary.Model,
 	}))
+	// Pass the daemon's turn_id so the shim stamps the same id on every
+	// runtime.event it emits for this turn (assistant.delta, assistant.message,
+	// tool.call, tool.result, turn.end, ...). Without it the shim falls back
+	// to message_id as its turn_id and clients see turn.start.turn_id !=
+	// turn.end.turn_id, which breaks turn-lifecycle tracking on the web UI.
 	a.sendControlLocked(AgentdMessage, mustJSON(map[string]any{
-		"message_id": q.messageID, "content": q.content,
+		"message_id": q.messageID, "content": q.content, "turn_id": turnID,
 	}))
 	a.mu.Unlock()
 }
@@ -553,7 +580,14 @@ func (a *actor) snapshotEvent(ctx context.Context) (*proto.Event, error) {
 		}
 		select {
 		case fr := <-ch:
-			conv = fr.Data
+			// Shim replies with {request_id, messages: [...]}; the wire
+			// `conversation` field is the messages array itself.
+			var payload struct {
+				Messages json.RawMessage `json:"messages"`
+			}
+			if err := json.Unmarshal(fr.Data, &payload); err == nil && len(payload.Messages) > 0 {
+				conv = payload.Messages
+			}
 		case <-time.After(timeout):
 			a.mu.Lock()
 			delete(a.pendingSnap, reqID)
