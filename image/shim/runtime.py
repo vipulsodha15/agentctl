@@ -93,6 +93,14 @@ class RuntimeDriver:
             cwd=self._cfg.cwd,
             include_partial_messages=True,
         )
+        # Enable skill discovery and the `Skill` tool so user-invocable skill
+        # commands (`/docs`, `/refactor`, …) actually run instead of being
+        # treated as plain user text. The SDK auto-injects `Skill` into
+        # allowed_tools and sets setting_sources to ["user","project"], which
+        # makes the CLI scan ~/.claude/skills and ./.claude/skills; the
+        # entrypoint symlinks /skills onto /work/.claude/skills so both
+        # resolve to the per-session snapshot.
+        kwargs["skills"] = "all"
         if self._cfg.mcp_servers:
             kwargs["mcp_servers"] = self._cfg.mcp_servers
         if self._sdk_session_id:
