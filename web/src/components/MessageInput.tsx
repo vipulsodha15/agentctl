@@ -103,32 +103,7 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
         />
         <div className="controls">
           <span className="hint">
-            <kbd
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 10.5,
-                background: "var(--c-surface-2)",
-                padding: "1px 5px",
-                borderRadius: 4,
-                border: "1px solid var(--c-border)",
-              }}
-            >
-              ⏎
-            </kbd>{" "}
-            send ·{" "}
-            <kbd
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 10.5,
-                background: "var(--c-surface-2)",
-                padding: "1px 5px",
-                borderRadius: 4,
-                border: "1px solid var(--c-border)",
-              }}
-            >
-              ⇧⏎
-            </kbd>{" "}
-            newline
+            <kbd>⏎</kbd> send · <kbd>⇧ ⏎</kbd> newline · <kbd>/</kbd> skills
           </span>
           {queueDepth > 0 && (
             <span className="queue-indicator">{queueDepth} queued</span>
