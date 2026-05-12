@@ -134,8 +134,8 @@ func Run(ctx context.Context, opts Options) error {
 		SecretsPath:    opts.Layout.SecretsFile,
 		ClaudeCredsDir: opts.Layout.ClaudeCredsDir,
 		MCPs:           mcpReg,
-		Skills:      newSkillsComposerAdapter(skillMgr),
-		Usage:       newUsageRecorderAdapter(usageSvc),
+		Skills:         newSkillsComposerAdapter(skillMgr),
+		Usage:          newUsageRecorderAdapter(usageSvc),
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt

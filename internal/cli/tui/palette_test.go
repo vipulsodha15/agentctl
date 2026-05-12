@@ -75,7 +75,7 @@ func TestPaletteResetsIdxOnShrink(t *testing.T) {
 	p := palette{items: []Skill{{Name: "alpha"}, {Name: "beta"}, {Name: "gamma"}}}
 	p.updateFromInput("/")
 	p.selectNext()
-	p.selectNext() // idx=2 -> gamma
+	p.selectNext()          // idx=2 -> gamma
 	p.updateFromInput("/a") // narrows to [alpha], idx must clamp
 	if p.idx != 0 {
 		t.Fatalf("idx not clamped: %d", p.idx)

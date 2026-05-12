@@ -9,8 +9,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
-	"github.com/charmbracelet/glamour"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -366,7 +366,7 @@ func (m *Model) relayout() {
 	m.vp.Width = m.width
 	m.vp.Height = vpH
 	m.input.SetWidth(m.width - 2) // borders
-	m.ensureMD(m.width - 4)        // body width inside indent
+	m.ensureMD(m.width - 4)       // body width inside indent
 	m.ready = true
 }
 

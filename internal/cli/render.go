@@ -12,10 +12,10 @@ import (
 )
 
 type streamRenderer struct {
-	stdout      io.Writer
-	stderr      io.Writer
-	open        bool
-	deltaSeen   bool
+	stdout    io.Writer
+	stderr    io.Writer
+	open      bool
+	deltaSeen bool
 }
 
 func newRenderer(stdout, stderr io.Writer) *streamRenderer {
