@@ -10,6 +10,24 @@ fi
 mkdir -p /work/.claude/projects
 ln -sfn /work/.claude /home/agent/.claude
 
+# Expose the per-session skills snapshot under ~/.claude/skills so the
+# claude-agent-sdk's filesystem discovery (which reads `~/.claude/skills/`
+# and `./.claude/skills/`) finds them. The host bind-mounts the snapshot at
+# /skills read-only; ~/.claude is the entrypoint-managed symlink above, so
+# /work/.claude/skills is what both the user-scope and project-scope (cwd=/work)
+# settings resolve to. We only refresh a pre-existing symlink (which we placed
+# in a prior run) — a real directory under .claude/skills is left alone to
+# avoid clobbering anything the developer wrote into the session volume by
+# hand.
+if [[ -d /skills ]]; then
+  if [[ -L /work/.claude/skills ]]; then
+    rm -f /work/.claude/skills
+  fi
+  if [[ ! -e /work/.claude/skills ]]; then
+    ln -sfn /skills /work/.claude/skills
+  fi
+fi
+
 # §2.5: PAT-based git credentials. The credentials file is mode 0600 and lives
 # on the session volume; the helper config tells git to read from it. We use
 # `git config --global` rather than writing the config file directly so git
