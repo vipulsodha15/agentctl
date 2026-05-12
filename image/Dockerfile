@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     HOME=/home/agent \
+    XDG_CONFIG_HOME=/work/.config \
     XDG_CACHE_HOME=/work/.cache \
     GIT_TERMINAL_PROMPT=0
 
@@ -23,7 +24,9 @@ RUN apt-get update \
 
 # GitHub CLI (`gh`) so agents can use `gh pr create`, `gh issue`, etc. The
 # container already gets a $GITHUB_TOKEN injected by agentd; `gh` picks that
-# up automatically (no `gh auth login` required).
+# up automatically (no `gh auth login` required). `gh` subcommands that shell
+# out to git (e.g. `gh repo clone`, `gh pr create`'s push) rely on the
+# credential helper written under $XDG_CONFIG_HOME/git/ by the entrypoint.
 RUN install -d -m 0755 /usr/share/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
