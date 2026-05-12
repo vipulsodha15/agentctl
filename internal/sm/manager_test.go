@@ -3,6 +3,7 @@ package sm
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -611,6 +612,160 @@ func TestMessageRecordsMirroredToStore(t *testing.T) {
 	}
 	if records[0]["uuid"] != "u1" || records[1]["uuid"] != "u2" {
 		t.Fatalf("records out of order: %v", records)
+	}
+}
+
+// TestSnapshotFallsBackToDiskWhenShimDeadAndDBEmpty reproduces the
+// "refresh shows no message history" bug: a rehydrated (or pre-mirror)
+// session has no rows in the messages table, the shim is not connected,
+// and the only surviving record of the conversation is the SDK's JSONL on
+// the bind-mounted volume. snapshotEvent must read that file so the
+// attaching client sees its history.
+func TestSnapshotFallsBackToDiskWhenShimDeadAndDBEmpty(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(store.Options{Path: filepath.Join(dir, "agentctl.db")})
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	sessionsDir := filepath.Join(dir, "sessions")
+	seedSession(t, st, sessionsDir, seedSessionInput{
+		id: "sess_disk", name: "disk", status: "stopped",
+		model: "claude-sonnet-4-6", image: "sha256:img",
+	})
+	// Drop a JSONL file where the SDK would have left it on /work, so the
+	// daemon's disk fallback can find it without a live shim.
+	jsonlDir := filepath.Join(sessionsDir, "sess_disk", "volume", ".claude", "projects", "-work")
+	if err := os.MkdirAll(jsonlDir, 0o700); err != nil {
+		t.Fatalf("mkdir jsonl: %v", err)
+	}
+	jsonlPath := filepath.Join(jsonlDir, "sdk-abc.jsonl")
+	body := `{"uuid":"u1","type":"user","message":{"role":"user","content":"old hello"}}
+{"uuid":"u2","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old reply"}]}}
+`
+	if err := os.WriteFile(jsonlPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	mgr := New(Options{
+		Store:           st,
+		SessionsDir:     sessionsDir,
+		Hub:             fan.NewHub(),
+		Control:         newFakeControl(),
+		DefaultModel:    "claude-sonnet-4-6",
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	defer func() { _ = mgr.Shutdown(context.Background()) }()
+	if err := mgr.Rehydrate(context.Background()); err != nil {
+		t.Fatalf("rehydrate: %v", err)
+	}
+
+	stream, err := mgr.Attach(context.Background(), "sess_disk")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	defer stream.Close()
+	ev := mustEvent(t, stream, proto.EventSessionSnapshot)
+	var snap proto.SessionSnapshotData
+	if err := json.Unmarshal(ev.Data, &snap); err != nil {
+		t.Fatalf("snapshot unmarshal: %v", err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(snap.Conversation, &records); err != nil {
+		t.Fatalf("conversation unmarshal: %v (raw=%s)", err, string(snap.Conversation))
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records from disk fallback, got %d: %v", len(records), records)
+	}
+	if records[0]["uuid"] != "u1" || records[1]["uuid"] != "u2" {
+		t.Fatalf("records out of order: %v", records)
+	}
+}
+
+// TestSDKSessionIDPersistedAndForwardedInGreet covers the resume path:
+// once the shim ships runtime.session_id the daemon must persist it and
+// echo it back in the next agentd.greet so a fresh shim continues the
+// same SDK session instead of forking a new one.
+func TestSDKSessionIDPersistedAndForwardedInGreet(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(store.Options{Path: filepath.Join(dir, "agentctl.db")})
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	fc := newFakeControl()
+	mgr := New(Options{
+		Store:           st,
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		SnapshotTimeout: 100 * time.Millisecond,
+	})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "resume"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeSessionID, TS: time.Now().UTC(),
+		Data: json.RawMessage(`{"sdk_session_id":"sdk-xyz"}`)}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var got sql.NullString
+		_ = st.DB().QueryRow(`SELECT sdk_session_id FROM sessions WHERE id = ?`, r.SessionID).Scan(&got)
+		if got.Valid && got.String == "sdk-xyz" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var stored sql.NullString
+	if err := st.DB().QueryRow(`SELECT sdk_session_id FROM sessions WHERE id = ?`, r.SessionID).Scan(&stored); err != nil {
+		t.Fatalf("query sdk_session_id: %v", err)
+	}
+	if !stored.Valid || stored.String != "sdk-xyz" {
+		t.Fatalf("sdk_session_id not persisted, got %+v", stored)
+	}
+
+	// New conn comes in (fresh shim after a container restart). The shim
+	// sends runtime.hello; the actor responds with agentd.greet — and now
+	// that greet must carry the resumed sdk_session_id.
+	conn2 := newFakeConn()
+	fc.mu.Lock()
+	fc.conns[r.SessionID] = conn2
+	fc.mu.Unlock()
+	mm := mgr.(*manager)
+	a := mm.actorFor(r.SessionID)
+	if a == nil {
+		t.Fatalf("no actor for %s", r.SessionID)
+	}
+	a.InjectControlConn(conn2)
+	conn2.in <- ControlFrame{V: 1, Kind: RuntimeHello, TS: time.Now().UTC(), Data: json.RawMessage(`{}`)}
+
+	var greet ControlFrame
+	select {
+	case greet = <-conn2.filtered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for agentd.greet")
+	}
+	if greet.Kind != AgentdGreet {
+		t.Fatalf("expected agentd.greet, got %s", greet.Kind)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(greet.Data, &payload); err != nil {
+		t.Fatalf("greet unmarshal: %v (raw=%s)", err, string(greet.Data))
+	}
+	if payload["sdk_session_id"] != "sdk-xyz" {
+		t.Fatalf("greet missing sdk_session_id (got %v)", payload["sdk_session_id"])
 	}
 }
 
