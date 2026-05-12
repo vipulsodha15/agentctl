@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, Navigate } from "react-router-dom";
 import { hasToken } from "./api";
 import { SessionList } from "./routes/SessionList";
@@ -6,7 +7,25 @@ import { NewSession } from "./routes/NewSession";
 import { Settings } from "./routes/Settings";
 import { Usage } from "./routes/Usage";
 
+const SIDEBAR_COLLAPSED_KEY = "agentctl.appSidebar.collapsed";
+
 export function App() {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      // ignore — storage may be disabled
+    }
+  }, [collapsed]);
+
   if (!hasToken()) {
     return (
       <div className="no-token">
@@ -25,35 +44,47 @@ export function App() {
   }
 
   return (
-    <div className="app">
-      <aside className="app-sidebar">
+    <div className={`app${collapsed ? " sidebar-collapsed" : ""}`}>
+      <aside className={`app-sidebar${collapsed ? " collapsed" : ""}`}>
         <div className="brand">
           <span className="logo">a</span>
-          <span>agentctl</span>
+          {!collapsed && <span>agentctl</span>}
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setCollapsed((v) => !v)}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            <IconChevron direction={collapsed ? "right" : "left"} />
+          </button>
         </div>
-        <div className="section-label">Workspace</div>
+        {!collapsed && <div className="section-label">Workspace</div>}
         <nav>
-          <NavLink to="/sessions" end>
+          <NavLink to="/sessions" end title="Sessions">
             <IconSessions />
-            <span>Sessions</span>
+            {!collapsed && <span>Sessions</span>}
           </NavLink>
-          <NavLink to="/new">
+          <NavLink to="/new" title="New session">
             <IconPlus />
-            <span>New session</span>
+            {!collapsed && <span>New session</span>}
           </NavLink>
-          <NavLink to="/usage">
+          <NavLink to="/usage" title="Usage">
             <IconChart />
-            <span>Usage</span>
+            {!collapsed && <span>Usage</span>}
           </NavLink>
-          <NavLink to="/settings">
+          <NavLink to="/settings" title="Settings">
             <IconCog />
-            <span>Settings</span>
+            {!collapsed && <span>Settings</span>}
           </NavLink>
         </nav>
-        <div className="sidebar-footer">
-          <span>Coding agent</span>
-          <span>v0.1 · local daemon</span>
-        </div>
+        {!collapsed && (
+          <div className="sidebar-footer">
+            <span>Coding agent</span>
+            <span>v0.1 · local daemon</span>
+          </div>
+        )}
       </aside>
       <main className="app-main">
         <Routes>
@@ -139,6 +170,27 @@ function IconCog() {
     >
       <circle cx="12" cy="12" r="3" />
       <path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4.9a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.5a7 7 0 0 0-2 1.2l-2.4-.9-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-.9a7 7 0 0 0 2 1.2L10 21h4l.5-2.5a7 7 0 0 0 2-1.2l2.4.9 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z" />
+    </svg>
+  );
+}
+
+function IconChevron({ direction }: { direction: "left" | "right" }) {
+  return (
+    <svg
+      className="chevron-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {direction === "left" ? (
+        <polyline points="15 6 9 12 15 18" />
+      ) : (
+        <polyline points="9 6 15 12 9 18" />
+      )}
     </svg>
   );
 }

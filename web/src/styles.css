@@ -208,6 +208,10 @@ textarea {
   grid-template-columns: 232px 1fr;
   height: 100vh;
   background: var(--c-canvas);
+  transition: grid-template-columns var(--transition);
+}
+.app.sidebar-collapsed {
+  grid-template-columns: 56px 1fr;
 }
 
 .app-sidebar {
@@ -217,6 +221,11 @@ textarea {
   border-right: 1px solid var(--c-border);
   padding: 16px 12px 12px;
   gap: 4px;
+  overflow: hidden;
+}
+.app-sidebar.collapsed {
+  padding: 16px 6px 12px;
+  align-items: center;
 }
 .app-sidebar .brand {
   display: flex;
@@ -227,6 +236,39 @@ textarea {
   font-size: 15px;
   letter-spacing: -0.01em;
   color: var(--c-fg);
+}
+.app-sidebar.collapsed .brand {
+  padding: 4px 0 12px;
+  flex-direction: column;
+  gap: 8px;
+}
+.app-sidebar .sidebar-toggle {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-fg-mute);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    border-color var(--transition);
+}
+.app-sidebar .sidebar-toggle:hover {
+  background: var(--c-surface-2);
+  color: var(--c-fg);
+}
+.app-sidebar.collapsed .sidebar-toggle {
+  margin-left: 0;
+}
+.app-sidebar .sidebar-toggle .chevron-icon {
+  width: 14px;
+  height: 14px;
 }
 .app-sidebar .brand .logo {
   width: 28px;
@@ -282,6 +324,10 @@ textarea {
   height: 16px;
   flex: 0 0 auto;
   opacity: 0.85;
+}
+.app-sidebar.collapsed nav a {
+  justify-content: center;
+  padding: 8px;
 }
 
 .app-sidebar .sidebar-footer {
@@ -417,6 +463,10 @@ textarea {
   grid-template-rows: auto 1fr;
   gap: 16px;
   height: calc(100vh - 48px);
+  transition: grid-template-columns var(--transition);
+}
+.session-detail.side-collapsed {
+  grid-template-columns: minmax(0, 1fr) 40px;
 }
 .session-detail .session-header {
   grid-column: 1 / -1;
@@ -555,6 +605,46 @@ textarea {
   gap: 16px;
   min-height: 0;
   overflow: auto;
+  position: relative;
+}
+.session-detail .side.collapsed {
+  gap: 0;
+  overflow: visible;
+  align-items: center;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 8px 4px;
+}
+.session-detail .side .side-toggle {
+  align-self: flex-end;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-fg-mute);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    border-color var(--transition);
+}
+.session-detail .side .side-toggle:hover {
+  background: var(--c-surface-2);
+  color: var(--c-fg);
+}
+.session-detail .side.collapsed .side-toggle {
+  align-self: center;
+}
+.session-detail .side .side-toggle .chevron-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .tabs {
@@ -1879,13 +1969,15 @@ form .checkbox-row {
 
 /* Responsive: collapse sidebar at narrow widths */
 @media (max-width: 720px) {
-  .app {
+  .app,
+  .app.sidebar-collapsed {
     grid-template-columns: 1fr;
   }
   .app-sidebar {
     display: none;
   }
-  .session-detail {
+  .session-detail,
+  .session-detail.side-collapsed {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr auto;
   }
