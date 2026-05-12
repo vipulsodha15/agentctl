@@ -79,6 +79,13 @@ func checkSecretsFresh(secretsPath string, client httpDoer) Check {
 }
 
 func probeAnthropicSecrets(client httpDoer, sec secrets.Secrets) error {
+	if sec.ResolvedAuthMode() == secrets.AuthModeOAuth {
+		// In oauth mode there's nothing to probe over HTTP from here; the
+		// session container reads the bind-mounted credentials file at start
+		// time and the bundled claude CLI refreshes the token itself. If the
+		// file is missing, `agentctl start` fails fast with a clear message.
+		return nil
+	}
 	if sec.AnthropicAuthToken != "" {
 		baseURL := sec.AnthropicBaseURL
 		if baseURL == "" {

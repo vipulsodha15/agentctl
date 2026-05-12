@@ -107,6 +107,7 @@ type Options struct {
 	ImageID         string
 	PinnedImageID   func() string
 	SecretsPath     string
+	ClaudeCredsDir  string
 	User            string
 	WebURL          func(sessionID string) string
 	IdempotencyTTL  time.Duration
@@ -278,6 +279,26 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		return CreateResult{}, err
 	}
 
+	authMode := secrets.AuthModeAPIKey
+	claudeCredsBindSource := ""
+	if m.opts.SecretsPath != "" {
+		if sec, err := secrets.Load(m.opts.SecretsPath); err == nil {
+			authMode = sec.ResolvedAuthMode()
+		}
+	}
+	if authMode == secrets.AuthModeOAuth {
+		if m.opts.ClaudeCredsDir == "" {
+			_ = logger.Close()
+			return CreateResult{}, fmt.Errorf("auth mode=oauth but ClaudeCredsDir not configured; check agentd setup")
+		}
+		credFile := filepath.Join(m.opts.ClaudeCredsDir, ".credentials.json")
+		if info, err := os.Stat(credFile); err != nil || info.Size() == 0 {
+			_ = logger.Close()
+			return CreateResult{}, fmt.Errorf("auth mode=oauth but %s missing or empty; run `agentctl auth login`", credFile)
+		}
+		claudeCredsBindSource = m.opts.ClaudeCredsDir
+	}
+
 	if m.store != nil {
 		// control_sock_path is populated after Listen returns the assigned TCP
 		// address in provisionContainer; insert with empty here.
@@ -351,15 +372,16 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	a.broadcast(proto.EventSessionStarting, mustJSON(map[string]any{"phase": "container"}))
 
 	if err := m.provisionContainer(ctx, a, provisionInputs{
-		SessionID:    id,
-		Name:         defaultName(req.Name, id),
-		ImageID:      imageID,
-		EnvFile:      envFile,
-		VolumeDir:    filepath.Join(dir, "volume"),
-		SkillsDir:    skillsResult.Path,
-		MemBytes:     mem,
-		CPUs:         cpus,
-		SessionToken: sessionToken,
+		SessionID:       id,
+		Name:            defaultName(req.Name, id),
+		ImageID:         imageID,
+		EnvFile:         envFile,
+		VolumeDir:       filepath.Join(dir, "volume"),
+		SkillsDir:       skillsResult.Path,
+		ClaudeCredsHost: claudeCredsBindSource,
+		MemBytes:        mem,
+		CPUs:            cpus,
+		SessionToken:    sessionToken,
 	}); err != nil {
 		m.logger.Warn("session.provision_failed", slog.String("session_id", id), slog.String("error", err.Error()))
 		return CreateResult{SessionID: id, Status: summary.Status, Summary: summary}, err
@@ -369,17 +391,18 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 }
 
 type provisionInputs struct {
-	SessionID    string
-	Name         string
-	ImageID      string
-	EnvFile      string
-	VolumeDir    string
-	SkillsDir    string
-	MemBytes     int64
-	CPUs         float64
-	SessionToken string
-	NetworkID    string
-	NetworkName  string
+	SessionID       string
+	Name            string
+	ImageID         string
+	EnvFile         string
+	VolumeDir       string
+	SkillsDir       string
+	ClaudeCredsHost string
+	MemBytes        int64
+	CPUs            float64
+	SessionToken    string
+	NetworkID       string
+	NetworkName     string
 }
 
 // provisionContainer runs the Create -> Listen -> Start sequence from
@@ -448,6 +471,18 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 	if in.SkillsDir != "" {
 		mounts = append(mounts, ContainerMount{
 			Type: MountBind, Source: in.SkillsDir, Target: "/skills", ReadOnly: true,
+		})
+	}
+	// OAuth mode: mount the host's Claude credentials directory at
+	// /home/agent/.claude so the bundled `claude` CLI (spawned by the Agent
+	// SDK inside the container) finds .credentials.json on disk. Read-write
+	// is required because the CLI refreshes the access token in place — that
+	// write goes back to our snapshot, not the user's host ~/.claude.
+	if in.ClaudeCredsHost != "" {
+		mounts = append(mounts, ContainerMount{
+			Type:   MountBind,
+			Source: in.ClaudeCredsHost,
+			Target: "/home/agent/.claude",
 		})
 	}
 
@@ -603,12 +638,24 @@ func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
 	}
 	if secretsPath != "" {
 		if sec, err := secrets.Load(secretsPath); err == nil {
-			if sec.AnthropicAuthToken != "" {
+			// Auth selection precedence (most-explicit first):
+			//   1. oauth mode  -> inject nothing; the session container reads
+			//      .credentials.json from a bind-mounted /home/agent/.claude/.
+			//      Per Anthropic's auth precedence, ANTHROPIC_API_KEY /
+			//      ANTHROPIC_AUTH_TOKEN would override the OAuth subscription
+			//      and silently bill the wrong account.
+			//   2. custom endpoint -> ANTHROPIC_AUTH_TOKEN (+ optional
+			//      ANTHROPIC_BASE_URL) for routing through an LLM gateway.
+			//   3. api_key -> ANTHROPIC_API_KEY (the historical default).
+			switch {
+			case sec.ResolvedAuthMode() == secrets.AuthModeOAuth:
+				// no Anthropic env var injected
+			case sec.AnthropicAuthToken != "":
 				pairs["ANTHROPIC_AUTH_TOKEN"] = sec.AnthropicAuthToken
 				if sec.AnthropicBaseURL != "" {
 					pairs["ANTHROPIC_BASE_URL"] = sec.AnthropicBaseURL
 				}
-			} else if sec.AnthropicAPIKey != "" {
+			case sec.AnthropicAPIKey != "":
 				pairs["ANTHROPIC_API_KEY"] = sec.AnthropicAPIKey
 			}
 			if sec.GitHubPAT != "" {

@@ -565,6 +565,15 @@ func indexByte(b []byte, c byte) int {
 }
 
 func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipValidate bool) error {
+	// Already in oauth mode from a prior `agentctl auth login`. Sessions
+	// authenticate via the bind-mounted credentials file; we don't need an
+	// API key, base URL, or auth token. Skip the prompt unless the user
+	// explicitly resets the anthropic token.
+	if out.ResolvedAuthMode() == secrets.AuthModeOAuth && f.anthropicKey == "" && f.anthropicBaseURL == "" && f.anthropicAuthToken == "" && f.resetToken != "anthropic" {
+		fmt.Fprintln(env.Stdout, "Anthropic auth: oauth (from `agentctl auth login`)")
+		return nil
+	}
+
 	if f.anthropicBaseURL != "" || f.anthropicAuthToken != "" {
 		if f.anthropicBaseURL == "" || f.anthropicAuthToken == "" {
 			return fmt.Errorf("--anthropic-base-url and --anthropic-auth-token must be set together")
@@ -581,6 +590,7 @@ func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipVali
 		out.AnthropicBaseURL = baseURL
 		out.AnthropicAuthToken = f.anthropicAuthToken
 		out.AnthropicAPIKey = ""
+		out.AnthropicAuthMode = secrets.AuthModeAPIKey
 		return nil
 	}
 
@@ -593,6 +603,7 @@ func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipVali
 		out.AnthropicAPIKey = f.anthropicKey
 		out.AnthropicBaseURL = ""
 		out.AnthropicAuthToken = ""
+		out.AnthropicAuthMode = secrets.AuthModeAPIKey
 		return nil
 	}
 
@@ -632,12 +643,19 @@ func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipVali
 		return nil
 	}
 
+	fmt.Fprintln(env.Stdout, "Anthropic credentials:")
+	fmt.Fprintln(env.Stdout, "  Press Enter to skip and use `agentctl auth login` (Pro/Max subscription)")
+	fmt.Fprintln(env.Stdout, "  Or paste an ANTHROPIC_API_KEY now")
 	v, err := promptSecret(env, "ANTHROPIC_API_KEY: ")
 	if err != nil {
 		return err
 	}
 	if v == "" {
-		return fmt.Errorf("ANTHROPIC_API_KEY required (use --anthropic-key)")
+		fmt.Fprintln(env.Stdout, "Skipped. Run `agentctl auth login` to sign in with your Claude subscription.")
+		// Leave AnthropicAuthMode untouched: a prior oauth setup survives an
+		// Enter on this prompt. If there's no prior setup either, the user
+		// is left with no credentials and `agentctl start` will surface that.
+		return nil
 	}
 	if !skipValidate {
 		if err := validateAnthropic(v); err != nil {
@@ -647,6 +665,7 @@ func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipVali
 	out.AnthropicAPIKey = v
 	out.AnthropicBaseURL = ""
 	out.AnthropicAuthToken = ""
+	out.AnthropicAuthMode = secrets.AuthModeAPIKey
 	return nil
 }
 

@@ -15,13 +15,35 @@ const (
 	DirPerm  = 0o700
 )
 
+// Anthropic auth modes. AuthModeAPIKey is the historical default — agentctl
+// injects ANTHROPIC_API_KEY into the session container. AuthModeOAuth means
+// the user ran `agentctl auth login`; the session container instead gets a
+// bind-mount of the host's Claude credentials directory at /home/agent/.claude
+// so the bundled claude CLI (spawned by the Agent SDK) authenticates with
+// the user's subscription.
+const (
+	AuthModeAPIKey = "api_key"
+	AuthModeOAuth  = "oauth"
+)
+
 type Secrets struct {
 	V                  int    `json:"v"`
 	AnthropicAPIKey    string `json:"anthropic_api_key,omitempty"`
+	AnthropicAuthMode  string `json:"anthropic_auth_mode,omitempty"`
 	AnthropicBaseURL   string `json:"anthropic_base_url,omitempty"`
 	AnthropicAuthToken string `json:"anthropic_auth_token,omitempty"`
 	GitHubPAT          string `json:"github_pat,omitempty"`
 	GitHubPATKind      string `json:"github_pat_kind,omitempty"`
+}
+
+// ResolvedAuthMode returns the effective mode: explicit AnthropicAuthMode if
+// set, otherwise AuthModeAPIKey for backwards compatibility (any pre-existing
+// secrets.json that just has anthropic_api_key keeps working unchanged).
+func (s Secrets) ResolvedAuthMode() string {
+	if s.AnthropicAuthMode == AuthModeOAuth {
+		return AuthModeOAuth
+	}
+	return AuthModeAPIKey
 }
 
 func Load(path string) (Secrets, error) {

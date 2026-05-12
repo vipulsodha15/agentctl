@@ -131,8 +131,9 @@ func Run(ctx context.Context, opts Options) error {
 			}
 			return c.Image.PinnedID
 		},
-		SecretsPath: opts.Layout.SecretsFile,
-		MCPs:        mcpReg,
+		SecretsPath:    opts.Layout.SecretsFile,
+		ClaudeCredsDir: opts.Layout.ClaudeCredsDir,
+		MCPs:           mcpReg,
 		Skills:      newSkillsComposerAdapter(skillMgr),
 		Usage:       newUsageRecorderAdapter(usageSvc),
 	}
