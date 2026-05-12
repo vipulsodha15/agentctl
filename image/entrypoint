@@ -11,16 +11,18 @@ mkdir -p /work/.claude/projects
 ln -sfn /work/.claude /home/agent/.claude
 
 # §2.5: PAT-based git credentials. The credentials file is mode 0600 and lives
-# on the session volume; the helper config tells git to read from it.
+# on the session volume; the helper config tells git to read from it. We use
+# `git config --global` rather than writing the config file directly so git
+# picks it up regardless of XDG_CONFIG_HOME — `git config --global` writes to
+# the location git itself reads from on this system.
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
   mkdir -p /work/.config/git
-  umask 077
-  printf 'https://x-access-token:%s@github.com\n' "${GITHUB_TOKEN}" \
-    > /work/.config/git/credentials
-  cat > /work/.config/git/config <<'GITCONFIG'
-[credential]
-        helper = store --file=/work/.config/git/credentials
-GITCONFIG
+  (umask 077 && printf 'https://x-access-token:%s@github.com\n' "${GITHUB_TOKEN}" \
+    > /work/.config/git/credentials)
+  git config --global credential.helper "store --file=/work/.config/git/credentials"
+  # `gh` reads GITHUB_TOKEN, but some tooling (and gh's own preference order)
+  # looks for GH_TOKEN first; export both so subprocesses inherit them.
+  export GH_TOKEN="${GITHUB_TOKEN}"
 fi
 
 if [[ -n "${GIT_AUTHOR_NAME:-}" ]]; then

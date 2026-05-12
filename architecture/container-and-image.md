@@ -267,18 +267,25 @@ docker command line):
 | `AGENTCTL_SESSION_TOKEN` | session_token (api.md §4.4) | per-session secrets.env |
 | `HOME` | `/home/agent` | image |
 | `LANG`, `LC_ALL` | `C.UTF-8` | image |
+| `XDG_CONFIG_HOME` | `/work/.config` | image (puts gh/git user-config on the session volume) |
 | `XDG_CACHE_HOME` | `/work/.cache` | image |
 | `GIT_TERMINAL_PROMPT` | `0` | image (no interactive prompts on git ops) |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | derived from PAT user.email/name (queried at init) | per-session secrets.env |
+| `GH_TOKEN` | copy of `GITHUB_TOKEN` | exported by the entrypoint so `gh` and tools that prefer `GH_TOKEN` find it |
 
-Two helper files are written into `/work/.config/git/` at session create
-by the shim before runtime starts:
-
-- `credentials` — `https://x-access-token:<PAT>@github.com\n` mode `0600`.
-- `config` — `[credential] helper = store --file=/work/.config/git/credentials`.
+At entrypoint time the credentials file is written to
+`/work/.config/git/credentials` (`https://x-access-token:<PAT>@github.com\n`,
+mode `0600`) and the credential helper is registered with
+`git config --global credential.helper "store --file=/work/.config/git/credentials"`
+so git picks it up from its own configured global config path. (Writing a
+config file at `/work/.config/git/config` directly only works when git's
+discovery finds it — relying on `git config --global` is portable across the
+container's XDG layout.)
 
 This is what makes `git clone <github URL>` "just work" with the PAT
-without inlining it in command output (R3 acceptance criterion).
+without inlining it in command output (R3 acceptance criterion), and is also
+what lets `gh` subcommands that shell out to git (`gh repo clone`, the push
+inside `gh pr create`, `gh pr checkout`) succeed against private repos.
 
 ### 2.6 Entrypoint and runtime invocation
 
