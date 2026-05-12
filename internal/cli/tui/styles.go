@@ -84,9 +84,9 @@ func newStyles() styles {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colAccent).
 			Padding(0, 1),
-		hint:    lipgloss.NewStyle().Foreground(colMuted),
-		diffAdd: lipgloss.NewStyle().Foreground(colOK),
-		diffDel: lipgloss.NewStyle().Foreground(colErr),
+		hint:     lipgloss.NewStyle().Foreground(colMuted),
+		diffAdd:  lipgloss.NewStyle().Foreground(colOK),
+		diffDel:  lipgloss.NewStyle().Foreground(colErr),
 		diffHunk: lipgloss.NewStyle().Foreground(colAccent),
 		paletteBox: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
