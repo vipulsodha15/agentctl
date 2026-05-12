@@ -638,12 +638,24 @@ func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
 	}
 	if secretsPath != "" {
 		if sec, err := secrets.Load(secretsPath); err == nil {
-			// In oauth mode the session container reads .credentials.json
-			// from a bind-mounted /home/agent/.claude/ instead. We must NOT
-			// inject ANTHROPIC_API_KEY here: per Anthropic's auth precedence
-			// it would override the OAuth subscription credentials and
-			// silently bill the wrong account.
-			if sec.ResolvedAuthMode() == secrets.AuthModeAPIKey && sec.AnthropicAPIKey != "" {
+			// Auth selection precedence (most-explicit first):
+			//   1. oauth mode  -> inject nothing; the session container reads
+			//      .credentials.json from a bind-mounted /home/agent/.claude/.
+			//      Per Anthropic's auth precedence, ANTHROPIC_API_KEY /
+			//      ANTHROPIC_AUTH_TOKEN would override the OAuth subscription
+			//      and silently bill the wrong account.
+			//   2. custom endpoint -> ANTHROPIC_AUTH_TOKEN (+ optional
+			//      ANTHROPIC_BASE_URL) for routing through an LLM gateway.
+			//   3. api_key -> ANTHROPIC_API_KEY (the historical default).
+			switch {
+			case sec.ResolvedAuthMode() == secrets.AuthModeOAuth:
+				// no Anthropic env var injected
+			case sec.AnthropicAuthToken != "":
+				pairs["ANTHROPIC_AUTH_TOKEN"] = sec.AnthropicAuthToken
+				if sec.AnthropicBaseURL != "" {
+					pairs["ANTHROPIC_BASE_URL"] = sec.AnthropicBaseURL
+				}
+			case sec.AnthropicAPIKey != "":
 				pairs["ANTHROPIC_API_KEY"] = sec.AnthropicAPIKey
 			}
 			if sec.GitHubPAT != "" {

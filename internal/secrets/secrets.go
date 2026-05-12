@@ -27,11 +27,13 @@ const (
 )
 
 type Secrets struct {
-	V                 int    `json:"v"`
-	AnthropicAPIKey   string `json:"anthropic_api_key,omitempty"`
-	AnthropicAuthMode string `json:"anthropic_auth_mode,omitempty"`
-	GitHubPAT         string `json:"github_pat,omitempty"`
-	GitHubPATKind     string `json:"github_pat_kind,omitempty"`
+	V                  int    `json:"v"`
+	AnthropicAPIKey    string `json:"anthropic_api_key,omitempty"`
+	AnthropicAuthMode  string `json:"anthropic_auth_mode,omitempty"`
+	AnthropicBaseURL   string `json:"anthropic_base_url,omitempty"`
+	AnthropicAuthToken string `json:"anthropic_auth_token,omitempty"`
+	GitHubPAT          string `json:"github_pat,omitempty"`
+	GitHubPATKind      string `json:"github_pat_kind,omitempty"`
 }
 
 // ResolvedAuthMode returns the effective mode: explicit AnthropicAuthMode if

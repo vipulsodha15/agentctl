@@ -43,7 +43,7 @@ func checkSecretsFresh(secretsPath string, client httpDoer) Check {
 	}
 	var fails []string
 	if !skipAnthropic {
-		if err := probeAnthropic(client, sec.AnthropicAPIKey); err != nil {
+		if err := probeAnthropicSecrets(client, sec); err != nil {
 			fails = append(fails, "anthropic: "+err.Error()+"; run `agentctl init --reset-token anthropic`")
 		}
 	}
@@ -78,6 +78,24 @@ func checkSecretsFresh(secretsPath string, client httpDoer) Check {
 	}
 }
 
+func probeAnthropicSecrets(client httpDoer, sec secrets.Secrets) error {
+	if sec.ResolvedAuthMode() == secrets.AuthModeOAuth {
+		// In oauth mode there's nothing to probe over HTTP from here; the
+		// session container reads the bind-mounted credentials file at start
+		// time and the bundled claude CLI refreshes the token itself. If the
+		// file is missing, `agentctl start` fails fast with a clear message.
+		return nil
+	}
+	if sec.AnthropicAuthToken != "" {
+		baseURL := sec.AnthropicBaseURL
+		if baseURL == "" {
+			return fmt.Errorf("ANTHROPIC_BASE_URL not set (auth token present without endpoint)")
+		}
+		return probeAnthropicBearer(client, baseURL, sec.AnthropicAuthToken)
+	}
+	return probeAnthropic(client, sec.AnthropicAPIKey)
+}
+
 func probeAnthropic(client httpDoer, key string) error {
 	if key == "" {
 		return fmt.Errorf("ANTHROPIC_API_KEY not set")
@@ -89,6 +107,26 @@ func probeAnthropic(client httpDoer, key string) error {
 		return err
 	}
 	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == 200 {
+		return nil
+	}
+	return fmt.Errorf("status %d", resp.StatusCode)
+}
+
+func probeAnthropicBearer(client httpDoer, baseURL, token string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	resp, err := client.Do(req)
 	if err != nil {
