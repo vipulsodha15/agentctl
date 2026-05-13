@@ -348,20 +348,17 @@ func TestSessionRuntime_Synthesize_TurnStartBeforeSendReturns(t *testing.T) {
 	}
 	st := api.stream("sess-1")
 
-	// Arrange the fake to push the synth TurnStart + AssistantMessage from
-	// within Send, before Send returns. The seed Send is sent[0]; the synth
-	// is sent[1] — only inject for the synth send so the seed flow is
-	// unaffected.
+	// Arrange the fake to push the synth TurnStart from within Send (before
+	// Send returns) and pause, so the reader processes TurnStart with
+	// synthMID still empty — exactly the production race. The seed Send is
+	// sent[0]; the synth is sent[1] — only inject for the synth send.
 	api.beforeSendReturn = func(req sm.SendRequest, mid string) {
 		if req.Content != "synthesize now" {
 			return
 		}
 		st.push(proto.EventTurnStart, proto.TurnStartData{TurnID: "T-synth", MessageID: mid})
-		// Give the reader a chance to dequeue TurnStart before Send returns,
-		// recreating the production race where the goroutine has already
-		// processed it by the time synthMID is set.
+		// Wait long enough for the reader to dequeue and process TurnStart.
 		time.Sleep(20 * time.Millisecond)
-		st.push(proto.EventAssistantMessage, proto.AssistantMessageData{TurnID: "T-synth", Content: "## Synthesis\n- root cause: cache stampede"})
 	}
 
 	type result struct {
@@ -373,6 +370,22 @@ func TestSessionRuntime_Synthesize_TurnStartBeforeSendReturns(t *testing.T) {
 		text, err := r.Synthesize(context.Background(), SendMessageInput{StageID: "s1", SessionID: "sess-1", Content: "synthesize now"})
 		done <- result{text, err}
 	}()
+
+	// Once retroactive reconciliation has run, synthTID is set. Without the
+	// fix, synthTID stays empty and this waitFor times out the test.
+	waitFor(t, func() bool {
+		r.mu.Lock()
+		stage, ok := r.stages["s1"]
+		r.mu.Unlock()
+		if !ok {
+			return false
+		}
+		stage.mu.Lock()
+		defer stage.mu.Unlock()
+		return stage.synthTID != ""
+	}, "synthTID reconciled retroactively after Send returns")
+
+	st.push(proto.EventAssistantMessage, proto.AssistantMessageData{TurnID: "T-synth", Content: "## Synthesis\n- root cause: cache stampede"})
 
 	select {
 	case res := <-done:
