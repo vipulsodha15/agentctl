@@ -3509,6 +3509,11 @@ form .checkbox-row {
   padding: 10px 14px;
 }
 .msg-error svg { flex-shrink: 0; margin-top: 2px; }
+.msg-error > span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
 
 /* ── Message bubbles ────────────────────────────────────────────
  * Assistant rows: a small coloured initial avatar in a dedicated
