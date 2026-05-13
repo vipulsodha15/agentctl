@@ -471,7 +471,20 @@ function AllowlistPanel({
             ) : (
               selectedItems.map((it) => (
                 <span key={it.key} className="allowlist-chip">
-                  {it.label}
+                  <span>{it.label}</span>
+                  <button
+                    type="button"
+                    className="allowlist-chip-remove"
+                    onClick={() => {
+                      const next = new Set(selected);
+                      next.delete(it.key);
+                      onChange(next);
+                    }}
+                    aria-label={`Remove ${it.label}`}
+                    title={`Remove ${it.label}`}
+                  >
+                    ×
+                  </button>
                 </span>
               ))
             )}
@@ -482,6 +495,11 @@ function AllowlistPanel({
             onClick={() => setModalOpen(true)}
           >
             {pickButtonLabel}
+            {selectedItems.length > 0 && (
+              <span className="allowlist-edit-count">
+                {selectedItems.length}/{items.length}
+              </span>
+            )}
           </button>
         </div>
       )}
