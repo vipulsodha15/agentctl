@@ -13,6 +13,7 @@ import {
   INITIAL_CONVERSATION_STATE,
   conversationReducer,
 } from "../lib/conversation";
+import { ConfirmModal } from "../components/ConfirmModal";
 
 
 const SIDE_PANEL_COLLAPSED_KEY = "agentctl.sidePanel.collapsed";
@@ -26,6 +27,7 @@ export function SessionDetail() {
   );
   const [tab, setTab] = useState<"conversation" | "changes">("conversation");
   const [endBusy, setEndBusy] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
   const [costRefreshKey, setCostRefreshKey] = useState(0);
   const [filter, setFilter] = useState<TranscriptFilter>("all");
   const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => {
@@ -103,16 +105,19 @@ export function SessionDetail() {
     return () => handle.close();
   }, [id]);
 
-  const onEnd = useCallback(async () => {
+  const onEnd = useCallback(() => {
     if (!id) return;
-    if (!window.confirm("End session? Container, volume, and history will be removed.")) {
-      return;
-    }
+    setConfirmEnd(true);
+  }, [id]);
+
+  const doEnd = useCallback(async () => {
+    if (!id) return;
     setEndBusy(true);
     try {
       await apiJson(`/v1/sessions/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
+      setConfirmEnd(false);
       navigate("/sessions");
     } catch (err) {
       const msg =
@@ -121,6 +126,7 @@ export function SessionDetail() {
           : String(err);
       alert(`Failed to end session: ${msg}`);
       setEndBusy(false);
+      setConfirmEnd(false);
     }
   }, [id, navigate]);
 
@@ -244,6 +250,16 @@ export function SessionDetail() {
           </>
         )}
       </aside>
+      <ConfirmModal
+        open={confirmEnd}
+        title="End session?"
+        message="Container, volume, and history will be removed."
+        confirmLabel={endBusy ? "Ending…" : "End session"}
+        variant="danger"
+        busy={endBusy}
+        onConfirm={doEnd}
+        onCancel={() => setConfirmEnd(false)}
+      />
     </section>
   );
 }

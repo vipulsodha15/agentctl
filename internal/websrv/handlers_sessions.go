@@ -6,10 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 
 	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/sm"
 )
+
+// taskStageSessionName matches the deterministic name tm.SessionRuntime gives
+// each stage-backed session (see internal/tm/session_runtime.go). These are
+// owned by tasks and surfaced through the Tasks UI, so the Sessions list
+// excludes them.
+var taskStageSessionName = regexp.MustCompile(`^task-task_[A-Z0-9]+-stage-\d+$`)
 
 func (s *Server) requireManager(w http.ResponseWriter) bool {
 	if s.manager == nil {
@@ -28,6 +35,14 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
 		return
 	}
+	filtered := list[:0]
+	for _, sum := range list {
+		if taskStageSessionName.MatchString(sum.Name) {
+			continue
+		}
+		filtered = append(filtered, sum)
+	}
+	list = filtered
 	if s.usage != nil && len(list) > 0 {
 		ids := make([]string, 0, len(list))
 		for _, sum := range list {
