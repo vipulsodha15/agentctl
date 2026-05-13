@@ -134,31 +134,6 @@ func Run(ctx context.Context, opts Options) error {
 		logger.Warn("ttl.load_failed", slog.String("error", err.Error()))
 	}
 
-	taskHub := fan.NewHub()
-	tmLog := log.New(log.Options{Component: "tm"})
-	simRuntime := tm.NewSimRuntimeWithOptions(tm.SimRuntimeOptions{
-		Logger: tmLog,
-		Auth: &tm.AuthSource{
-			SecretsPath: opts.Layout.SecretsFile,
-			CredsFile:   opts.Layout.ClaudeCredsFile,
-		},
-		Model: cfg.Model.Default,
-	})
-	if simRuntime.HasCredential() {
-		logger.Info("tm.credential_resolved")
-	} else {
-		logger.Warn("tm.no_credential",
-			slog.String("hint", "run `agentctl init` to add an API key, or `agentctl auth login` for OAuth"))
-	}
-	taskMgr := tm.New(tm.Options{
-		Store:   st,
-		Library: taskLib,
-		Runtime: simRuntime,
-		Hub:     taskHub,
-		Logger:  tmLog,
-	})
-	_ = taskMgr
-
 	usageLog := log.New(log.Options{Component: log.ComponentSessions})
 	usageSvc := usage.New(usage.Options{
 		Store:   st,
@@ -195,6 +170,20 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	manager := sm.New(managerOpts)
 	defer func() { _ = manager.Shutdown(ctx) }()
+
+	// Task chat reuses the session-manager path: each task stage spawns one
+	// fresh container session with its agent's prompt applied, instead of
+	// the old direct-HTTP path that reimplemented auth + system framing.
+	taskHub := fan.NewHub()
+	tmLog := log.New(log.Options{Component: "tm"})
+	taskMgr := tm.New(tm.Options{
+		Store:   st,
+		Library: taskLib,
+		Runtime: tm.NewSessionRuntime(manager, tmLog),
+		Hub:     taskHub,
+		Logger:  tmLog,
+	})
+	_ = taskMgr
 
 	recoverLog := log.New(log.Options{Component: log.ComponentRecovery})
 	apiSrv.SetReconciling(true)

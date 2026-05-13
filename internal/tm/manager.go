@@ -35,9 +35,10 @@ What the next agent should do with what you've handed over.
 Anything you could not resolve.`
 
 // StageRuntime is the abstraction the task manager talks to for running a
-// stage. In production this drives a real session via sm.Manager; in offline
-// or test environments a simulator implementation produces canned replies so
-// the UI/CLI can be exercised end-to-end without Docker. See SimRuntime below.
+// stage. The production implementation is SessionRuntime (one container-
+// backed sm.Manager session per stage). Tests supply their own fakes
+// against this same interface — see session_runtime_test.go for the
+// channel-backed fake SessionAPI.
 type StageRuntime interface {
 	// StartStage prepares the agent's session and returns once the agent is
 	// ready for messages. The returned sessionID is recorded on the stage row.
@@ -69,7 +70,7 @@ type StartStageInput struct {
 	// emits while the stage is active. The manager uses these to populate
 	// the task chat thread and to lock the synthesis on handoff.
 	OnAssistantMessage func(content string)
-	// OnToolUse is invoked with each tool call (optional; SimRuntime ignores).
+	// OnToolUse is invoked with each tool call (optional).
 	OnToolUse func(tool string, input json.RawMessage)
 	// OnError is invoked when the runtime surfaces an inline error.
 	OnError func(message string)
@@ -122,7 +123,7 @@ func New(opts Options) *Manager {
 		opts.Hub = fan.NewHub()
 	}
 	if opts.Runtime == nil {
-		opts.Runtime = NewSimRuntime(opts.Logger)
+		panic("tm.New: Runtime is required (use tm.NewSessionRuntime in production)")
 	}
 	return &Manager{opts: opts, logger: opts.Logger, now: opts.Now}
 }

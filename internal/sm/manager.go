@@ -54,6 +54,12 @@ type CreateRequest struct {
 	MemLimitBytes int64
 	CPULimitCores float64
 	ImageID       string
+	// SystemPrompt, when non-empty, is forwarded to the in-container shim via
+	// the agentd.greet frame and applied as ClaudeAgentOptions.system_prompt
+	// on the Claude Agent SDK. Used by tm.SessionRuntime to run each task
+	// stage with the stage's agent prompt; left empty for normal sessions so
+	// the SDK keeps its default Claude Code system prompt.
+	SystemPrompt string
 }
 
 type CreateResult struct {
@@ -349,6 +355,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		GitHubPAT:       pat,
 		SkillCollisions: skillsResult.Collisions,
 		Usage:           m.opts.Usage,
+		SystemPrompt:    req.SystemPrompt,
 	})
 	m.mu.Lock()
 	m.actors[id] = a

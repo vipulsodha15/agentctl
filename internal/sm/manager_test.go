@@ -769,6 +769,67 @@ func TestSDKSessionIDPersistedAndForwardedInGreet(t *testing.T) {
 	}
 }
 
+// TestCreate_SystemPromptInGreet verifies CreateRequest.SystemPrompt round-
+// trips into the agentd.greet payload. Used by tm.SessionRuntime so each
+// task-chat stage runs under its agent's prompt on the SDK side.
+func TestCreate_SystemPromptInGreet(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "stage", SystemPrompt: "you are a helpful test agent"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	conn := fc.attach(t, r.SessionID, mgr)
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeHello, TS: time.Now().UTC(), Data: json.RawMessage(`{}`)}
+
+	greet := waitGreet(t, conn)
+	var payload map[string]any
+	if err := json.Unmarshal(greet.Data, &payload); err != nil {
+		t.Fatalf("greet unmarshal: %v (raw=%s)", err, string(greet.Data))
+	}
+	if payload["system_prompt"] != "you are a helpful test agent" {
+		t.Fatalf("greet system_prompt wrong: %v", payload["system_prompt"])
+	}
+}
+
+// TestCreate_SystemPromptOmittedWhenEmpty guards against unconditionally
+// forwarding an empty string, which would override the SDK's default Claude
+// Code prompt for normal (non-task-chat) sessions.
+func TestCreate_SystemPromptOmittedWhenEmpty(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "no-sp"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	conn := fc.attach(t, r.SessionID, mgr)
+	conn.in <- ControlFrame{V: 1, Kind: RuntimeHello, TS: time.Now().UTC(), Data: json.RawMessage(`{}`)}
+
+	greet := waitGreet(t, conn)
+	var payload map[string]any
+	if err := json.Unmarshal(greet.Data, &payload); err != nil {
+		t.Fatalf("greet unmarshal: %v (raw=%s)", err, string(greet.Data))
+	}
+	if v, ok := payload["system_prompt"]; ok {
+		t.Fatalf("greet must omit system_prompt when empty; got %v", v)
+	}
+}
+
+func waitGreet(t *testing.T, conn *fakeConn) ControlFrame {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case fr := <-conn.filtered:
+			if fr.Kind == AgentdGreet {
+				return fr
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for agentd.greet")
+		}
+	}
+}
+
 func TestTerminate(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()
