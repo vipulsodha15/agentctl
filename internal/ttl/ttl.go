@@ -1,17 +1,18 @@
-// Package ttl ("task library") is the in-memory index of Agent and Workflow
-// YAML definitions on disk. See workflows-task-management-architecture.md §9.4.
+// Package ttl ("task library") owns the persistence + validation of Agent
+// and Workflow definitions. Storage is sqlite-backed so the daemon stays
+// stateless-container friendly: there are no on-disk YAML files to keep
+// alive across pod restarts.
 //
-// Agents and workflows are file-backed: each lives in its own YAML file under
-// ~/.local/share/agentctl/{agents,workflows}/<name>.yaml. ttl loads the
-// directories at startup and watches them for changes; mutation methods (Put,
-// Remove) update both the on-disk file and the in-memory index in lockstep.
+// Built-in YAMLs ship embedded in the binary (see embed.go) and are upserted
+// into the agents/workflows tables at boot via Materialize. Custom entries
+// flow in through Put{Agent,Workflow} from the CLI / HTTP API.
 package ttl
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,7 +31,6 @@ const (
 	SourceCustom  = "custom"
 )
 
-// validColours mirrors workflows-task-management.md §R1 stage palette + §R5.
 var validColours = map[string]bool{
 	"blue": true, "purple": true, "green": true,
 	"amber": true, "red": true, "slate": true,
@@ -40,13 +40,14 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 var (
 	ErrNotFound        = errors.New("ttl: not found")
-	ErrAlreadyExists   = errors.New("ttl: already exists")
 	ErrBuiltinReadOnly = errors.New("ttl: built-in is read-only")
 	ErrValidation      = errors.New("ttl: validation failed")
 	ErrInUse           = errors.New("ttl: in use")
 )
 
-// Agent is the on-disk schema for an agent. See arch §4.3.
+// Agent is the schema for an agent. The yaml tags are what the on-the-wire
+// YAML body looks like; json tags govern the HTTP API. Source/LoadedAt are
+// not serialized into the YAML body — they are computed from the row.
 type Agent struct {
 	Name          string   `yaml:"name" json:"name"`
 	Description   string   `yaml:"description" json:"description"`
@@ -56,11 +57,7 @@ type Agent struct {
 	MCPsAllowed   []string `yaml:"mcps_allowed,omitempty" json:"mcps_allowed,omitempty"`
 	SkillsAllowed []string `yaml:"skills_allowed,omitempty" json:"skills_allowed,omitempty"`
 
-	// Source is "builtin" or "custom"; not serialized into YAML files.
-	Source string `yaml:"-" json:"source,omitempty"`
-	// Path is the file path the agent was loaded from.
-	Path string `yaml:"-" json:"path,omitempty"`
-	// LoadedAt is set by ttl on load.
+	Source   string    `yaml:"-" json:"source,omitempty"`
 	LoadedAt time.Time `yaml:"-" json:"loaded_at,omitempty"`
 }
 
@@ -69,23 +66,29 @@ type WorkflowStage struct {
 	Agent string `yaml:"agent" json:"agent"`
 }
 
-// Workflow is the on-disk schema for a workflow. See arch §4.3.
+// Workflow is the schema for a workflow.
 type Workflow struct {
 	Name        string          `yaml:"name" json:"name"`
 	Description string          `yaml:"description" json:"description"`
 	Stages      []WorkflowStage `yaml:"stages" json:"stages"`
 
 	Source   string    `yaml:"-" json:"source,omitempty"`
-	Path     string    `yaml:"-" json:"path,omitempty"`
 	LoadedAt time.Time `yaml:"-" json:"loaded_at,omitempty"`
 }
 
-// Library indexes agents and workflows.
+// DB is the subset of *sql.DB the library needs. Declared as an interface so
+// tests can pass an in-memory shim if they prefer.
+type DB interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Library is the in-memory index of agents + workflows, backed by sqlite.
+// All mutations write the DB row first; the in-memory cache is rebuilt from
+// the DB on every change so the cache cannot drift from canonical state.
 type Library struct {
-	builtinAgents    string
-	customAgents     string
-	builtinWorkflows string
-	customWorkflows  string
+	db DB
 
 	mu        sync.RWMutex
 	agents    map[string]*Agent
@@ -93,64 +96,99 @@ type Library struct {
 }
 
 type Options struct {
-	BuiltinAgentsDir    string
-	CustomAgentsDir     string
-	BuiltinWorkflowsDir string
-	CustomWorkflowsDir  string
+	DB DB
 }
 
 func New(opts Options) *Library {
 	return &Library{
-		builtinAgents:    opts.BuiltinAgentsDir,
-		customAgents:     opts.CustomAgentsDir,
-		builtinWorkflows: opts.BuiltinWorkflowsDir,
-		customWorkflows:  opts.CustomWorkflowsDir,
-		agents:           map[string]*Agent{},
-		workflows:        map[string]*Workflow{},
+		db:        opts.DB,
+		agents:    map[string]*Agent{},
+		workflows: map[string]*Workflow{},
 	}
 }
 
-// Load (re)reads both agent and workflow directories from disk. Errors from
-// individual files are logged via the issues slice — they do not abort the
-// whole load, mirroring the skills library's permissive posture.
+// LoadIssues collects per-name parse/validation errors encountered while
+// loading rows from the DB. Bad rows are skipped (not loaded into the cache)
+// so a single malformed entry cannot poison the rest of the library.
 type LoadIssues struct {
 	AgentErrors    map[string]string
 	WorkflowErrors map[string]string
 }
 
-func (l *Library) Load() (LoadIssues, error) {
+// Load rebuilds the in-memory index from the agents/workflows tables.
+func (l *Library) Load(ctx context.Context) (LoadIssues, error) {
 	issues := LoadIssues{
 		AgentErrors:    map[string]string{},
 		WorkflowErrors: map[string]string{},
 	}
-	agents, agentErrs := loadAgentsDir(l.builtinAgents, SourceBuiltin)
-	customAgents, customAgentErrs := loadAgentsDir(l.customAgents, SourceCustom)
-	for n, e := range agentErrs {
-		issues.AgentErrors[n] = e
+
+	agentRows, err := l.db.QueryContext(ctx,
+		`SELECT name, source, yaml_body, updated_at FROM agents`)
+	if err != nil {
+		return issues, fmt.Errorf("query agents: %w", err)
 	}
-	for n, e := range customAgentErrs {
-		issues.AgentErrors[n] = e
-	}
-	// Custom overrides built-in if names collide.
-	for _, a := range customAgents {
+	defer agentRows.Close()
+
+	agents := map[string]*Agent{}
+	for agentRows.Next() {
+		var name, source, body, updatedAt string
+		if err := agentRows.Scan(&name, &source, &body, &updatedAt); err != nil {
+			return issues, fmt.Errorf("scan agent: %w", err)
+		}
+		a, perr := ParseAgentYAML([]byte(body))
+		if perr != nil {
+			issues.AgentErrors[name] = perr.Error()
+			continue
+		}
+		if verr := validateAgent(a); verr != nil {
+			issues.AgentErrors[name] = verr.Error()
+			continue
+		}
+		a.Source = source
+		if t, err := time.Parse(time.RFC3339Nano, updatedAt); err == nil {
+			a.LoadedAt = t
+		}
 		agents[a.Name] = a
 	}
+	if err := agentRows.Err(); err != nil {
+		return issues, err
+	}
 
-	workflows, wfErrs := loadWorkflowsDir(l.builtinWorkflows, SourceBuiltin)
-	customWorkflows, customWfErrs := loadWorkflowsDir(l.customWorkflows, SourceCustom)
-	for n, e := range wfErrs {
-		issues.WorkflowErrors[n] = e
+	workflowRows, err := l.db.QueryContext(ctx,
+		`SELECT name, source, yaml_body, updated_at FROM workflows`)
+	if err != nil {
+		return issues, fmt.Errorf("query workflows: %w", err)
 	}
-	for n, e := range customWfErrs {
-		issues.WorkflowErrors[n] = e
-	}
-	for _, w := range customWorkflows {
+	defer workflowRows.Close()
+
+	workflows := map[string]*Workflow{}
+	for workflowRows.Next() {
+		var name, source, body, updatedAt string
+		if err := workflowRows.Scan(&name, &source, &body, &updatedAt); err != nil {
+			return issues, fmt.Errorf("scan workflow: %w", err)
+		}
+		w, perr := ParseWorkflowYAML([]byte(body))
+		if perr != nil {
+			issues.WorkflowErrors[name] = perr.Error()
+			continue
+		}
+		if verr := validateWorkflow(w); verr != nil {
+			issues.WorkflowErrors[name] = verr.Error()
+			continue
+		}
+		w.Source = source
+		if t, err := time.Parse(time.RFC3339Nano, updatedAt); err == nil {
+			w.LoadedAt = t
+		}
 		workflows[w.Name] = w
+	}
+	if err := workflowRows.Err(); err != nil {
+		return issues, err
 	}
 
 	// Cross-reference: workflows that name a missing agent are loaded but
-	// flagged; we do not drop them so the UI can render the validation
-	// error instead of silently hiding them.
+	// flagged so the UI can render the validation error rather than silently
+	// hiding them.
 	for name, w := range workflows {
 		for _, st := range w.Stages {
 			if _, ok := agents[st.Agent]; !ok {
@@ -166,125 +204,7 @@ func (l *Library) Load() (LoadIssues, error) {
 	return issues, nil
 }
 
-func loadAgentsDir(dir, source string) (map[string]*Agent, map[string]string) {
-	out := map[string]*Agent{}
-	errs := map[string]string{}
-	if dir == "" {
-		return out, errs
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			errs["__dir__"] = err.Error()
-		}
-		return out, errs
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		a, err := readAgentFile(path)
-		stem := strings.TrimSuffix(e.Name(), ".yaml")
-		if err != nil {
-			errs[stem] = err.Error()
-			continue
-		}
-		a.Source = source
-		a.Path = path
-		a.LoadedAt = time.Now()
-		out[a.Name] = a
-	}
-	return out, errs
-}
-
-func loadWorkflowsDir(dir, source string) (map[string]*Workflow, map[string]string) {
-	out := map[string]*Workflow{}
-	errs := map[string]string{}
-	if dir == "" {
-		return out, errs
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			errs["__dir__"] = err.Error()
-		}
-		return out, errs
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		w, err := readWorkflowFile(path)
-		stem := strings.TrimSuffix(e.Name(), ".yaml")
-		if err != nil {
-			errs[stem] = err.Error()
-			continue
-		}
-		w.Source = source
-		w.Path = path
-		w.LoadedAt = time.Now()
-		out[w.Name] = w
-	}
-	return out, errs
-}
-
-func readAgentFile(path string) (*Agent, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > MaxAgentBytes {
-		return nil, fmt.Errorf("agent yaml exceeds %d bytes", MaxAgentBytes)
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	a, err := ParseAgentYAML(body)
-	if err != nil {
-		return nil, err
-	}
-	stem := strings.TrimSuffix(filepath.Base(path), ".yaml")
-	if a.Name != stem {
-		return nil, fmt.Errorf("name %q must match filename stem %q", a.Name, stem)
-	}
-	if err := validateAgent(a); err != nil {
-		return nil, err
-	}
-	return a, nil
-}
-
-func readWorkflowFile(path string) (*Workflow, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > MaxWorkflowBytes {
-		return nil, fmt.Errorf("workflow yaml exceeds %d bytes", MaxWorkflowBytes)
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	w, err := ParseWorkflowYAML(body)
-	if err != nil {
-		return nil, err
-	}
-	stem := strings.TrimSuffix(filepath.Base(path), ".yaml")
-	if w.Name != stem {
-		return nil, fmt.Errorf("name %q must match filename stem %q", w.Name, stem)
-	}
-	if err := validateWorkflow(w); err != nil {
-		return nil, err
-	}
-	return w, nil
-}
-
-// ParseAgentYAML decodes raw YAML bytes into an *Agent without any disk-side
-// validation (filename match, path). Used by Put when accepting bodies over
-// the API.
+// ParseAgentYAML decodes raw YAML bytes into an *Agent (no DB-side state).
 func ParseAgentYAML(body []byte) (*Agent, error) {
 	var a Agent
 	if err := yaml.Unmarshal(body, &a); err != nil {
@@ -348,8 +268,7 @@ func validateWorkflow(w *Workflow) error {
 	return nil
 }
 
-// ListAgents returns agents sorted by name. The slice is a copy; callers may
-// mutate it freely.
+// ListAgents returns agents sorted by name.
 func (l *Library) ListAgents() []Agent {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -361,7 +280,6 @@ func (l *Library) ListAgents() []Agent {
 	return out
 }
 
-// GetAgent returns a copy of the agent by name.
 func (l *Library) GetAgent(name string) (Agent, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -393,13 +311,12 @@ func (l *Library) GetWorkflow(name string) (Workflow, error) {
 	return *w, nil
 }
 
-// PutAgent writes a custom agent to disk and reindexes. If body is non-empty
-// it overrides the in-memory spec entirely; otherwise the caller-provided
-// spec is used.
-func (l *Library) PutAgent(spec Agent, body []byte) (Agent, error) {
-	if l.customAgents == "" {
-		return Agent{}, fmt.Errorf("custom agents dir is not configured")
-	}
+// PutAgent writes a custom agent. If body is non-empty it is the canonical
+// YAML; otherwise spec is re-serialized via yaml.Marshal. Built-in rows
+// cannot be overwritten through this path — saving over a built-in always
+// creates a new custom row (the in-memory index maps custom on top of the
+// built-in on read).
+func (l *Library) PutAgent(ctx context.Context, spec Agent, body []byte) (Agent, error) {
 	if len(body) > 0 {
 		parsed, err := ParseAgentYAML(body)
 		if err != nil {
@@ -413,28 +330,38 @@ func (l *Library) PutAgent(spec Agent, body []byte) (Agent, error) {
 	if err := validateAgent(&spec); err != nil {
 		return Agent{}, err
 	}
+	if len(body) == 0 {
+		// Spec was provided typed — re-emit it as YAML for storage so the
+		// "show this agent's YAML" path always has bytes to return.
+		b, err := yaml.Marshal(&spec)
+		if err != nil {
+			return Agent{}, fmt.Errorf("yaml marshal: %w", err)
+		}
+		body = b
+	}
+	if len(body) > MaxAgentBytes {
+		return Agent{}, fmt.Errorf("%w: yaml exceeds %d bytes", ErrValidation, MaxAgentBytes)
+	}
+
+	// Built-ins are not editable through this API. If a row with this name
+	// already exists as a builtin, we refuse — the user must pick a new name
+	// to fork it.
 	l.mu.RLock()
 	existing, exists := l.agents[spec.Name]
 	l.mu.RUnlock()
 	if exists && existing.Source == SourceBuiltin {
-		// Saving over a built-in produces a custom shadow.
+		return Agent{}, fmt.Errorf("%w: %q is a built-in; copy it under a new name to customize", ErrBuiltinReadOnly, spec.Name)
 	}
-	if err := os.MkdirAll(l.customAgents, 0o700); err != nil {
-		return Agent{}, fmt.Errorf("mkdir custom agents: %w", err)
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := l.db.ExecContext(ctx, `INSERT INTO agents (name, source, yaml_body, created_at, updated_at)
+        VALUES (?, 'custom', ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET yaml_body=excluded.yaml_body, updated_at=excluded.updated_at`,
+		spec.Name, string(body), now, now); err != nil {
+		return Agent{}, fmt.Errorf("upsert agent: %w", err)
 	}
-	path := filepath.Join(l.customAgents, spec.Name+".yaml")
-	yamlBytes, err := yaml.Marshal(&spec)
-	if err != nil {
-		return Agent{}, fmt.Errorf("yaml marshal: %w", err)
-	}
-	if len(yamlBytes) > MaxAgentBytes {
-		return Agent{}, fmt.Errorf("%w: yaml exceeds %d bytes", ErrValidation, MaxAgentBytes)
-	}
-	if err := writeFile(path, yamlBytes); err != nil {
-		return Agent{}, err
-	}
+
 	spec.Source = SourceCustom
-	spec.Path = path
 	spec.LoadedAt = time.Now()
 	l.mu.Lock()
 	l.agents[spec.Name] = &spec
@@ -442,8 +369,9 @@ func (l *Library) PutAgent(spec Agent, body []byte) (Agent, error) {
 	return spec, nil
 }
 
-// RemoveAgent deletes a custom agent. Built-ins refuse.
-func (l *Library) RemoveAgent(name string) error {
+// RemoveAgent deletes a custom agent. Built-ins refuse; agents referenced
+// by any workflow refuse with ErrInUse.
+func (l *Library) RemoveAgent(ctx context.Context, name string) error {
 	l.mu.RLock()
 	a, ok := l.agents[name]
 	if !ok {
@@ -454,7 +382,6 @@ func (l *Library) RemoveAgent(name string) error {
 		l.mu.RUnlock()
 		return ErrBuiltinReadOnly
 	}
-	// Refuse if any workflow references it.
 	for _, w := range l.workflows {
 		for _, s := range w.Stages {
 			if s.Agent == name {
@@ -463,10 +390,9 @@ func (l *Library) RemoveAgent(name string) error {
 			}
 		}
 	}
-	path := a.Path
 	l.mu.RUnlock()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+	if _, err := l.db.ExecContext(ctx, `DELETE FROM agents WHERE name=? AND source='custom'`, name); err != nil {
+		return fmt.Errorf("delete agent: %w", err)
 	}
 	l.mu.Lock()
 	delete(l.agents, name)
@@ -475,10 +401,7 @@ func (l *Library) RemoveAgent(name string) error {
 }
 
 // PutWorkflow writes a custom workflow.
-func (l *Library) PutWorkflow(spec Workflow, body []byte) (Workflow, error) {
-	if l.customWorkflows == "" {
-		return Workflow{}, fmt.Errorf("custom workflows dir is not configured")
-	}
+func (l *Library) PutWorkflow(ctx context.Context, spec Workflow, body []byte) (Workflow, error) {
 	if len(body) > 0 {
 		parsed, err := ParseWorkflowYAML(body)
 		if err != nil {
@@ -492,7 +415,6 @@ func (l *Library) PutWorkflow(spec Workflow, body []byte) (Workflow, error) {
 	if err := validateWorkflow(&spec); err != nil {
 		return Workflow{}, err
 	}
-	// Validate referenced agents exist.
 	l.mu.RLock()
 	for _, st := range spec.Stages {
 		if _, ok := l.agents[st.Agent]; !ok {
@@ -500,20 +422,31 @@ func (l *Library) PutWorkflow(spec Workflow, body []byte) (Workflow, error) {
 			return Workflow{}, fmt.Errorf("%w: agent %q is not defined", ErrValidation, st.Agent)
 		}
 	}
+	existing, exists := l.workflows[spec.Name]
 	l.mu.RUnlock()
-	if err := os.MkdirAll(l.customWorkflows, 0o700); err != nil {
-		return Workflow{}, fmt.Errorf("mkdir custom workflows: %w", err)
+	if exists && existing.Source == SourceBuiltin {
+		return Workflow{}, fmt.Errorf("%w: %q is a built-in; copy it under a new name to customize", ErrBuiltinReadOnly, spec.Name)
 	}
-	path := filepath.Join(l.customWorkflows, spec.Name+".yaml")
-	yamlBytes, err := yaml.Marshal(&spec)
-	if err != nil {
-		return Workflow{}, fmt.Errorf("yaml marshal: %w", err)
+	if len(body) == 0 {
+		b, err := yaml.Marshal(&spec)
+		if err != nil {
+			return Workflow{}, fmt.Errorf("yaml marshal: %w", err)
+		}
+		body = b
 	}
-	if err := writeFile(path, yamlBytes); err != nil {
-		return Workflow{}, err
+	if len(body) > MaxWorkflowBytes {
+		return Workflow{}, fmt.Errorf("%w: yaml exceeds %d bytes", ErrValidation, MaxWorkflowBytes)
 	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := l.db.ExecContext(ctx, `INSERT INTO workflows (name, source, yaml_body, created_at, updated_at)
+        VALUES (?, 'custom', ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET yaml_body=excluded.yaml_body, updated_at=excluded.updated_at`,
+		spec.Name, string(body), now, now); err != nil {
+		return Workflow{}, fmt.Errorf("upsert workflow: %w", err)
+	}
+
 	spec.Source = SourceCustom
-	spec.Path = path
 	spec.LoadedAt = time.Now()
 	l.mu.Lock()
 	l.workflows[spec.Name] = &spec
@@ -522,7 +455,7 @@ func (l *Library) PutWorkflow(spec Workflow, body []byte) (Workflow, error) {
 }
 
 // RemoveWorkflow deletes a custom workflow.
-func (l *Library) RemoveWorkflow(name string) error {
+func (l *Library) RemoveWorkflow(ctx context.Context, name string) error {
 	l.mu.RLock()
 	w, ok := l.workflows[name]
 	if !ok {
@@ -533,10 +466,9 @@ func (l *Library) RemoveWorkflow(name string) error {
 		l.mu.RUnlock()
 		return ErrBuiltinReadOnly
 	}
-	path := w.Path
 	l.mu.RUnlock()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+	if _, err := l.db.ExecContext(ctx, `DELETE FROM workflows WHERE name=? AND source='custom'`, name); err != nil {
+		return fmt.Errorf("delete workflow: %w", err)
 	}
 	l.mu.Lock()
 	delete(l.workflows, name)
@@ -544,43 +476,31 @@ func (l *Library) RemoveWorkflow(name string) error {
 	return nil
 }
 
-// CopyBuiltins ensures built-in agent and workflow files from `image/builtin-*`
-// directories are present in the user's builtin directories. Used by
-// agentctl init (idempotent).
-func CopyBuiltins(srcDir, dstDir string) (copied int, err error) {
-	entries, err := os.ReadDir(srcDir)
+// YAMLForAgent returns the raw stored YAML body, useful for `agentctl agent
+// show` which wants the canonical text not a re-serialized form.
+func (l *Library) YAMLForAgent(ctx context.Context, name string) ([]byte, error) {
+	var body string
+	err := l.db.QueryRowContext(ctx,
+		`SELECT yaml_body FROM agents WHERE name=?`, name).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
+		return nil, err
 	}
-	if err := os.MkdirAll(dstDir, 0o700); err != nil {
-		return 0, err
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		src := filepath.Join(srcDir, e.Name())
-		dst := filepath.Join(dstDir, e.Name())
-		// Re-copy unconditionally on init; user customizations live under
-		// custom/.
-		body, err := os.ReadFile(src)
-		if err != nil {
-			return copied, err
-		}
-		if err := writeFile(dst, body); err != nil {
-			return copied, err
-		}
-		copied++
-	}
-	return copied, nil
+	return []byte(body), nil
 }
 
-func writeFile(path string, body []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+// YAMLForWorkflow returns the raw stored YAML body.
+func (l *Library) YAMLForWorkflow(ctx context.Context, name string) ([]byte, error) {
+	var body string
+	err := l.db.QueryRowContext(ctx,
+		`SELECT yaml_body FROM workflows WHERE name=?`, name).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-	return os.WriteFile(path, body, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(body), nil
 }

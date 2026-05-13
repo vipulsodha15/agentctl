@@ -30,12 +30,14 @@ type TaskService interface {
 type LibraryService interface {
 	ListAgents() []ttl.Agent
 	GetAgent(name string) (ttl.Agent, error)
-	PutAgent(spec ttl.Agent, body []byte) (ttl.Agent, error)
-	RemoveAgent(name string) error
+	PutAgent(ctx context.Context, spec ttl.Agent, body []byte) (ttl.Agent, error)
+	RemoveAgent(ctx context.Context, name string) error
 	ListWorkflows() []ttl.Workflow
 	GetWorkflow(name string) (ttl.Workflow, error)
-	PutWorkflow(spec ttl.Workflow, body []byte) (ttl.Workflow, error)
-	RemoveWorkflow(name string) error
+	PutWorkflow(ctx context.Context, spec ttl.Workflow, body []byte) (ttl.Workflow, error)
+	RemoveWorkflow(ctx context.Context, name string) error
+	YAMLForAgent(ctx context.Context, name string) ([]byte, error)
+	YAMLForWorkflow(ctx context.Context, name string) ([]byte, error)
 }
 
 // ----- handlers -----
@@ -87,10 +89,14 @@ func (s *Server) handlePutAgent(w http.ResponseWriter, r *http.Request, name str
 	if name != "" {
 		spec.Name = name
 	}
-	saved, err := s.library.PutAgent(spec, body)
+	saved, err := s.library.PutAgent(r.Context(), spec, body)
 	if err != nil {
 		if errors.Is(err, ttl.ErrValidation) {
 			writeError(w, http.StatusBadRequest, "validation_failed", err.Error())
+			return
+		}
+		if errors.Is(err, ttl.ErrBuiltinReadOnly) {
+			writeError(w, http.StatusBadRequest, "builtin_readonly", err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
@@ -104,7 +110,7 @@ func (s *Server) handleRemoveAgent(w http.ResponseWriter, r *http.Request, name 
 		writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable, "task library not wired")
 		return
 	}
-	if err := s.library.RemoveAgent(name); err != nil {
+	if err := s.library.RemoveAgent(r.Context(), name); err != nil {
 		switch {
 		case errors.Is(err, ttl.ErrNotFound):
 			writeError(w, http.StatusNotFound, proto.ErrNotFound, err.Error())
@@ -167,10 +173,14 @@ func (s *Server) handlePutWorkflow(w http.ResponseWriter, r *http.Request, name 
 	if name != "" {
 		spec.Name = name
 	}
-	saved, err := s.library.PutWorkflow(spec, body)
+	saved, err := s.library.PutWorkflow(r.Context(), spec, body)
 	if err != nil {
 		if errors.Is(err, ttl.ErrValidation) {
 			writeError(w, http.StatusBadRequest, "validation_failed", err.Error())
+			return
+		}
+		if errors.Is(err, ttl.ErrBuiltinReadOnly) {
+			writeError(w, http.StatusBadRequest, "builtin_readonly", err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
@@ -184,7 +194,7 @@ func (s *Server) handleRemoveWorkflow(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable, "task library not wired")
 		return
 	}
-	if err := s.library.RemoveWorkflow(name); err != nil {
+	if err := s.library.RemoveWorkflow(r.Context(), name); err != nil {
 		switch {
 		case errors.Is(err, ttl.ErrNotFound):
 			writeError(w, http.StatusNotFound, proto.ErrNotFound, err.Error())

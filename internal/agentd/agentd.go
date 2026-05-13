@@ -111,19 +111,17 @@ func Run(ctx context.Context, opts Options) error {
 		CustomDir:  opts.Layout.CustomSkills,
 	})
 
-	// Task library — agents + workflows YAML index. Loaded once at boot.
-	if written, err := ttl.MaterializeBuiltins(opts.Layout.BuiltinAgents, opts.Layout.BuiltinWorkflows); err == nil && written > 0 {
-		logger.Info("ttl.builtins_materialized", slog.Int("written", written))
-	} else if err != nil {
-		logger.Warn("ttl.materialize_builtins_failed", slog.String("error", err.Error()))
+	// Task library — agents + workflows live in sqlite (one durable store
+	// for all daemon state). Built-in YAMLs ship embedded in the binary
+	// and are upserted into the agents/workflows tables on every boot;
+	// custom rows authored through the API/CLI are never overwritten.
+	if written, err := ttl.Materialize(ctx, st.DB()); err != nil {
+		logger.Warn("ttl.materialize_failed", slog.String("error", err.Error()))
+	} else if written > 0 {
+		logger.Info("ttl.builtins_materialized", slog.Int("rows", written))
 	}
-	taskLib := ttl.New(ttl.Options{
-		BuiltinAgentsDir:    opts.Layout.BuiltinAgents,
-		CustomAgentsDir:     opts.Layout.CustomAgents,
-		BuiltinWorkflowsDir: opts.Layout.BuiltinWorkflows,
-		CustomWorkflowsDir:  opts.Layout.CustomWorkflows,
-	})
-	if issues, err := taskLib.Load(); err == nil {
+	taskLib := ttl.New(ttl.Options{DB: st.DB()})
+	if issues, err := taskLib.Load(ctx); err == nil {
 		if len(issues.AgentErrors) > 0 || len(issues.WorkflowErrors) > 0 {
 			logger.Warn("ttl.load_issues",
 				slog.Int("agent_errors", len(issues.AgentErrors)),
@@ -132,6 +130,8 @@ func Run(ctx context.Context, opts Options) error {
 		logger.Info("ttl.loaded",
 			slog.Int("agents", len(taskLib.ListAgents())),
 			slog.Int("workflows", len(taskLib.ListWorkflows())))
+	} else {
+		logger.Warn("ttl.load_failed", slog.String("error", err.Error()))
 	}
 
 	taskHub := fan.NewHub()
