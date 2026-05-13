@@ -77,7 +77,7 @@ func commands() []Command {
 
 		{Name: "skill", Group: groupSkills, Summary: "Manage skills (list/new/add/edit/remove/validate/show/export/import).", Run: runSkill},
 
-		{Name: "agent", Group: groupWorkflows, Summary: "Inspect agent definitions (ls/show).", Run: runAgent},
+		{Name: "agent", Group: groupWorkflows, Summary: "Manage agent definitions (ls/show/add).", Run: runAgent},
 		{Name: "workflow", Group: groupWorkflows, Summary: "Inspect workflow definitions (ls/show).", Run: runWorkflow},
 		{Name: "task", Group: groupWorkflows, Summary: "Manage tasks (ls/create/show/handoff/complete/abandon).", Run: runTask},
 
