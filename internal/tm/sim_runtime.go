@@ -423,29 +423,53 @@ func (r *SimRuntime) runTurn(stage *simStage) {
 // real rate limit.
 const claudeCodeSystemPrefix = "You are Claude Code, Anthropic's official CLI for Claude."
 
+// systemBlock matches Anthropic's content-block shape so we can send the
+// system field as an array. OAuth subscription tokens are gated on the
+// Claude Code identity being its OWN block at index 0 (not just at the
+// start of a single concatenated string), matching what the bundled
+// `claude` CLI sends. Mirrors how session chat — which shells out to the
+// CLI — avoids this whole class of failure.
+type systemBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 func (r *SimRuntime) callAnthropic(ctx context.Context, system string, msgs []apiMessage) (string, error) {
 	auth, err := r.resolveAuth()
 	if err != nil {
 		return "", err
 	}
-	if auth.oauth {
-		// OAuth subscription tokens are gated on the Claude Code identity
-		// being the first thing in the system prompt. Prepend rather than
-		// replace so the agent's own role/framing still shapes the reply.
-		if system == "" {
-			system = claudeCodeSystemPrefix
-		} else if !strings.HasPrefix(system, claudeCodeSystemPrefix) {
-			system = claudeCodeSystemPrefix + "\n\n" + system
-		}
-	}
-	type req struct {
+	r.logger.Debug("sim.auth_resolved",
+		slog.String("source", auth.source),
+		slog.String("kind", auth.kind),
+		slog.Bool("oauth", auth.oauth),
+		slog.String("base_url", auth.baseURL),
+	)
+	type reqStringSystem struct {
 		Model     string       `json:"model"`
 		MaxTokens int          `json:"max_tokens"`
 		System    string       `json:"system,omitempty"`
 		Messages  []apiMessage `json:"messages"`
 	}
-	body := req{Model: r.model, MaxTokens: 2048, System: system, Messages: msgs}
-	buf, _ := json.Marshal(body)
+	type reqBlockSystem struct {
+		Model     string        `json:"model"`
+		MaxTokens int           `json:"max_tokens"`
+		System    []systemBlock `json:"system,omitempty"`
+		Messages  []apiMessage  `json:"messages"`
+	}
+	var buf []byte
+	if auth.oauth {
+		// Identity goes in its own block at index 0. Any caller-supplied
+		// system prompt becomes block 1 so the agent's framing still shapes
+		// the reply.
+		blocks := []systemBlock{{Type: "text", Text: claudeCodeSystemPrefix}}
+		if system != "" && system != claudeCodeSystemPrefix {
+			blocks = append(blocks, systemBlock{Type: "text", Text: system})
+		}
+		buf, _ = json.Marshal(reqBlockSystem{Model: r.model, MaxTokens: 2048, System: blocks, Messages: msgs})
+	} else {
+		buf, _ = json.Marshal(reqStringSystem{Model: r.model, MaxTokens: 2048, System: system, Messages: msgs})
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", auth.baseURL+"/v1/messages", bytes.NewReader(buf))
 	if err != nil {
 		return "", err

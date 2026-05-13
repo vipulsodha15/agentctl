@@ -98,7 +98,8 @@ func TestAuthSource_OAuthFromCredentialsFile(t *testing.T) {
 // this because it shells out to the bundled `claude` CLI, which sets those
 // itself.
 func TestCallAnthropic_OAuthHeadersAndSystemPrefix(t *testing.T) {
-	var gotAuth, gotBeta, gotAPIKey, gotVersion, gotSystem string
+	var gotAuth, gotBeta, gotAPIKey, gotVersion string
+	var gotSystemBlocks []systemBlock
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotBeta = r.Header.Get("anthropic-beta")
@@ -106,10 +107,10 @@ func TestCallAnthropic_OAuthHeadersAndSystemPrefix(t *testing.T) {
 		gotVersion = r.Header.Get("anthropic-version")
 		raw, _ := io.ReadAll(r.Body)
 		var payload struct {
-			System string `json:"system"`
+			System []systemBlock `json:"system"`
 		}
 		_ = json.Unmarshal(raw, &payload)
-		gotSystem = payload.System
+		gotSystemBlocks = payload.System
 		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
 	}))
 	defer srv.Close()
@@ -127,8 +128,8 @@ func TestCallAnthropic_OAuthHeadersAndSystemPrefix(t *testing.T) {
 	r := NewSimRuntimeWithOptions(SimRuntimeOptions{
 		Auth: &AuthSource{SecretsPath: secretsPath, CredsFile: credsPath},
 	})
-	// Point both the default base URL and any per-call override at the test
-	// server. resolve() returns baseURL=defaultURL for the OAuth path.
+	// resolve() returns baseURL=defaultURL for the OAuth path; point that at
+	// the test server.
 	r.defaultURL = srv.URL
 
 	got, err := r.callAnthropic(context.Background(), "agent system prompt", []apiMessage{{Role: "user", Content: "hi"}})
@@ -150,11 +151,17 @@ func TestCallAnthropic_OAuthHeadersAndSystemPrefix(t *testing.T) {
 	if gotBeta != "oauth-2025-04-20" {
 		t.Errorf("anthropic-beta missing or wrong: %q (this is the headline 429 fix)", gotBeta)
 	}
-	if !strings.HasPrefix(gotSystem, claudeCodeSystemPrefix) {
-		t.Errorf("system prompt must start with Claude Code identity string; got %q", gotSystem)
+	// OAuth requires system as an array with the identity at index 0 and
+	// the caller's framing as a separate block — matching what the bundled
+	// `claude` CLI sends.
+	if len(gotSystemBlocks) != 2 {
+		t.Fatalf("expected 2 system blocks (identity + agent prompt); got %d: %+v", len(gotSystemBlocks), gotSystemBlocks)
 	}
-	if !strings.Contains(gotSystem, "agent system prompt") {
-		t.Errorf("agent's own system prompt must be preserved after the prefix; got %q", gotSystem)
+	if gotSystemBlocks[0].Type != "text" || gotSystemBlocks[0].Text != claudeCodeSystemPrefix {
+		t.Errorf("system[0] must be the Claude Code identity block; got %+v", gotSystemBlocks[0])
+	}
+	if gotSystemBlocks[1].Type != "text" || gotSystemBlocks[1].Text != "agent system prompt" {
+		t.Errorf("system[1] must carry the caller's prompt verbatim; got %+v", gotSystemBlocks[1])
 	}
 }
 
@@ -168,6 +175,8 @@ func TestCallAnthropic_CustomBearerSkipsOAuthHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBeta = r.Header.Get("anthropic-beta")
 		raw, _ := io.ReadAll(r.Body)
+		// Non-OAuth requests keep the plain-string system shape; a content-
+		// block array would change wire compat with custom LLM gateways.
 		var payload struct {
 			System string `json:"system"`
 		}
