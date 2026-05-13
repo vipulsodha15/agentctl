@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
 import type {
   AddMcpRequest,
@@ -184,7 +185,7 @@ function McpSection() {
           + Add MCP
         </button>
       </div>
-      {error && <div className="error-text">{error}</div>}
+      {error && !form && <div className="error-text">{error}</div>}
       {mcps === null ? (
         <div className="empty">Loading…</div>
       ) : mcps.length === 0 ? (
@@ -232,12 +233,19 @@ function McpSection() {
       )}
 
       {form && (
-        <form
+        <FormModal
+          title={form.mode === "add" ? "Add MCP" : `Edit ${form.name}`}
+          onClose={() => {
+            if (!busy) {
+              setForm(null);
+              setError(null);
+            }
+          }}
           onSubmit={onSubmitForm}
-          className="form-grid"
-          style={{ marginTop: 16 }}
+          busy={busy}
+          submitLabel={form.mode === "add" ? "Add" : "Save"}
+          error={error}
         >
-          <h3>{form.mode === "add" ? "Add MCP" : `Edit ${form.name}`}</h3>
           <div className="field">
             <label>Name</label>
             <input
@@ -245,6 +253,7 @@ function McpSection() {
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               disabled={form.mode === "edit"}
+              autoFocus={form.mode === "add"}
             />
           </div>
           <div className="field">
@@ -253,6 +262,7 @@ function McpSection() {
               type="text"
               value={form.url}
               onChange={(e) => setForm({ ...form, url: e.target.value })}
+              autoFocus={form.mode === "edit"}
             />
           </div>
           <div className="field">
@@ -316,19 +326,7 @@ function McpSection() {
               }
             />
           </div>
-          <div className="toolbar">
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? "Saving…" : form.mode === "add" ? "Add" : "Save"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm(null)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
+        </FormModal>
       )}
     </div>
   );
@@ -440,7 +438,7 @@ function SkillsSection() {
           + Add skill
         </button>
       </div>
-      {error && <div className="error-text">{error}</div>}
+      {error && !form && <div className="error-text">{error}</div>}
       {skills === null ? (
         <div className="empty">Loading…</div>
       ) : skills.length === 0 ? (
@@ -488,12 +486,20 @@ function SkillsSection() {
       )}
 
       {form && (
-        <form
+        <FormModal
+          title="Add skill"
+          onClose={() => {
+            if (!busy) {
+              setForm(null);
+              setError(null);
+            }
+          }}
           onSubmit={onSubmitForm}
-          className="form-grid"
-          style={{ marginTop: 16 }}
+          busy={busy}
+          submitLabel="Add"
+          error={error}
+          size="wide"
         >
-          <h3>Add skill</h3>
           <div className="field">
             <label>Name</label>
             <input
@@ -501,6 +507,7 @@ function SkillsSection() {
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder="my-skill"
+              autoFocus
             />
           </div>
           <div className="field">
@@ -540,19 +547,7 @@ function SkillsSection() {
               <span>Overwrite if a skill with this name already exists</span>
             </label>
           </div>
-          <div className="toolbar">
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? "Saving…" : "Add"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm(null)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
+        </FormModal>
       )}
     </div>
   );
@@ -563,4 +558,83 @@ function formatErr(err: unknown): string {
     return `${err.code ?? err.status}: ${err.message}`;
   }
   return String(err);
+}
+
+interface FormModalProps {
+  title: string;
+  onClose: () => void;
+  onSubmit: (e: React.FormEvent) => void;
+  busy: boolean;
+  submitLabel: string;
+  error?: string | null;
+  size?: "default" | "wide";
+  children: ReactNode;
+}
+
+function FormModal({
+  title,
+  onClose,
+  onSubmit,
+  busy,
+  submitLabel,
+  error,
+  size = "default",
+  children,
+}: FormModalProps) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !busy) {
+        e.stopPropagation();
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose, busy]);
+
+  const modalClass = `modal modal--form${size === "wide" ? " modal--wide" : ""}`;
+
+  return (
+    <div
+      className="modal-scrim"
+      onClick={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <div
+        className={modalClass}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
+        <div className="modal-header">
+          <h3>{title}</h3>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <form onSubmit={onSubmit} className="modal-form">
+          <div className="modal-body">
+            {children}
+            {error && <div className="error-text">{error}</div>}
+          </div>
+          <div className="modal-footer">
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? "Saving…" : submitLabel}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
