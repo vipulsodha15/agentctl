@@ -33,6 +33,13 @@ type fakeSessionAPI struct {
 	sendErr      error
 	attachErr    error
 	terminateErr error
+
+	// beforeSendReturn, if set, is invoked while Send is executing — after
+	// the MessageID has been allocated but before Send returns. Tests use
+	// this to reproduce the sm.Manager production timing, where TurnStart
+	// is broadcast on the subscriber stream before the SendResult is
+	// returned to the caller.
+	beforeSendReturn func(req sm.SendRequest, messageID string)
 }
 
 func newFakeSessionAPI() *fakeSessionAPI {
@@ -53,13 +60,18 @@ func (f *fakeSessionAPI) Create(_ context.Context, req sm.CreateRequest) (sm.Cre
 
 func (f *fakeSessionAPI) Send(_ context.Context, req sm.SendRequest) (sm.SendResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.sendErr != nil {
+		f.mu.Unlock()
 		return sm.SendResult{}, f.sendErr
 	}
 	f.nextMID++
 	mid := "msg-" + strconv.Itoa(f.nextMID)
 	f.sent = append(f.sent, req)
+	hook := f.beforeSendReturn
+	f.mu.Unlock()
+	if hook != nil {
+		hook(req, mid)
+	}
 	return sm.SendResult{MessageID: mid}, nil
 }
 
@@ -303,6 +315,91 @@ func TestSessionRuntime_Synthesize_CorrelatesByMessageIDAndSkipsCallback(t *test
 	case <-time.After(2 * time.Second):
 		t.Fatal("Synthesize did not return")
 	}
+	if len(leaked) != 0 {
+		t.Errorf("synthesis must not also fire OnAssistantMessage; got %+v", leaked)
+	}
+}
+
+// In production, sm.Manager.Send broadcasts EventTurnStart *before* it
+// returns the SendResult to the caller (see internal/sm/actor.go handleSend).
+// That means the runtime's reader goroutine can observe — and process —
+// the synth turn's TurnStart while Synthesize is still inside Send, before
+// synthMID has been assigned. The handoff button in the task chat hung in
+// exactly this race: TurnStart was dropped, synthTID never set, the
+// AssistantMessage was misrouted to OnAssistantMessage, and Synthesize
+// blocked on replyCh forever. This test reproduces the race by having the
+// fake Send push the events *during* the call, before returning.
+func TestSessionRuntime_Synthesize_TurnStartBeforeSendReturns(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	var leaked []string
+	var leakedMu sync.Mutex
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{Name: "a"}, IssueMD: "hi",
+		OnAssistantMessage: func(c string) {
+			leakedMu.Lock()
+			defer leakedMu.Unlock()
+			leaked = append(leaked, c)
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	st := api.stream("sess-1")
+
+	// Arrange the fake to push the synth TurnStart from within Send (before
+	// Send returns) and pause, so the reader processes TurnStart with
+	// synthMID still empty — exactly the production race. The seed Send is
+	// sent[0]; the synth is sent[1] — only inject for the synth send.
+	api.beforeSendReturn = func(req sm.SendRequest, mid string) {
+		if req.Content != "synthesize now" {
+			return
+		}
+		st.push(proto.EventTurnStart, proto.TurnStartData{TurnID: "T-synth", MessageID: mid})
+		// Wait long enough for the reader to dequeue and process TurnStart.
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	type result struct {
+		text string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		text, err := r.Synthesize(context.Background(), SendMessageInput{StageID: "s1", SessionID: "sess-1", Content: "synthesize now"})
+		done <- result{text, err}
+	}()
+
+	// Once retroactive reconciliation has run, synthTID is set. Without the
+	// fix, synthTID stays empty and this waitFor times out the test.
+	waitFor(t, func() bool {
+		r.mu.Lock()
+		stage, ok := r.stages["s1"]
+		r.mu.Unlock()
+		if !ok {
+			return false
+		}
+		stage.mu.Lock()
+		defer stage.mu.Unlock()
+		return stage.synthTID != ""
+	}, "synthTID reconciled retroactively after Send returns")
+
+	st.push(proto.EventAssistantMessage, proto.AssistantMessageData{TurnID: "T-synth", Content: "## Synthesis\n- root cause: cache stampede"})
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("Synthesize: %v", res.err)
+		}
+		if !strings.Contains(res.text, "cache stampede") {
+			t.Errorf("Synthesize returned wrong text: %q", res.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Synthesize did not return — race regressed; TurnStart was processed before synthMID was set and the synth reply was misrouted")
+	}
+	leakedMu.Lock()
+	defer leakedMu.Unlock()
 	if len(leaked) != 0 {
 		t.Errorf("synthesis must not also fire OnAssistantMessage; got %+v", leaked)
 	}
