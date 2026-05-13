@@ -10,6 +10,7 @@ import { TaskList } from "./routes/TaskList";
 import { TaskDetail } from "./routes/TaskDetail";
 import { NewTask } from "./routes/NewTask";
 import { AgentList } from "./routes/AgentList";
+import { AgentEditor } from "./routes/AgentEditor";
 import { WorkflowList } from "./routes/WorkflowList";
 import { WorkflowEditor } from "./routes/WorkflowEditor";
 
@@ -136,6 +137,8 @@ export function App() {
           <Route path="/tasks/new" element={<NewTask />} />
           <Route path="/tasks/:id" element={<TaskDetail />} />
           <Route path="/agents" element={<AgentList />} />
+          <Route path="/agents/new" element={<AgentEditor />} />
+          <Route path="/agents/:name/edit" element={<AgentEditor />} />
           <Route path="/workflows" element={<WorkflowList />} />
           <Route path="/workflows/new" element={<WorkflowEditor />} />
           <Route path="/workflows/:name/edit" element={<WorkflowEditor />} />
