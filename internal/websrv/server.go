@@ -379,6 +379,8 @@ func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest s
 		s.handleSessionSkills(w, r, id)
 	case suffix == "stream" && method == http.MethodGet:
 		s.handleAttachStream(w, r, id)
+	case suffix == "snapshot" && method == http.MethodGet:
+		s.handleSessionSnapshot(w, r, id)
 	default:
 		methodNotAllowed(w)
 	}

@@ -1,42 +1,76 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApiError, api, apiJson, jsonBody } from "../api";
+import { attach } from "../ws";
 import type {
+  ConversationMessage,
+  SnapshotData,
   Task,
   TaskDetailResponse,
-  TaskMessage,
   TaskStage,
   TaskStatus,
 } from "../types";
-
-const POLL_INTERVAL_MS = 4000;
+import { ConversationView } from "../components/ConversationView";
+import {
+  INITIAL_CONVERSATION_STATE,
+  conversationReducer,
+  normalizeConversation,
+} from "../lib/conversation";
 
 type WSStatus = "connecting" | "live" | "reconnecting" | "offline";
+
+// The task-level WebSocket exists only for stage lifecycle events
+// (status_changed / stage_advanced). Conversation rendering — including
+// per-message echoes — flows through the active stage's session WS, which
+// also handles snapshot-on-attach and reconnect.
 
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const [task, setTask] = useState<Task | null>(null);
-  const [messages, setMessages] = useState<TaskMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   const [confirmAbandon, setConfirmAbandon] = useState(false);
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [wsStatus, setWsStatus] = useState<WSStatus>("connecting");
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [issueOpen, setIssueOpen] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
-  const wsLive = useRef(false);
+  const [convState, dispatchConv] = useReducer(
+    conversationReducer,
+    INITIAL_CONVERSATION_STATE,
+  );
+
+  // Auto-scroll the outer thread container to the bottom when new live
+  // messages arrive, but only if the user is already near the bottom —
+  // otherwise we'd yank them away from past-stage history they're
+  // reading. The active stage's ConversationView no longer has its
+  // own scroll inside the task page, so this is the one place the
+  // behavior lives.
+  const lastMsg = convState.messages[convState.messages.length - 1];
+  useEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    const nearBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    if (nearBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [convState.messages.length, lastMsg?.text, lastMsg?.output, convState.inFlight]);
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
       const r = await apiJson<TaskDetailResponse>(`/v1/tasks/${id}`);
       setTask(r.task);
-      setMessages(r.messages ?? []);
       setError(null);
     } catch (err) {
       setError(
@@ -47,51 +81,30 @@ export function TaskDetail() {
     }
   }, [id]);
 
-  // Initial load — always
   useEffect(() => {
     load();
   }, [load]);
 
-  // Polling fallback — runs only while WS is not connected, so the live path
-  // does not double-fetch on every event.
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | null = null;
-    function tick() {
-      if (cancelled) return;
-      if (!wsLive.current) {
-        load().finally(() => {
-          if (!cancelled) timer = window.setTimeout(tick, POLL_INTERVAL_MS);
-        });
-      } else {
-        timer = window.setTimeout(tick, POLL_INTERVAL_MS);
-      }
-    }
-    timer = window.setTimeout(tick, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [load]);
-
-  // WebSocket attach with exponential-backoff reconnect.
+  // Task-level WS — reload on stage advance / status change. Per-message
+  // events are intentionally ignored here; the session WS owns rendering.
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     let backoffMs = 500;
     let ws: WebSocket | null = null;
     let retry: number | null = null;
+    let live = false;
 
     function connect() {
       if (cancelled) return;
-      setWsStatus(wsLive.current ? "reconnecting" : "connecting");
+      setWsStatus(live ? "reconnecting" : "connecting");
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       ws = new WebSocket(
         `${proto}//${window.location.host}/v1/tasks/${id}/stream`,
         ["agentctl.v1"],
       );
       ws.onopen = () => {
-        wsLive.current = true;
+        live = true;
         backoffMs = 500;
         setWsStatus("live");
       };
@@ -108,17 +121,7 @@ export function TaskDetail() {
           | { kind?: string; data?: unknown }
           | null;
         if (!event || !event.kind) return;
-        if (event.kind === "task.message") {
-          const msg = (typeof event.data === "string"
-            ? safeJson(event.data)
-            : event.data) as TaskMessage | null;
-          if (!msg) return;
-          setMessages((prev) =>
-            prev.some((m) => m.seq === msg.seq)
-              ? prev
-              : [...prev, msg].sort((a, b) => a.seq - b.seq),
-          );
-        } else if (
+        if (
           event.kind === "task.status_changed" ||
           event.kind === "task.stage_advanced"
         ) {
@@ -126,10 +129,10 @@ export function TaskDetail() {
         }
       };
       ws.onerror = () => {
-        // onclose will fire next; let it handle the reconnect.
+        // onclose will fire next.
       };
       ws.onclose = () => {
-        wsLive.current = false;
+        live = false;
         ws = null;
         if (cancelled) {
           setWsStatus("offline");
@@ -143,40 +146,43 @@ export function TaskDetail() {
     connect();
     return () => {
       cancelled = true;
-      wsLive.current = false;
       if (retry !== null) window.clearTimeout(retry);
       if (ws) ws.close();
     };
   }, [id, load]);
 
-  // Auto-scroll only if user is already near the bottom.
-  const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
+  const stages = task?.stages ?? [];
+  const activeStage = stages.find((s) => s.status === "active");
+  const activeSessionID = activeStage?.session_id ?? "";
+
+  // Active stage's session WS — full snapshot + live event stream. Resets
+  // whenever the active stage changes (handoff) so we don't carry rendering
+  // state across stages.
   useEffect(() => {
-    const el = threadRef.current;
-    if (!el) return;
-    const nearBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-    if (nearBottom) {
-      el.scrollTop = el.scrollHeight;
-      setShowJumpToLatest(false);
-    } else {
-      setShowJumpToLatest(true);
+    if (!activeSessionID) {
+      dispatchConv({ type: "reset" });
+      return;
     }
-  }, [messages.length, last?.seq, last?.content.length]);
-
-  function onThreadScroll() {
-    const el = threadRef.current;
-    if (!el) return;
-    const nearBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-    setShowJumpToLatest(!nearBottom);
-  }
-
-  function jumpToLatest() {
-    const el = threadRef.current;
-    if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }
+    dispatchConv({ type: "reset" });
+    const handle = attach(activeSessionID, {
+      onOpen: () => dispatchConv({ type: "ws_open" }),
+      onDisconnect: (reason) => dispatchConv({ type: "ws_close", reason }),
+      onEvent: (e) => {
+        if (e.kind === "session.snapshot") {
+          dispatchConv({ type: "snapshot", data: e.data as SnapshotData });
+          return;
+        }
+        if (
+          e.kind === "stream_end" ||
+          (e as { kind: string }).kind === "error"
+        ) {
+          return;
+        }
+        dispatchConv({ type: "event", e });
+      },
+    });
+    return () => handle.close();
+  }, [activeSessionID]);
 
   if (!task) {
     return (
@@ -190,22 +196,11 @@ export function TaskDetail() {
     );
   }
 
-  const stages = task.stages ?? [];
-  const activeStage = stages.find((s) => s.status === "active");
   const isFinalStage =
     activeStage && activeStage.position === stages.length;
   const terminal = task.status === "done" || task.status === "abandoned";
 
-  // Heuristic: the agent is "thinking" if the user/handoff-prompt was just
-  // sent and the stage is still active.
-  const lastForStage = activeStage
-    ? [...messages].reverse().find((m) => m.stage_id === activeStage.stage_id)
-    : undefined;
-  const stageBusy = !!(
-    activeStage &&
-    lastForStage &&
-    (lastForStage.role === "user" || lastForStage.role === "system")
-  );
+  const doneStages = stages.filter((s) => s.status === "done");
 
   async function send() {
     if (!id) return;
@@ -218,7 +213,6 @@ export function TaskDetail() {
         ...jsonBody({ content }),
       });
       setComposer("");
-      await load();
     } catch (err) {
       setError(
         err instanceof ApiError
@@ -344,46 +338,50 @@ export function TaskDetail() {
 
       <StageRail stages={stages} taskStatus={task.status} />
 
-      <div className="task-thread-wrap">
-        <div
-          className="task-thread"
-          ref={threadRef}
-          onScroll={onThreadScroll}
-        >
-          <IssueSeed task={task} open={issueOpen} onToggle={() => setIssueOpen((v) => !v)} />
-          {apiKeyMissing && error && (
-            <InlineNotice
-              level="warn"
-              title="ANTHROPIC_API_KEY not set"
-              body="Agents can't reach the model until the key is configured. Set it in Settings, then resume."
-              onDismiss={() => setError(null)}
+      <div className="task-thread-wrap" ref={threadRef}>
+        <IssueSeed task={task} open={issueOpen} onToggle={() => setIssueOpen((v) => !v)} />
+        {apiKeyMissing && error && (
+          <InlineNotice
+            level="warn"
+            title="ANTHROPIC_API_KEY not set"
+            body="Agents can't reach the model until the key is configured. Set it in Settings, then resume."
+            onDismiss={() => setError(null)}
+          />
+        )}
+
+        {/* Past stages — compact synthesis cards + seam dividers. Full
+            transcript replay for handed-off stages is a follow-up. */}
+        {doneStages.map((s) => (
+          <PriorStageCard
+            key={s.stage_id}
+            stage={s}
+            nextAgent={
+              stages.find((n) => n.position === s.position + 1)?.agent_name
+            }
+          />
+        ))}
+
+        {/* Active stage — render the underlying session conversation in
+            full session-chat fidelity (tool calls, streaming deltas, cost
+            chips, …). */}
+        {activeStage && activeSessionID && (
+          <div
+            className={`task-active-stage swatch-${activeStage.colour ?? "slate"}`}
+          >
+            <StageHeader
+              stage={activeStage}
+              label="now talking with"
             />
-          )}
-          {messages
-            .filter(
-              (m) =>
-                !(
-                  m.role === "system" &&
-                  m.content.startsWith("Task opened.")
-                ),
-            )
-            .map((m, idx, arr) => (
-              <MessageBubble
-                key={`${m.seq}`}
-                msg={m}
-                prev={idx > 0 ? arr[idx - 1] : undefined}
-                stages={stages}
-                anchorStageID={
-                  idx === 0 || arr[idx - 1].stage_id !== m.stage_id
-                    ? m.stage_id
-                    : undefined
-                }
-              />
-            ))}
-          {!terminal && activeStage && stageBusy && (
-            <ThinkingBubble agentName={activeStage.agent_name} colour={activeStage.colour ?? "slate"} />
-          )}
-        </div>
+            <ConversationView
+              messages={convState.messages}
+              warnings={convState.warnings}
+              inFlight={convState.inFlight}
+              mcps={convState.mcps}
+              usageByTurn={convState.usageByTurn}
+              filter="all"
+            />
+          </div>
+        )}
       </div>
 
       {terminal ? (
@@ -428,8 +426,8 @@ export function TaskDetail() {
               <button
                 className="primary"
                 onClick={() => setConfirmComplete(true)}
-                disabled={sending || stageBusy}
-                title={stageBusy ? "Waiting for the agent to finish its turn" : "Mark this task complete"}
+                disabled={sending || convState.inFlight}
+                title={convState.inFlight ? "Waiting for the agent to finish its turn" : "Mark this task complete"}
               >
                 <span>Complete task</span>
                 <CheckArrow />
@@ -438,8 +436,8 @@ export function TaskDetail() {
               <button
                 className="primary"
                 onClick={handoff}
-                disabled={sending || stageBusy}
-                title={stageBusy ? "Waiting for the agent to finish its turn" : `Lock the synthesis and start ${nextAgent(stages, activeStage)}`}
+                disabled={sending || convState.inFlight}
+                title={convState.inFlight ? "Waiting for the agent to finish its turn" : `Lock the synthesis and start ${nextAgent(stages, activeStage)}`}
               >
                 <span>Hand off to {nextAgent(stages, activeStage)}</span>
                 <ForwardArrow />
@@ -487,17 +485,6 @@ export function TaskDetail() {
             </div>
           </div>
         </div>
-      )}
-
-      {showJumpToLatest && (
-        <button
-          type="button"
-          className="jump-to-latest"
-          onClick={jumpToLatest}
-          aria-label="Jump to latest message"
-        >
-          <DownArrow /> New messages
-        </button>
       )}
 
       {error && !apiKeyMissing && (
@@ -552,7 +539,6 @@ function StageRail({
   if (stages.length === 0) return null;
   const doneCount = stages.filter((s) => s.status === "done").length;
   const activeCount = stages.filter((s) => s.status === "active").length;
-  // Progress is "done fraction + ~0.5 for active partial".
   let progress =
     (doneCount + activeCount * 0.5) / Math.max(stages.length, 1);
   if (taskStatus === "done") progress = 1;
@@ -605,7 +591,7 @@ function TaskDetailSkeleton() {
         <div className="stage-rail-node skel-pill" />
       </div>
       <div className="task-thread-wrap">
-        <div className="task-thread" style={{ padding: "20px 0" }}>
+        <div style={{ padding: "20px 0" }}>
           <div className="skel skel-block" style={{ height: 90 }} />
           <div className="skel skel-block" style={{ height: 60, width: "60%" }} />
         </div>
@@ -649,6 +635,132 @@ function IssueSeed({
   );
 }
 
+function StageHeader({
+  stage,
+  label,
+}: {
+  stage: TaskStage;
+  label: string;
+}) {
+  return (
+    <div className={`task-stage-header swatch-${stage.colour ?? "slate"}`}>
+      <span className="task-stage-position">Stage {stage.position}</span>
+      <span className="muted">{label}</span>
+      <span className={`agent-tag swatch-${stage.colour ?? "slate"}`}>
+        <span className="agent-tag-dot" aria-hidden />
+        {stage.agent_name}
+      </span>
+    </div>
+  );
+}
+
+// PriorStageCard renders a handed-off stage's full session transcript.
+// The session has been terminated (no live WS), but the SDK JSONL records
+// survive in the messages table — we fetch them via GET
+// /v1/sessions/{id}/snapshot and normalize through the same code path the
+// live reducer uses. The stage's synthesis is shown as a footer callout
+// so the takeaway is visible without scrolling through the whole turn
+// history.
+function PriorStageCard({
+  stage,
+  nextAgent,
+}: {
+  stage: TaskStage;
+  nextAgent?: string;
+}) {
+  const [messages, setMessages] = useState<ConversationMessage[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!stage.session_id) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    apiJson<{ conversation: unknown[] }>(
+      `/v1/sessions/${encodeURIComponent(stage.session_id)}/snapshot`,
+    )
+      .then((r) => {
+        if (cancelled) return;
+        const { messages: msgs } = normalizeConversation(r.conversation ?? []);
+        setMessages(msgs);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(
+          e instanceof ApiError
+            ? `${e.code ?? e.status}: ${e.message}`
+            : String(e),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stage.session_id]);
+
+  return (
+    <>
+      <div className={`task-prior-stage swatch-${stage.colour ?? "slate"}`}>
+        <div className="task-stage-header">
+          <span className="task-stage-position">Stage {stage.position}</span>
+          <span className="muted">handed off ·</span>
+          <span className={`agent-tag swatch-${stage.colour ?? "slate"}`}>
+            <span className="agent-tag-dot" aria-hidden />
+            {stage.agent_name}
+          </span>
+          <span className="task-stage-done">
+            <CheckIcon /> done
+          </span>
+        </div>
+        {loading && (
+          <div className="task-stage-loading muted">Loading transcript…</div>
+        )}
+        {err && (
+          <div className="task-stage-loading error-text">
+            Couldn't load transcript: {err}
+          </div>
+        )}
+        {messages !== null && messages.length > 0 && (
+          <div className="task-prior-transcript">
+            <ConversationView
+              messages={messages}
+              warnings={[]}
+              inFlight={false}
+              mcps={[]}
+              usageByTurn={{}}
+              filter="all"
+            />
+          </div>
+        )}
+        {stage.synthesis && (
+          <div className="task-stage-synthesis">
+            <div className="task-stage-synthesis-label">Synthesis</div>
+            <div className="task-stage-synthesis-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {stage.synthesis}
+              </ReactMarkdown>
+            </div>
+          </div>
+        )}
+      </div>
+      {nextAgent && (
+        <div className="task-stage-seam">
+          <span className="task-stage-seam-line" />
+          <span className="task-stage-seam-label">
+            <ForwardArrow /> handed off to <strong>{nextAgent}</strong>
+          </span>
+          <span className="task-stage-seam-line" />
+        </div>
+      )}
+    </>
+  );
+}
+
 function InlineNotice({
   level,
   title,
@@ -678,119 +790,6 @@ function InlineNotice({
   );
 }
 
-function MessageBubble({
-  msg,
-  prev,
-  stages,
-  anchorStageID,
-}: {
-  msg: TaskMessage;
-  prev?: TaskMessage;
-  stages: TaskStage[];
-  anchorStageID?: string;
-}) {
-  const colour = !msg.stage_id
-    ? "slate"
-    : stages.find((s) => s.stage_id === msg.stage_id)?.colour ?? "slate";
-  const sameAsPrev = !!prev &&
-    prev.role === msg.role &&
-    prev.agent_name === msg.agent_name &&
-    prev.stage_id === msg.stage_id;
-
-  const anchorAttr = anchorStageID ? { "data-stage-anchor": anchorStageID } : {};
-
-  if (msg.role === "seam") {
-    return (
-      <div className="thread-seam" {...anchorAttr}>
-        <span className="thread-seam-line" />
-        <span className="thread-seam-label">{msg.content}</span>
-        <span className="thread-seam-line" />
-      </div>
-    );
-  }
-  if (msg.role === "system") {
-    return (
-      <div className="msg-system" {...anchorAttr}>
-        <span className="muted">{msg.content}</span>
-      </div>
-    );
-  }
-  if (msg.role === "error") {
-    return (
-      <div className="msg-error" {...anchorAttr}>
-        <AlertIcon />
-        <span>{msg.content}</span>
-      </div>
-    );
-  }
-
-  const isUser = msg.role === "user";
-  const isSynthesis = msg.role === "synthesis";
-
-  return (
-    <div
-      className={`msg-row${isUser ? " user" : ""}${isSynthesis ? " synthesis" : ""}${sameAsPrev ? " continuation" : ""}`}
-      data-colour={colour}
-      {...anchorAttr}
-    >
-      {!isUser && (
-        <div className="msg-avatar" aria-hidden>
-          {!sameAsPrev && (
-            <span className="msg-avatar-dot">
-              {(msg.agent_name ?? "?").slice(0, 1).toUpperCase()}
-            </span>
-          )}
-        </div>
-      )}
-      <div className="msg-bubble">
-        {!sameAsPrev && (
-          <div className="msg-header">
-            {isUser ? (
-              <span className="msg-author">You</span>
-            ) : (
-              <>
-                <span className="msg-author">{msg.agent_name || "agent"}</span>
-                {isSynthesis && (
-                  <span className="msg-synthesis-tag">synthesis</span>
-                )}
-              </>
-            )}
-            <span className="msg-time muted" title={msg.at}>
-              {formatTime(msg.at)}
-            </span>
-          </div>
-        )}
-        <div className="msg-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ThinkingBubble({ agentName, colour }: { agentName: string; colour: string }) {
-  return (
-    <div className="msg-row" data-colour={colour}>
-      <div className="msg-avatar" aria-hidden>
-        <span className="msg-avatar-dot">
-          {agentName.slice(0, 1).toUpperCase()}
-        </span>
-      </div>
-      <div className="msg-bubble">
-        <div className="msg-header">
-          <span className="msg-author">{agentName}</span>
-          <span className="msg-time muted">thinking</span>
-        </div>
-        <div className="msg-body thinking">
-          <span className="dot" />
-          <span className="dot" />
-          <span className="dot" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function NoWorkflowComposer({
   taskId,
   onAttached,
@@ -807,7 +806,7 @@ function NoWorkflowComposer({
       .then((r) => setWorkflows((r.workflows ?? []).map((w) => w.name)))
       .catch((e) => setErr(String(e)));
   }, []);
-  async function attach() {
+  async function doAttach() {
     if (!picking) return;
     setAttaching(true);
     setErr(null);
@@ -849,7 +848,7 @@ function NoWorkflowComposer({
         </select>
         <button
           className="primary"
-          onClick={attach}
+          onClick={doAttach}
           disabled={!picking || attaching}
         >
           {attaching ? "Attaching…" : "Attach"}
@@ -868,41 +867,10 @@ function safeJson<T = unknown>(s: string): T | null {
   }
 }
 
-function formatTime(iso: string): string {
-  const t = Date.parse(iso);
-  if (!t) return "";
-  const d = new Date(t);
-  const ageMs = Date.now() - t;
-  if (ageMs < 24 * 3600 * 1000) {
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  if (ageMs < 7 * 24 * 3600 * 1000) {
-    return d.toLocaleString([], {
-      weekday: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-  return d.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 function BackArrow() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="15 18 9 12 15 6" />
-    </svg>
-  );
-}
-
-function DownArrow() {
-  return (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="6 9 12 15 18 9" />
     </svg>
   );
 }

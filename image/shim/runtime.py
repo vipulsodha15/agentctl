@@ -341,7 +341,13 @@ def translate_message(message: Any, *, turn_id: str) -> list[tuple[str, dict]]:
         text = getattr(message, "text", None)
         if text is None:
             text = _coerce_assistant_text(getattr(message, "content", None))
-        out.append((EVENT_ASSISTANT_MESSAGE, {"turn_id": turn_id, "content": text or ""}))
+        # An AssistantMessage whose content is only tool_use blocks (no text)
+        # collapses to "" here. Don't emit an empty bubble for that — the
+        # task-chat thread renders one row per assistant.message, so a string
+        # of tool-only turns would otherwise show as a column of empty
+        # rounded boxes next to the agent's real reply.
+        if text:
+            out.append((EVENT_ASSISTANT_MESSAGE, {"turn_id": turn_id, "content": text}))
         usage = getattr(message, "usage", None)
         if usage is not None:
             out.append((EVENT_USAGE, {"turn_id": turn_id, "model": getattr(message, "model", ""), **_usage_dict(usage)}))

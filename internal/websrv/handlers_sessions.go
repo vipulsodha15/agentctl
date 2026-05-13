@@ -106,6 +106,32 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request, id str
 	writeJSON(w, 0, proto.GetSessionResponse{Session: d})
 }
 
+// handleSessionSnapshot returns the SDK JSONL conversation persisted in
+// the session store for `id`. Unlike the WS attach path, this works even
+// when the underlying actor is no longer in memory (terminated stages,
+// rehydrated daemons) because the `messages` table is keyed by session_id
+// and survives the live container. The response shape mirrors the inner
+// `data` of the `session.snapshot` event so the web reducer can normalize
+// it with the same code path.
+func (s *Server) handleSessionSnapshot(w http.ResponseWriter, r *http.Request, id string) {
+	if !s.requireManager(w) {
+		return
+	}
+	records, err := s.manager.StoredConversation(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
+		return
+	}
+	if len(records) == 0 {
+		records = []byte("[]")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(`{"conversation":`))
+	_, _ = w.Write(records)
+	_, _ = w.Write([]byte("}"))
+}
+
 func (s *Server) handleTerminateSession(w http.ResponseWriter, r *http.Request, id string) {
 	if !s.requireManager(w) {
 		return
