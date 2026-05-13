@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApiError, api, apiJson, jsonBody } from "../api";
@@ -34,6 +34,7 @@ type WSStatus = "connecting" | "live" | "reconnecting" | "offline";
 
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
@@ -263,8 +264,8 @@ export function TaskDetail() {
     setSending(true);
     try {
       await api(`/v1/tasks/${id}/abandon`, { method: "POST" });
-      await load();
       setConfirmAbandon(false);
+      navigate("/tasks");
     } catch (err) {
       setError(
         err instanceof ApiError

@@ -3940,7 +3940,6 @@ button.danger:hover { background: #b22f2f; }
   padding: 24px;
   max-width: 420px;
   width: 90%;
-  box-shadow: 0 24px 60px rgba(17, 20, 24, 0.2);
 }
 .modal h3 {
   margin-top: 0;
