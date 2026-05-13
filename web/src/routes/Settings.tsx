@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
+import { useConfirm } from "../components/ConfirmDialog";
 import type {
   AddMcpRequest,
   AddSkillRequest,
@@ -68,6 +69,7 @@ const EMPTY_MCP_FORM: McpFormState = {
 };
 
 function McpSection() {
+  const confirm = useConfirm();
   const [mcps, setMcps] = useState<McpEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<McpFormState | null>(null);
@@ -106,13 +108,13 @@ function McpSection() {
   }
 
   async function onRemove(entry: McpEntry) {
-    if (
-      !window.confirm(
-        `Remove MCP "${entry.name}"? Running sessions are unaffected.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Remove MCP "${entry.name}"?`,
+      message: "Running sessions are unaffected.",
+      confirmLabel: "Remove",
+      variant: "danger",
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await apiJson(`/v1/mcps/${encodeURIComponent(entry.name)}`, {
@@ -359,6 +361,7 @@ const EMPTY_SKILL_FORM: SkillFormState = {
 };
 
 function SkillsSection() {
+  const confirm = useConfirm();
   const [skills, setSkills] = useState<SkillEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<SkillFormState | null>(null);
@@ -383,13 +386,13 @@ function SkillsSection() {
   }
 
   async function onRemove(entry: SkillEntry) {
-    if (
-      !window.confirm(
-        `Remove custom skill "${entry.name}"? Running sessions are unaffected.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Remove custom skill "${entry.name}"?`,
+      message: "Running sessions are unaffected.",
+      confirmLabel: "Remove",
+      variant: "danger",
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await apiJson(`/v1/skills/${encodeURIComponent(entry.name)}`, {

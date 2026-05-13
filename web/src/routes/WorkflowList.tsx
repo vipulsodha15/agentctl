@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, api, apiJson } from "../api";
+import { useConfirm } from "../components/ConfirmDialog";
 import type {
   Agent,
   ListAgentsResponse,
@@ -11,6 +12,7 @@ import type {
 export function WorkflowList() {
   const navigate = useNavigate();
   const location = useLocation();
+  const confirm = useConfirm();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [agents, setAgents] = useState<Record<string, Agent>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -60,9 +62,13 @@ export function WorkflowList() {
   const wf = workflows.find((w) => w.name === selected);
 
   async function onDelete(name: string) {
-    const ok = window.confirm(
-      `Delete workflow "${name}"? Tasks already in flight keep their stages, but new tasks cannot use it.`,
-    );
+    const ok = await confirm({
+      title: `Delete workflow "${name}"?`,
+      message:
+        "Tasks already in flight keep their stages, but new tasks cannot use it.",
+      confirmLabel: "Delete",
+      variant: "danger",
+    });
     if (!ok) return;
     setBusy(true);
     setError(null);

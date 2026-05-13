@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { ApiError, apiJson, jsonBody } from "../api";
+import { useConfirm } from "../components/ConfirmDialog";
 import type {
   Agent,
   ListAgentsResponse,
@@ -20,6 +21,7 @@ export function WorkflowEditor() {
   const navigate = useNavigate();
   const params = useParams<{ name?: string }>();
   const location = useLocation();
+  const confirm = useConfirm();
   const mode: Mode = params.name ? "edit" : "new";
 
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -184,9 +186,14 @@ export function WorkflowEditor() {
     }
   }
 
-  function cancel() {
+  async function cancel() {
     if (touched) {
-      const ok = window.confirm("Discard unsaved changes?");
+      const ok = await confirm({
+        title: "Discard unsaved changes?",
+        message: "Your edits will be lost.",
+        confirmLabel: "Discard",
+        variant: "danger",
+      });
       if (!ok) return;
     }
     cleanRef.current = true;

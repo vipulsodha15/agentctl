@@ -16,6 +16,7 @@ import { McpPanel } from "../components/McpPanel";
 import { StopButton } from "../components/StopButton";
 import { CostPanel } from "../components/CostPanel";
 import { ChangesPanel } from "../components/ChangesPanel";
+import { useConfirm, useNotify } from "../components/ConfirmDialog";
 
 interface State {
   status: SessionStatus | "unknown";
@@ -785,6 +786,8 @@ const SIDE_PANEL_COLLAPSED_KEY = "agentctl.sidePanel.collapsed";
 export function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const confirm = useConfirm();
+  const notify = useNotify();
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const [tab, setTab] = useState<"conversation" | "changes">("conversation");
   const [endBusy, setEndBusy] = useState(false);
@@ -867,9 +870,13 @@ export function SessionDetail() {
 
   const onEnd = useCallback(async () => {
     if (!id) return;
-    if (!window.confirm("End session? Container, volume, and history will be removed.")) {
-      return;
-    }
+    const ok = await confirm({
+      title: "End session?",
+      message: "Container, volume, and history will be removed.",
+      confirmLabel: "End session",
+      variant: "danger",
+    });
+    if (!ok) return;
     setEndBusy(true);
     try {
       await apiJson(`/v1/sessions/${encodeURIComponent(id)}`, {
@@ -881,10 +888,14 @@ export function SessionDetail() {
         err instanceof ApiError
           ? `${err.code ?? err.status}: ${err.message}`
           : String(err);
-      alert(`Failed to end session: ${msg}`);
+      await notify({
+        title: "Failed to end session",
+        message: msg,
+        variant: "error",
+      });
       setEndBusy(false);
     }
-  }, [id, navigate]);
+  }, [id, navigate, confirm, notify]);
 
   const visibleMessages = useMemo(() => state.messages, [state.messages]);
 
