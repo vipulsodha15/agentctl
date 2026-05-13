@@ -14,6 +14,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pelletier/go-toml/v2 v2.3.1
 	golang.org/x/sys v0.38.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.4
 )
 

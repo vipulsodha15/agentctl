@@ -1,0 +1,206 @@
+package ttl
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"strings"
+	"testing"
+
+	_ "modernc.org/sqlite"
+)
+
+// newTestLib spins up an in-memory sqlite with the agents + workflows tables
+// and returns a library backed by it.
+func newTestLib(t *testing.T) (*Library, *sql.DB) {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, q := range []string{
+		`CREATE TABLE agents (
+            name TEXT PRIMARY KEY,
+            source TEXT NOT NULL CHECK (source IN ('builtin','custom')),
+            yaml_body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )`,
+		`CREATE TABLE workflows (
+            name TEXT PRIMARY KEY,
+            source TEXT NOT NULL CHECK (source IN ('builtin','custom')),
+            yaml_body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("schema: %v", err)
+		}
+	}
+	return New(Options{DB: db}), db
+}
+
+// TestMaterializeIsIdempotent verifies that Materialize can run twice in a
+// row without producing duplicate rows — a stateless container will call it
+// on every boot, so this is on the hot path.
+func TestMaterializeIsIdempotent(t *testing.T) {
+	_, db := newTestLib(t)
+	ctx := context.Background()
+	first, err := Materialize(ctx, db)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first == 0 {
+		t.Fatalf("expected first materialize to write rows, got 0")
+	}
+	second, err := Materialize(ctx, db)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	// The second run reissues UPSERTs (intentional, so binary upgrades can
+	// ship fixed prompts), but every row's source is still 'builtin' and
+	// rowcount stays equal to the number of embedded files.
+	if second != first {
+		t.Fatalf("second materialize affected a different number of rows: first=%d second=%d", first, second)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM agents WHERE source='builtin'`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("no builtin agents after materialize")
+	}
+}
+
+// TestMaterializeDoesNotClobberCustom checks the core durability promise:
+// a custom row created via PutAgent survives Materialize calls that follow
+// it.
+func TestMaterializeDoesNotClobberCustom(t *testing.T) {
+	lib, db := newTestLib(t)
+	ctx := context.Background()
+	if _, err := Materialize(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Forge a custom row with the same name as a built-in. Because Put
+	// refuses to overwrite a builtin, we have to author a fresh name.
+	customYAML := []byte(`name: my-reviewer
+description: My custom code reviewer.
+colour: amber
+prompt: |
+  You are a careful reviewer.`)
+	saved, err := lib.PutAgent(ctx, Agent{}, customYAML)
+	if err != nil {
+		t.Fatalf("PutAgent: %v", err)
+	}
+	if saved.Source != SourceCustom {
+		t.Fatalf("expected source=custom, got %q", saved.Source)
+	}
+	// Now re-materialize. The custom row must not be touched.
+	if _, err := Materialize(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := lib.GetAgent("my-reviewer")
+	if err != nil {
+		t.Fatalf("GetAgent after materialize: %v", err)
+	}
+	if got.Source != SourceCustom {
+		t.Fatalf("custom row was clobbered: source=%q", got.Source)
+	}
+	if got.Description != "My custom code reviewer." {
+		t.Fatalf("custom row body was clobbered: %q", got.Description)
+	}
+}
+
+// TestPutAgentRefusesBuiltinOverwrite — saving over a built-in name is
+// rejected; the user is expected to fork it under a new name.
+func TestPutAgentRefusesBuiltinOverwrite(t *testing.T) {
+	lib, db := newTestLib(t)
+	ctx := context.Background()
+	if _, err := Materialize(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`name: bug-investigator
+description: Hijacked!
+colour: red
+prompt: |
+  I'm not the real investigator.`)
+	_, err := lib.PutAgent(ctx, Agent{}, body)
+	if !errors.Is(err, ErrBuiltinReadOnly) {
+		t.Fatalf("expected ErrBuiltinReadOnly, got %v", err)
+	}
+	// And the original is still intact.
+	got, _ := lib.GetAgent("bug-investigator")
+	if got.Source != SourceBuiltin {
+		t.Fatalf("source flipped: %q", got.Source)
+	}
+	if !strings.Contains(got.Prompt, "bug investigator") {
+		t.Fatalf("prompt was overwritten: %q", got.Prompt[:50])
+	}
+}
+
+// TestRemoveAgentReferencedByWorkflow — workflows hold the unique referential
+// integrity we care about; ErrInUse must be returned.
+func TestRemoveAgentReferencedByWorkflow(t *testing.T) {
+	lib, db := newTestLib(t)
+	ctx := context.Background()
+	if _, err := Materialize(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Author a custom agent + a workflow that uses it.
+	if _, err := lib.PutAgent(ctx, Agent{}, []byte(`name: my-agent
+description: x
+colour: blue
+prompt: hi`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.PutWorkflow(ctx, Workflow{}, []byte(`name: my-flow
+description: x
+stages:
+  - agent: my-agent`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.RemoveAgent(ctx, "my-agent"); !errors.Is(err, ErrInUse) {
+		t.Fatalf("expected ErrInUse, got %v", err)
+	}
+	// Remove the workflow first, then the agent should remove cleanly.
+	if err := lib.RemoveWorkflow(ctx, "my-flow"); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.RemoveAgent(ctx, "my-agent"); err != nil {
+		t.Fatalf("RemoveAgent after RemoveWorkflow: %v", err)
+	}
+}
+
+// TestPutWorkflowValidatesAgents — workflows that reference an unknown agent
+// are rejected at Put time, not silently loaded with a flag.
+func TestPutWorkflowValidatesAgents(t *testing.T) {
+	lib, db := newTestLib(t)
+	ctx := context.Background()
+	if _, err := Materialize(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, err := lib.PutWorkflow(ctx, Workflow{}, []byte(`name: ghost-flow
+description: references nothing
+stages:
+  - agent: does-not-exist`))
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
