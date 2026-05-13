@@ -444,7 +444,7 @@ func (m *Manager) Abandon(ctx context.Context, taskID string) error {
 			_ = m.opts.Runtime.StopStage(ctx, stage.SessionID)
 		}
 		_, _ = m.opts.Store.DB().ExecContext(ctx,
-			`UPDATE stages SET status='done', ended_at=?, session_id=NULL, volume_name=NULL WHERE stage_id=?`,
+			`UPDATE stages SET status='done', ended_at=?, volume_name=NULL WHERE stage_id=?`,
 			now.Format(time.RFC3339Nano), stage.ID)
 	}
 	m.broadcastStatus(taskID, from, TaskStatusAbandoned)
@@ -684,8 +684,13 @@ func (m *Manager) lockSynthesisAndAdvance(ctx context.Context, taskID, stageID, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Keep stage.session_id populated even after the underlying session is
+	// terminated: the SQLite `messages` table is keyed by session_id and
+	// survives termination, so the web UI can fetch the frozen transcript
+	// for prior stages via GET /v1/sessions/{id}/snapshot. Only the on-disk
+	// volume is reclaimed.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE stages SET status='done', ended_at=?, synthesis=?, session_id=NULL, volume_name=NULL WHERE stage_id=?`,
+		`UPDATE stages SET status='done', ended_at=?, synthesis=?, volume_name=NULL WHERE stage_id=?`,
 		now.Format(time.RFC3339Nano), synthesis, stageID); err != nil {
 		m.logger.Warn("lock_synthesis.update_stage_failed", slog.String("error", err.Error()))
 		return

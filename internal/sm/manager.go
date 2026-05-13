@@ -40,6 +40,7 @@ type Manager interface {
 	ExportPatch(ctx context.Context, sessionID string, req DiffRequest) (DiffStream, error)
 	ExportPush(ctx context.Context, sessionID string, req PushRequest) (PushResult, error)
 	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
+	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
 	Rehydrate(ctx context.Context) error
 }
 
@@ -781,6 +782,48 @@ func (m *manager) Attach(ctx context.Context, sessionID string) (Stream, error) 
 	}
 	stream = &snapshotPrependedStream{first: snapshot, inner: stream, cancel: cancel}
 	return stream, nil
+}
+
+// StoredConversation returns the persisted SDK JSONL records for a session
+// as a raw JSON array (`[{...},{...},...]`). The `messages` table is keyed
+// by session_id and survives termination of the live actor, so this works
+// for sessions that have been Stopped/Terminated as well as live ones —
+// callers can render the frozen transcript even after the container is
+// gone. Returns nil with no error when the session never recorded any
+// messages.
+func (m *manager) StoredConversation(_ context.Context, sessionID string) ([]byte, error) {
+	if m.store == nil || sessionID == "" {
+		return nil, nil
+	}
+	rows, err := m.store.DB().Query(
+		`SELECT record_json FROM messages WHERE session_id = ? ORDER BY seq`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	buf := []byte{'['}
+	first := true
+	for rows.Next() {
+		var rec string
+		if err := rows.Scan(&rec); err != nil {
+			return nil, err
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, rec...)
+		first = false
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if first {
+		return nil, nil
+	}
+	buf = append(buf, ']')
+	return buf, nil
 }
 
 func (m *manager) List(_ context.Context) ([]proto.SessionSummary, error) {

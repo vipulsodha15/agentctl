@@ -3311,16 +3311,16 @@ form .checkbox-row {
   gap: 14px;
   padding: 6px 2px 0;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
   position: relative;
 }
 
-/* The active stage hosts a full ConversationView. It takes the remaining
- * vertical space and lets the embedded conversation own the scroll, so we
- * never end up with two nested scrollbars in the task chat. */
+/* The active stage hosts a live ConversationView. Past stages render
+ * frozen transcripts above it. We want a single scroll container —
+ * the outer task-thread-wrap — so the user can scroll smoothly from
+ * past history into the current chat. The ConversationView's own
+ * scroll machinery is therefore neutered here. */
 .task-active-stage {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--c-border);
@@ -3329,12 +3329,19 @@ form .checkbox-row {
   overflow: hidden;
 }
 .task-active-stage > .conversation-wrap {
-  flex: 1;
-  min-height: 0;
+  flex: none;
+  height: auto;
 }
 .task-active-stage > .conversation-wrap > .conversation {
+  overflow: visible;
+  flex: none;
   padding: 12px 18px 18px;
 }
+/* The jump-pill is absolutely positioned relative to .conversation-wrap.
+ * Since we removed the inner scroll, the pill would never fire correctly
+ * here — hide it inside task chat. The outer scroll exposes its own
+ * latest content as the user scrolls naturally. */
+.task-detail .jump-pill { display: none; }
 
 .task-stage-header {
   display: flex;
@@ -3353,32 +3360,37 @@ form .checkbox-row {
   color: var(--c-fg-subtle);
 }
 
-/* ── Prior-stage cards ──────────────────────────────────────────
- * Done stages collapse to a synthesis card. Click to expand;
- * seam divider below marks the handoff to the next agent. */
+/* ── Prior-stage transcripts ────────────────────────────────────
+ * Done stages render their full session transcript fetched from
+ * the messages-table snapshot, plus a synthesis callout at the
+ * bottom so the takeaway is visible without scrolling the whole
+ * turn history. A seam divider below marks the handoff to the
+ * next agent. */
 
-.task-stage-card {
+.task-prior-stage {
   border: 1px solid var(--c-border);
   border-radius: var(--radius-lg);
   background: var(--c-surface);
   overflow: hidden;
-}
-.task-stage-card-header {
-  appearance: none;
-  background: transparent;
-  border: none;
-  width: 100%;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  cursor: pointer;
-  font-family: inherit;
-  text-align: left;
+  flex-direction: column;
 }
-.task-stage-card-header:hover {
-  background: color-mix(in srgb, var(--c-border) 30%, transparent);
+.task-prior-transcript {
+  border-top: 1px solid var(--c-border);
+  /* The embedded ConversationView's `.conversation` element normally
+   * owns its own scroll. In a prior-stage card we want the transcript
+   * to flow naturally — the outer task-thread-wrap is the scroller. */
 }
+.task-prior-transcript .conversation-wrap {
+  flex: none;
+  height: auto;
+}
+.task-prior-transcript .conversation {
+  overflow: visible;
+  flex: none;
+  padding: 8px 18px 12px;
+}
+
 .task-stage-done {
   display: inline-flex;
   align-items: center;
@@ -3389,17 +3401,29 @@ form .checkbox-row {
   color: var(--c-fg-subtle);
   margin-left: auto;
 }
-.task-stage-chev {
-  color: var(--c-fg-subtle);
+.task-stage-loading {
+  padding: 14px 18px;
+  font-size: var(--text-sm);
 }
-.task-stage-card-body {
-  padding: 4px 16px 16px;
+.task-stage-synthesis {
+  border-top: 1px solid var(--c-border);
+  background: color-mix(in srgb, var(--agent-bg, var(--c-surface)) 50%, var(--c-surface));
+  padding: 10px 16px 14px;
+}
+.task-stage-synthesis-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-fg-subtle);
+  margin-bottom: 6px;
+}
+.task-stage-synthesis-body {
   font-size: var(--text-sm);
   color: var(--c-fg-2);
-  border-top: 1px solid var(--c-border);
 }
-.task-stage-card-body p:first-child { margin-top: 8px; }
-.task-stage-card-body p:last-child { margin-bottom: 0; }
+.task-stage-synthesis-body p:first-child { margin-top: 0; }
+.task-stage-synthesis-body p:last-child { margin-bottom: 0; }
 
 .task-stage-seam {
   display: grid;

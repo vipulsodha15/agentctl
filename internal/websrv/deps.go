@@ -24,6 +24,11 @@ type Manager interface {
 	ExportPatch(ctx context.Context, sessionID string, req sm.DiffRequest) (sm.DiffStream, error)
 	ExportPush(ctx context.Context, sessionID string, req sm.PushRequest) (sm.PushResult, error)
 	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
+	// StoredConversation returns the SDK JSONL records persisted in the
+	// session store for `sessionID`, as a raw JSON array. Survives session
+	// termination because the rows are keyed by session_id, not by a live
+	// actor. Returns nil when no records exist.
+	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
 }
 
 // MCPRegistry is M3-B's territory; websrv only dispatches to it. Methods

@@ -97,6 +97,13 @@ func (m *stubManager) SessionRepos(_ context.Context, id string) ([]proto.RepoSt
 	return []proto.RepoState{{Name: "alpha", URL: "https://example/alpha", Branch: "main"}}, nil
 }
 
+func (m *stubManager) StoredConversation(_ context.Context, id string) ([]byte, error) {
+	if id == "missing" {
+		return nil, nil
+	}
+	return []byte(`[{"type":"user","message":{"role":"user","content":"hi"}}]`), nil
+}
+
 type cannedDiff struct {
 	chunks []sm.DiffChunk
 	idx    int
@@ -427,6 +434,55 @@ func TestSessionReposEndpoint(t *testing.T) {
 	}
 	if len(body.Repos) != 1 || body.Repos[0].Name != "alpha" {
 		t.Errorf("repos=%+v", body.Repos)
+	}
+}
+
+func TestSessionSnapshotEndpoint(t *testing.T) {
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("GET", "http://"+s.Addr()+"/v1/sessions/sess_1/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Conversation []json.RawMessage `json:"conversation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Conversation) != 1 {
+		t.Errorf("expected 1 record, got %d", len(body.Conversation))
+	}
+}
+
+func TestSessionSnapshotEmpty(t *testing.T) {
+	// `missing` returns nil from the stub; the handler must still respond
+	// with a valid empty array so the client doesn't have to special-case
+	// the not-found shape.
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("GET", "http://"+s.Addr()+"/v1/sessions/missing/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Conversation []json.RawMessage `json:"conversation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Conversation) != 0 {
+		t.Errorf("expected empty array, got %d records", len(body.Conversation))
 	}
 }
 

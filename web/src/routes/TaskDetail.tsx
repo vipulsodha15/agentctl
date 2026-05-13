@@ -11,6 +11,7 @@ import remarkGfm from "remark-gfm";
 import { ApiError, api, apiJson, jsonBody } from "../api";
 import { attach } from "../ws";
 import type {
+  ConversationMessage,
   SnapshotData,
   Task,
   TaskDetailResponse,
@@ -21,6 +22,7 @@ import { ConversationView } from "../components/ConversationView";
 import {
   INITIAL_CONVERSATION_STATE,
   conversationReducer,
+  normalizeConversation,
 } from "../lib/conversation";
 
 type WSStatus = "connecting" | "live" | "reconnecting" | "offline";
@@ -41,10 +43,28 @@ export function TaskDetail() {
   const [wsStatus, setWsStatus] = useState<WSStatus>("connecting");
   const [issueOpen, setIssueOpen] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const [convState, dispatchConv] = useReducer(
     conversationReducer,
     INITIAL_CONVERSATION_STATE,
   );
+
+  // Auto-scroll the outer thread container to the bottom when new live
+  // messages arrive, but only if the user is already near the bottom —
+  // otherwise we'd yank them away from past-stage history they're
+  // reading. The active stage's ConversationView no longer has its
+  // own scroll inside the task page, so this is the one place the
+  // behavior lives.
+  const lastMsg = convState.messages[convState.messages.length - 1];
+  useEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    const nearBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    if (nearBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [convState.messages.length, lastMsg?.text, lastMsg?.output, convState.inFlight]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -318,7 +338,7 @@ export function TaskDetail() {
 
       <StageRail stages={stages} taskStatus={task.status} />
 
-      <div className="task-thread-wrap">
+      <div className="task-thread-wrap" ref={threadRef}>
         <IssueSeed task={task} open={issueOpen} onToggle={() => setIssueOpen((v) => !v)} />
         {apiKeyMissing && error && (
           <InlineNotice
@@ -331,14 +351,13 @@ export function TaskDetail() {
 
         {/* Past stages — compact synthesis cards + seam dividers. Full
             transcript replay for handed-off stages is a follow-up. */}
-        {doneStages.map((s, idx) => (
+        {doneStages.map((s) => (
           <PriorStageCard
             key={s.stage_id}
             stage={s}
             nextAgent={
               stages.find((n) => n.position === s.position + 1)?.agent_name
             }
-            isFirst={idx === 0}
           />
         ))}
 
@@ -635,51 +654,102 @@ function StageHeader({
   );
 }
 
+// PriorStageCard renders a handed-off stage's full session transcript.
+// The session has been terminated (no live WS), but the SDK JSONL records
+// survive in the messages table — we fetch them via GET
+// /v1/sessions/{id}/snapshot and normalize through the same code path the
+// live reducer uses. The stage's synthesis is shown as a footer callout
+// so the takeaway is visible without scrolling through the whole turn
+// history.
 function PriorStageCard({
   stage,
   nextAgent,
-  isFirst,
 }: {
   stage: TaskStage;
   nextAgent?: string;
-  isFirst: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<ConversationMessage[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!stage.session_id) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    apiJson<{ conversation: unknown[] }>(
+      `/v1/sessions/${encodeURIComponent(stage.session_id)}/snapshot`,
+    )
+      .then((r) => {
+        if (cancelled) return;
+        const { messages: msgs } = normalizeConversation(r.conversation ?? []);
+        setMessages(msgs);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(
+          e instanceof ApiError
+            ? `${e.code ?? e.status}: ${e.message}`
+            : String(e),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stage.session_id]);
+
   return (
     <>
-      <div className={`task-stage-card swatch-${stage.colour ?? "slate"}`}>
-        <button
-          type="button"
-          className="task-stage-card-header"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-        >
+      <div className={`task-prior-stage swatch-${stage.colour ?? "slate"}`}>
+        <div className="task-stage-header">
           <span className="task-stage-position">Stage {stage.position}</span>
+          <span className="muted">handed off ·</span>
           <span className={`agent-tag swatch-${stage.colour ?? "slate"}`}>
             <span className="agent-tag-dot" aria-hidden />
             {stage.agent_name}
           </span>
           <span className="task-stage-done">
-            <CheckIcon /> handed off
+            <CheckIcon /> done
           </span>
-          <span className="task-stage-chev" aria-hidden>
-            <ChevronIcon direction={open ? "down" : "right"} />
-          </span>
-        </button>
-        {open && (
-          <div className="task-stage-card-body">
-            {stage.synthesis ? (
+        </div>
+        {loading && (
+          <div className="task-stage-loading muted">Loading transcript…</div>
+        )}
+        {err && (
+          <div className="task-stage-loading error-text">
+            Couldn't load transcript: {err}
+          </div>
+        )}
+        {messages !== null && messages.length > 0 && (
+          <div className="task-prior-transcript">
+            <ConversationView
+              messages={messages}
+              warnings={[]}
+              inFlight={false}
+              mcps={[]}
+              usageByTurn={{}}
+              filter="all"
+            />
+          </div>
+        )}
+        {stage.synthesis && (
+          <div className="task-stage-synthesis">
+            <div className="task-stage-synthesis-label">Synthesis</div>
+            <div className="task-stage-synthesis-body">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {stage.synthesis}
               </ReactMarkdown>
-            ) : (
-              <span className="muted">No synthesis recorded for this stage.</span>
-            )}
+            </div>
           </div>
         )}
       </div>
       {nextAgent && (
-        <div className="task-stage-seam" aria-hidden={!isFirst}>
+        <div className="task-stage-seam">
           <span className="task-stage-seam-line" />
           <span className="task-stage-seam-label">
             <ForwardArrow /> handed off to <strong>{nextAgent}</strong>
