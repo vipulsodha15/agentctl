@@ -11,6 +11,7 @@ import { TaskDetail } from "./routes/TaskDetail";
 import { NewTask } from "./routes/NewTask";
 import { AgentList } from "./routes/AgentList";
 import { WorkflowList } from "./routes/WorkflowList";
+import { WorkflowEditor } from "./routes/WorkflowEditor";
 
 const SIDEBAR_COLLAPSED_KEY = "agentctl.appSidebar.collapsed";
 
@@ -136,6 +137,8 @@ export function App() {
           <Route path="/tasks/:id" element={<TaskDetail />} />
           <Route path="/agents" element={<AgentList />} />
           <Route path="/workflows" element={<WorkflowList />} />
+          <Route path="/workflows/new" element={<WorkflowEditor />} />
+          <Route path="/workflows/:name/edit" element={<WorkflowEditor />} />
           <Route path="/sessions" element={<SessionList />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />
           <Route path="/new" element={<NewSession />} />
