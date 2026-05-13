@@ -27,13 +27,13 @@ import (
 // each non-empty user message triggers a new completion which is delivered
 // back via OnAssistantMessage.
 type SimRuntime struct {
-	logger     *slog.Logger
-	apiKey     string
-	baseURL    string
-	model      string
-	client     *http.Client
-	mu         sync.Mutex
-	stages     map[string]*simStage
+	logger  *slog.Logger
+	apiKey  string
+	baseURL string
+	model   string
+	client  *http.Client
+	mu      sync.Mutex
+	stages  map[string]*simStage
 }
 
 type simStage struct {

@@ -55,16 +55,16 @@ type StageRuntime interface {
 }
 
 type StartStageInput struct {
-	TaskID         string
-	StageID        string
-	Position       int
-	Agent          ttl.Agent
-	PrevAgent      string
-	NextAgent      string
-	IssueMD        string
-	HandoffInMD    string
-	RepoURL        string
-	BaseSHA        string
+	TaskID      string
+	StageID     string
+	Position    int
+	Agent       ttl.Agent
+	PrevAgent   string
+	NextAgent   string
+	IssueMD     string
+	HandoffInMD string
+	RepoURL     string
+	BaseSHA     string
 	// OnAssistantMessage is invoked with each assistant message the agent
 	// emits while the stage is active. The manager uses these to populate
 	// the task chat thread and to lock the synthesis on handoff.
