@@ -941,7 +941,6 @@ input[type="checkbox"] {
 .msg .content {
   font-size: var(--text-md);
   color: var(--c-fg);
-  white-space: pre-wrap;
   word-wrap: break-word;
   line-height: 1.65;
 }
