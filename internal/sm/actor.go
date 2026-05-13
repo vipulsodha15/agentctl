@@ -104,6 +104,7 @@ type actorOptions struct {
 	GitHubPAT       string
 	SkillCollisions []string
 	Usage           UsageRecorder
+	SystemPrompt    string
 }
 
 type actor struct {
@@ -1096,6 +1097,12 @@ func (a *actor) sendGreet() {
 	// a fresh one after a daemon restart or container swap.
 	if a.sdkSessionID != "" {
 		payload["sdk_session_id"] = a.sdkSessionID
+	}
+	// system_prompt is set by tm.SessionRuntime so each task-chat stage runs
+	// under its agent's prompt; omitted for normal sessions so the SDK keeps
+	// the default Claude Code prompt.
+	if a.opts.SystemPrompt != "" {
+		payload["system_prompt"] = a.opts.SystemPrompt
 	}
 	a.sendControlLocked(AgentdGreet, mustJSON(payload))
 }

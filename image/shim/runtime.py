@@ -48,6 +48,11 @@ class RuntimeConfig:
     permission_mode: str = "bypassPermissions"
     resume: Optional[str] = None
     mcp_servers: Optional[dict] = None
+    # When set, passed through to ClaudeAgentOptions.system_prompt so the
+    # session runs under a caller-supplied prompt instead of the SDK's
+    # default Claude Code prompt. Used by tm.SessionRuntime to run each
+    # task-chat stage under its agent's prompt.
+    system_prompt: Optional[str] = None
 
 
 class RuntimeDriver:
@@ -115,6 +120,8 @@ class RuntimeDriver:
         kwargs["skills"] = "all"
         if self._cfg.mcp_servers:
             kwargs["mcp_servers"] = self._cfg.mcp_servers
+        if self._cfg.system_prompt:
+            kwargs["system_prompt"] = self._cfg.system_prompt
         if self._sdk_session_id:
             kwargs["resume"] = self._sdk_session_id
         return ClaudeAgentOptions(**kwargs)

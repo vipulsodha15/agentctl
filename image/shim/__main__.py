@@ -119,6 +119,7 @@ class Shim:
                 cwd="/work",
                 resume=self._sdk_session_id,
                 mcp_servers=_render_mcp_servers(greet_data.get("mcps")),
+                system_prompt=greet_data.get("system_prompt") or None,
             ),
             emit_event=self._emit_event,
             emit_session_id=self._emit_session_id,
