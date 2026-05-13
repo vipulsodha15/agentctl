@@ -3053,10 +3053,11 @@ form .checkbox-row {
 /* ════════════════════════════════════════════════════════════════
  *  Task detail — the workflow conversation
  *
- *  Three planes stacked on a centered column: header (identity +
- *  status), stage rail (progress), and the thread (issue + chat +
- *  composer). Everything sits on the page canvas — no enclosing
- *  panel — so the conversation feels open, not boxed-in.
+ *  Layout: a compact top bar (identity + current agent + actions),
+ *  a thin stage strip, the conversation thread (this gets the
+ *  vast majority of vertical space), and a slim composer pinned
+ *  to the bottom. The conversation is the page — no enclosing
+ *  card, no inner header — so it reads like a chat surface.
  * ════════════════════════════════════════════════════════════════ */
 
 .task-detail {
@@ -3064,7 +3065,7 @@ form .checkbox-row {
   grid-template-rows: auto auto 1fr auto;
   height: calc(100vh - 64px);
   gap: 0;
-  max-width: 880px;
+  max-width: 980px;
   margin: 0 auto;
   position: relative;
   animation: page-fade-in 320ms var(--ease-out) both;
@@ -3073,98 +3074,83 @@ form .checkbox-row {
   .task-detail { height: calc(100vh - 32px); padding: 0 8px; }
 }
 
-.task-detail-header {
+/* ── Top bar ─────────────────────────────────────────────────────
+ * Single horizontal strip. Everything fits on one line at typical
+ * widths; wraps gracefully on narrow viewports. */
+
+.task-topbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 4px 0 22px;
+  gap: 16px;
+  padding: 8px 0 10px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--c-border-soft);
 }
-.task-detail-title {
+.task-topbar-left {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.task-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.task-topbar-title {
+  display: inline-flex;
+  align-items: baseline;
   gap: 8px;
   min-width: 0;
+  max-width: 100%;
 }
-.task-detail-headline {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.task-detail-title h2 {
-  font-size: var(--text-2xl);
+.task-topbar-name {
+  font-size: var(--text-base);
   font-weight: 600;
-  letter-spacing: -0.022em;
-  margin: 0;
+  letter-spacing: -0.012em;
   color: var(--c-fg);
-  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
 }
 .task-id-chip {
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-2xs);
   color: var(--c-fg-subtle);
   background: var(--c-surface-2);
   border: 1px solid var(--c-border-soft);
-  padding: 1px 8px;
+  padding: 1px 6px;
   border-radius: var(--radius-2xs);
   letter-spacing: 0;
   font-feature-settings: "tnum";
+  flex-shrink: 0;
 }
 .back-link {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: var(--text-xs);
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   color: var(--c-fg-mute);
   text-decoration: none;
-  width: fit-content;
-  padding: 2px 6px 2px 0;
-  margin-left: -6px;
-  border-radius: var(--radius-2xs);
-  transition: color var(--transition);
+  border-radius: var(--radius-xs);
+  transition: color var(--transition), background var(--transition);
 }
 .back-link svg { transition: transform var(--transition); }
-.back-link:hover { color: var(--c-fg); }
+.back-link:hover { color: var(--c-fg); background: var(--c-surface-2); }
 .back-link:hover svg { transform: translateX(-2px); }
-.task-detail-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: var(--text-xs);
-  margin-top: 2px;
-}
-.meta-divider {
-  width: 1px;
-  height: 12px;
-  background: var(--c-border);
-}
-.meta-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--c-fg-2);
-}
-.meta-key {
-  color: var(--c-fg-subtle);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  font-size: var(--text-2xs);
-  font-weight: 500;
-}
-.meta-val {
-  color: var(--c-fg);
-  font-weight: 550;
-}
-.task-detail-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
 .abandon-btn {
-  background: var(--c-surface);
+  background: transparent;
   color: var(--c-fg-mute);
   border: 1px solid var(--c-border);
   font-size: var(--text-xs);
   font-weight: 500;
-  padding: 6px 14px;
+  padding: 4px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition:
@@ -3178,71 +3164,55 @@ form .checkbox-row {
   background: var(--c-err-soft);
 }
 
-/* ── Stage rail ─────────────────────────────────────────────────
- * A continuous track with circular nodes. Done nodes are filled
- * with foreground; the active node is filled with its agent
- * colour and ringed with a soft halo. Pending nodes are open
- * circles. The track itself shows progress through the same fg.
- * Nodes are non-interactive — clicking didn't add value and the
- * synthesis seam in the thread already navigates between stages. */
+/* ── Stage strip ────────────────────────────────────────────────
+ * A single-line progress bar of pills. Compact: stage number +
+ * agent name in one inline pill. Active is filled with the agent
+ * colour; done is checked; pending is muted. Arrows connect them.
+ * Sits in the row between the top bar and the thread; ~36px tall. */
 
-.stage-rail {
-  position: relative;
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
+.stage-strip {
+  display: flex;
   align-items: center;
-  gap: 0;
-  padding: 6px 0 26px;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--c-border-soft);
+  font-size: var(--text-xs);
 }
-.stage-rail-track {
-  position: absolute;
-  left: calc(100% / (var(--rail-n, 3) * 2));
-  right: calc(100% / (var(--rail-n, 3) * 2));
-  top: 16px;
-  height: 2px;
-  background: var(--c-border);
-  border-radius: 999px;
-  pointer-events: none;
-  overflow: hidden;
-}
-.stage-rail-track-fill {
-  position: absolute;
-  inset: 0;
-  width: var(--rail-progress, 0%);
-  background: linear-gradient(
-    90deg,
-    var(--c-fg) 0%,
-    var(--c-fg) 70%,
-    color-mix(in srgb, var(--c-fg) 60%, transparent) 100%
-  );
-  border-radius: 999px;
-  transition: width 420ms var(--ease-out);
-}
-.stage-rail-node {
-  appearance: none;
-  background: transparent;
-  border: none;
+.stage-strip-item {
   display: inline-flex;
-  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 0;
-  font-family: inherit;
-  color: var(--c-fg-mute);
-  position: relative;
-  z-index: 1;
+  gap: 6px;
 }
-.stage-rail-num {
+.stage-strip-sep {
+  display: inline-flex;
+  align-items: center;
+  color: var(--c-fg-faint);
+}
+.stage-strip-sep.is-done { color: var(--c-fg-subtle); }
+.stage-strip-sep svg { width: 11px; height: 11px; }
+
+.stage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-fg-mute);
+  line-height: 1;
+}
+.stage-pill-num {
   display: inline-grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  font-size: var(--text-sm);
+  font-size: 10px;
   font-weight: 600;
   background: var(--c-canvas);
-  border: 1.5px solid var(--c-border-strong);
+  border: 1px solid var(--c-border-strong);
   color: var(--c-fg-subtle);
   font-feature-settings: "tnum";
   transition:
@@ -3252,90 +3222,75 @@ form .checkbox-row {
     box-shadow var(--transition),
     transform var(--transition);
 }
-.stage-rail-node.status-active .stage-rail-num {
+.stage-pill.is-active {
+  background: color-mix(in srgb, var(--agent-fg) 8%, var(--c-surface));
+  border-color: color-mix(in srgb, var(--agent-fg) 40%, var(--c-border));
+  color: var(--agent-fg);
+  font-weight: 600;
+}
+.stage-pill.is-active .stage-pill-num {
   background: var(--agent-fg);
   color: #fff;
   border-color: var(--agent-fg);
-  box-shadow:
-    0 0 0 4px var(--c-canvas),
-    0 0 0 7px color-mix(in srgb, var(--agent-fg) 18%, transparent);
-  animation: stage-pulse 2.4s ease-in-out infinite;
 }
-.stage-rail-node.status-done .stage-rail-num {
+.stage-pill.is-done {
+  color: var(--c-fg);
+  border-color: var(--c-border);
+}
+.stage-pill.is-done .stage-pill-num {
   background: var(--c-fg);
   color: var(--c-canvas);
   border-color: var(--c-fg);
 }
-.stage-rail-node.status-done .stage-rail-num svg {
-  width: 14px;
-  height: 14px;
+.stage-pill.is-done .stage-pill-num svg {
+  width: 10px;
+  height: 10px;
 }
-.stage-rail-agent {
+.stage-pill-name {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--c-fg-subtle);
   letter-spacing: -0.01em;
   white-space: nowrap;
-  max-width: 100%;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.stage-rail-node.status-active .stage-rail-agent {
-  color: var(--agent-fg);
-  font-weight: 600;
-}
-.stage-rail-node.status-done .stage-rail-agent {
-  color: var(--c-fg);
-  font-weight: 500;
-}
-@keyframes stage-pulse {
-  0%, 100% {
-    box-shadow:
-      0 0 0 4px var(--c-canvas),
-      0 0 0 7px color-mix(in srgb, var(--agent-fg) 18%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 0 0 4px var(--c-canvas),
-      0 0 0 10px color-mix(in srgb, var(--agent-fg) 8%, transparent);
-  }
-}
 
 /* ── Thread ─────────────────────────────────────────────────────
- * Scroll container; gradient fade at top so the rail blends into
- * the conversation rather than ending in a hard edge. */
+ * The scroll container. Block layout (not flex) so children take
+ * their intrinsic content height and the wrap reliably scrolls
+ * once total content exceeds the row. Gets the lion's share of
+ * vertical space via the parent grid's 1fr row. */
 
 .task-thread-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 6px 2px 0;
+  display: block;
+  padding: 14px 2px 6px;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   position: relative;
+  scroll-behavior: smooth;
+}
+.task-thread-wrap > * + * {
+  margin-top: 14px;
 }
 
-/* The active stage hosts a live ConversationView. Past stages render
- * frozen transcripts above it. We want a single scroll container —
- * the outer task-thread-wrap — so the user can scroll smoothly from
- * past history into the current chat. The ConversationView's own
- * scroll machinery is therefore neutered here. */
-.task-active-stage {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-lg);
-  background: var(--c-surface);
-  overflow: hidden;
+/* The active thread renders the live ConversationView directly on the
+ * canvas — no card, no inner header — so the chat fills the page like
+ * Claude Code. The ConversationView's own scroll machinery is
+ * neutered here; the outer .task-thread-wrap is the single scroller. */
+.task-active-thread {
+  display: block;
 }
-.task-active-stage > .conversation-wrap {
+.task-active-thread > .conversation-wrap {
   flex: none;
   height: auto;
+  display: block;
 }
-.task-active-stage > .conversation-wrap > .conversation {
+.task-active-thread > .conversation-wrap > .conversation {
   overflow: visible;
   flex: none;
-  padding: 12px 18px 18px;
+  padding: 0 4px;
 }
 /* The jump-pill is absolutely positioned relative to .conversation-wrap.
  * Since we removed the inner scroll, the pill would never fire correctly
@@ -3448,75 +3403,83 @@ form .checkbox-row {
 }
 
 /* ── Issue seed ─────────────────────────────────────────────────
- * Collapsible card. Clear identity (issue.md, monospace) without
- * the debug-y emoji. */
+ * A small chip in the top bar opens an inline panel above the
+ * conversation. Default collapsed — the conversation gets the
+ * room. */
 
-.issue-seed {
+.issue-seed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: transparent;
+  color: var(--c-fg-mute);
+  font-size: var(--text-xs);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition:
+    border-color var(--transition),
+    background var(--transition),
+    color var(--transition);
+}
+.issue-seed-chip:hover {
+  background: var(--c-surface-2);
+  color: var(--c-fg);
+  border-color: var(--c-border-strong);
+}
+.issue-seed-chip.open {
+  background: var(--c-surface-2);
+  color: var(--c-fg);
+  border-color: var(--c-border-strong);
+}
+.issue-seed-chip span { font-family: var(--font-mono); }
+.issue-seed-chip-chev {
+  display: inline-flex;
+  color: var(--c-fg-subtle);
+}
+.issue-seed-chip svg:first-of-type {
+  color: var(--c-fg-subtle);
+}
+
+.issue-seed-panel {
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-lg);
   font-size: var(--text-sm);
   overflow: hidden;
-  transition: border-color var(--transition);
 }
-.issue-seed:hover { border-color: var(--c-border-strong); }
-.issue-seed-header {
-  appearance: none;
-  border: none;
-  background: transparent;
-  width: 100%;
+.issue-seed-panel-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  padding: 12px 16px;
-  font-size: var(--text-xs);
-  color: var(--c-fg-mute);
-  cursor: pointer;
-  text-align: left;
-  transition: background var(--transition);
-}
-.issue-seed.open .issue-seed-header {
+  padding: 10px 14px;
   border-bottom: 1px solid var(--c-border-soft);
-}
-.issue-seed-header:hover { background: var(--c-surface-2); }
-.issue-seed-marker {
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-2xs);
   background: var(--c-surface-2);
-  border: 1px solid var(--c-border-soft);
-  color: var(--c-fg-mute);
-  flex-shrink: 0;
 }
-.issue-seed-label {
-  font-family: var(--font-mono);
-  color: var(--c-fg);
-  font-size: var(--text-xs);
-  letter-spacing: -0.005em;
-}
-.issue-seed-tag {
-  font-size: var(--text-2xs);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--c-fg-subtle);
-  font-weight: 500;
-}
-.issue-seed-chev {
-  margin-left: auto;
-  color: var(--c-fg-subtle);
+.issue-seed-panel-title {
   display: inline-flex;
   align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--c-fg);
 }
-.issue-seed-body {
+.issue-seed-panel-title .muted {
+  font-family: var(--font-sans);
+}
+.issue-seed-panel-body {
   font-size: var(--text-sm);
   line-height: 1.6;
   color: var(--c-fg-2);
   padding: 14px 18px 16px;
+  max-height: 320px;
+  overflow-y: auto;
 }
-.issue-seed-body p:first-child { margin-top: 0; }
-.issue-seed-body p:last-child { margin-bottom: 0; }
+.issue-seed-panel-body p:first-child { margin-top: 0; }
+.issue-seed-panel-body p:last-child { margin-bottom: 0; }
 
 /* ── Inline notice (e.g. API key missing) ─────────────────────── */
 
@@ -3822,11 +3785,12 @@ form .checkbox-row {
  * a generous breathing gap rather than a hard rule. */
 
 .composer {
-  padding: 14px 0 18px;
+  padding: 10px 0 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   background: var(--c-canvas);
+  border-top: 1px solid var(--c-border-soft);
 }
 .composer-bar {
   display: flex;
@@ -3835,19 +3799,13 @@ form .checkbox-row {
   gap: 12px;
   padding: 0 4px;
 }
-.composer-talking {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--text-xs);
-  color: var(--c-fg-mute);
-}
 .composer-hint {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: var(--text-2xs);
   color: var(--c-fg-subtle);
+  margin-right: auto;
 }
 .composer-hint kbd {
   padding: 1px 6px;
@@ -3856,14 +3814,14 @@ form .checkbox-row {
 .composer-input {
   font-family: var(--font-sans);
   font-size: var(--text-base);
-  line-height: 1.55;
+  line-height: 1.5;
   resize: none;
-  padding: 14px 16px;
+  padding: 11px 14px;
   border: 1px solid var(--c-border);
   border-radius: var(--radius-lg);
   background: var(--c-surface);
   color: var(--c-fg);
-  min-height: 72px;
+  min-height: 56px;
   transition:
     border-color var(--transition),
     box-shadow var(--transition);
