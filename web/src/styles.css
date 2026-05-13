@@ -4489,3 +4489,187 @@ button.back-link:hover:not(:disabled) {
   width: 14px;
   height: 14px;
 }
+
+/* ════════════════════════════════════════════════════════════════
+ *  Allowlist (MCPs / Skills) — summary chips + picker modal
+ * ════════════════════════════════════════════════════════════════ */
+
+.allowlist-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.allowlist-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  min-height: 30px;
+}
+.allowlist-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  color: var(--c-fg);
+}
+.allowlist-empty {
+  font-size: var(--text-sm);
+  align-self: center;
+}
+.allowlist-edit-button {
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.allowlist-edit-button:hover {
+  border-color: var(--c-fg-mute);
+  background: var(--c-surface-2);
+}
+
+.allowlist-modal {
+  max-width: 560px;
+  width: 92%;
+  display: flex;
+  flex-direction: column;
+  max-height: min(80vh, 720px);
+  padding: 22px 24px;
+  gap: 12px;
+}
+.allowlist-modal-head h3 {
+  margin: 0 0 4px;
+}
+.allowlist-modal-help {
+  margin: 0;
+}
+.allowlist-modal-search {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  padding: 10px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  outline: none;
+  transition: border-color 180ms ease-out;
+}
+.allowlist-modal-search:focus {
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-soft);
+}
+.allowlist-modal-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 140px;
+  padding-right: 4px;
+}
+.allowlist-modal-empty {
+  padding: 24px 8px;
+  text-align: center;
+}
+
+.allowlist-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease-out, background-color 120ms ease-out;
+  font: inherit;
+  color: inherit;
+}
+.allowlist-card:hover {
+  border-color: var(--c-border-strong);
+  background: var(--c-surface-2);
+}
+.allowlist-card.selected {
+  background: var(--c-accent-soft);
+  border-color: var(--c-accent);
+}
+.allowlist-card.selected:hover {
+  background: var(--c-accent-soft-2);
+}
+.allowlist-card-check {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--c-border-strong);
+  border-radius: 4px;
+  background: var(--c-surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: transparent;
+  margin-top: 1px;
+}
+.allowlist-card.selected .allowlist-card-check {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: var(--c-accent-contrast);
+}
+.allowlist-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.allowlist-card-name {
+  font-weight: 600;
+  font-size: var(--text-base);
+  color: var(--c-fg);
+}
+.allowlist-card-desc {
+  font-size: var(--text-sm);
+  color: var(--c-fg-mute);
+  line-height: 1.45;
+}
+
+.allowlist-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  flex-wrap: wrap;
+}
+.allowlist-modal-bulk {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-sm);
+}
+.allowlist-bulk-link {
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  color: var(--c-accent-fg);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  border-radius: var(--radius-2xs);
+}
+.allowlist-bulk-link:hover {
+  background: var(--c-accent-soft);
+}
