@@ -26,6 +26,7 @@ export function TaskDetail() {
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [wsStatus, setWsStatus] = useState<WSStatus>("connecting");
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [issueOpen, setIssueOpen] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const wsLive = useRef(false);
@@ -63,7 +64,6 @@ export function TaskDetail() {
           if (!cancelled) timer = window.setTimeout(tick, POLL_INTERVAL_MS);
         });
       } else {
-        // WS is live; skip this tick and try again later.
         timer = window.setTimeout(tick, POLL_INTERVAL_MS);
       }
     }
@@ -149,10 +149,7 @@ export function TaskDetail() {
     };
   }, [id, load]);
 
-  // Auto-scroll only if user is already near the bottom — preserves the
-  // reading position if they've scrolled up to inspect earlier messages.
-  // We key off (count, last-seq, last-content-length) so streaming updates
-  // keep the viewport pinned without triggering on unrelated re-renders.
+  // Auto-scroll only if user is already near the bottom.
   const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
   useEffect(() => {
     const el = threadRef.current;
@@ -200,8 +197,7 @@ export function TaskDetail() {
   const terminal = task.status === "done" || task.status === "abandoned";
 
   // Heuristic: the agent is "thinking" if the user/handoff-prompt was just
-  // sent (last message author is user/system/seam, not assistant/synthesis)
-  // and the stage is still active. Disables Hand off while busy.
+  // sent and the stage is still active.
   const lastForStage = activeStage
     ? [...messages].reverse().find((m) => m.stage_id === activeStage.stage_id)
     : undefined;
@@ -293,36 +289,43 @@ export function TaskDetail() {
     }
   }
 
+  const apiKeyMissing =
+    error?.toLowerCase().includes("anthropic_api_key") ?? false;
+
   return (
     <section className="task-detail">
       <header className="task-detail-header">
         <div className="task-detail-title">
           <Link to="/tasks" className="back-link">
-            <BackArrow /> Tasks
+            <BackArrow />
+            <span>Tasks</span>
           </Link>
-          <h2>
-            <span className="task-id">#{task.task_id.slice(-6)}</span>{" "}
-            {task.name}
-          </h2>
-          <div className="task-detail-meta">
-            <span className="muted">
-              workflow:{" "}
-              <strong>{task.workflow_name || "(none)"}</strong>
+          <div className="task-detail-headline">
+            <h2>{task.name}</h2>
+            <span className="task-id-chip" title={task.task_id}>
+              #{task.task_id.slice(-6)}
             </span>
-            <span className="muted">·</span>
+          </div>
+          <div className="task-detail-meta">
             <StatusPill status={task.status} />
+            <span className="meta-divider" aria-hidden />
+            <span className="meta-item">
+              <span className="meta-key">workflow</span>
+              <span className="meta-val">{task.workflow_name || "—"}</span>
+            </span>
             {activeStage && (
               <>
-                <span className="muted">·</span>
-                <span className="muted">
-                  current:{" "}
+                <span className="meta-divider" aria-hidden />
+                <span className="meta-item">
+                  <span className="meta-key">current</span>
                   <span className={`agent-tag swatch-${activeStage.colour ?? "slate"}`}>
+                    <span className="agent-tag-dot" aria-hidden />
                     {activeStage.agent_name}
                   </span>
                 </span>
               </>
             )}
-            <span className="muted">·</span>
+            <span className="meta-divider" aria-hidden />
             <WSStatusBadge status={wsStatus} />
           </div>
         </div>
@@ -339,19 +342,7 @@ export function TaskDetail() {
         </div>
       </header>
 
-      <StageRail
-        stages={stages}
-        onJumpToStage={(stageID) => {
-          const el = threadRef.current;
-          if (!el) return;
-          const target = el.querySelector(
-            `[data-stage-anchor="${stageID}"]`,
-          ) as HTMLElement | null;
-          if (target) {
-            target.scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-        }}
-      />
+      <StageRail stages={stages} taskStatus={task.status} />
 
       <div className="task-thread-wrap">
         <div
@@ -359,10 +350,16 @@ export function TaskDetail() {
           ref={threadRef}
           onScroll={onThreadScroll}
         >
-          <IssueSeed task={task} />
+          <IssueSeed task={task} open={issueOpen} onToggle={() => setIssueOpen((v) => !v)} />
+          {apiKeyMissing && error && (
+            <InlineNotice
+              level="warn"
+              title="ANTHROPIC_API_KEY not set"
+              body="Agents can't reach the model until the key is configured. Set it in Settings, then resume."
+              onDismiss={() => setError(null)}
+            />
+          )}
           {messages
-            // Drop the auto-generated "Task opened" system seed — the issue
-            // card above already shows the body.
             .filter(
               (m) =>
                 !(
@@ -377,8 +374,6 @@ export function TaskDetail() {
                 prev={idx > 0 ? arr[idx - 1] : undefined}
                 stages={stages}
                 anchorStageID={
-                  // Anchor the first message of a new stage (the message
-                  // whose stage_id differs from the prior one).
                   idx === 0 || arr[idx - 1].stage_id !== m.stage_id
                     ? m.stage_id
                     : undefined
@@ -393,18 +388,27 @@ export function TaskDetail() {
 
       {terminal ? (
         <div className="composer-banner">
+          <span className="composer-banner-dot" aria-hidden />
           {task.status === "done"
-            ? "Task completed. The chat is read-only."
-            : "Task abandoned. The chat is read-only."}
+            ? "Task completed. The thread is read-only."
+            : "Task abandoned. The thread is read-only."}
         </div>
       ) : !activeStage ? (
         <NoWorkflowComposer taskId={task.task_id} onAttached={load} />
       ) : (
         <div className="composer">
-          <div className="composer-talking">
-            <span>talking to:</span>
-            <span className={`agent-tag swatch-${activeStage.colour ?? "slate"}`}>
-              {activeStage.agent_name}
+          <div className="composer-bar">
+            <div className="composer-talking">
+              <span className="muted">talking to</span>
+              <span className={`agent-tag swatch-${activeStage.colour ?? "slate"}`}>
+                <span className="agent-tag-dot" aria-hidden />
+                {activeStage.agent_name}
+              </span>
+            </div>
+            <span className="composer-hint">
+              <kbd>⌘</kbd>
+              <kbd>↵</kbd>
+              <span>send</span>
             </span>
           </div>
           <textarea
@@ -417,7 +421,6 @@ export function TaskDetail() {
             rows={3}
           />
           <div className="composer-actions">
-            <span className="muted composer-hint">⌘↵ send</span>
             <button onClick={send} disabled={!composer.trim() || sending}>
               {sending ? "Sending…" : "Send"}
             </button>
@@ -428,7 +431,8 @@ export function TaskDetail() {
                 disabled={sending || stageBusy}
                 title={stageBusy ? "Waiting for the agent to finish its turn" : "Mark this task complete"}
               >
-                Complete task ✓
+                <span>Complete task</span>
+                <CheckArrow />
               </button>
             ) : (
               <button
@@ -437,7 +441,8 @@ export function TaskDetail() {
                 disabled={sending || stageBusy}
                 title={stageBusy ? "Waiting for the agent to finish its turn" : `Lock the synthesis and start ${nextAgent(stages, activeStage)}`}
               >
-                Hand off to {nextAgent(stages, activeStage)} ▸
+                <span>Hand off to {nextAgent(stages, activeStage)}</span>
+                <ForwardArrow />
               </button>
             )}
           </div>
@@ -491,11 +496,11 @@ export function TaskDetail() {
           onClick={jumpToLatest}
           aria-label="Jump to latest message"
         >
-          ↓ New messages
+          <DownArrow /> New messages
         </button>
       )}
 
-      {error && (
+      {error && !apiKeyMissing && (
         <div className="task-error-banner">
           <span>{error}</span>
           <button onClick={() => setError(null)} className="ghost">dismiss</button>
@@ -511,7 +516,13 @@ function nextAgent(stages: TaskStage[], active: TaskStage): string {
 }
 
 function StatusPill({ status }: { status: TaskStatus }) {
-  return <span className={`status-badge status-${status}`}>{status}</span>;
+  const label =
+    status === "not-started"
+      ? "not started"
+      : status === "working"
+        ? "working"
+        : status;
+  return <span className={`status-badge status-${status}`}>{label}</span>;
 }
 
 function WSStatusBadge({ status }: { status: WSStatus }) {
@@ -533,17 +544,18 @@ function WSStatusBadge({ status }: { status: WSStatus }) {
 
 function StageRail({
   stages,
-  onJumpToStage,
+  taskStatus,
 }: {
   stages: TaskStage[];
-  onJumpToStage?: (stageID: string) => void;
+  taskStatus: TaskStatus;
 }) {
   if (stages.length === 0) return null;
   const doneCount = stages.filter((s) => s.status === "done").length;
   const activeCount = stages.filter((s) => s.status === "active").length;
-  // Progress is "done fraction + 0.5 for active partial".
-  const progress =
+  // Progress is "done fraction + ~0.5 for active partial".
+  let progress =
     (doneCount + activeCount * 0.5) / Math.max(stages.length, 1);
+  if (taskStatus === "done") progress = 1;
   return (
     <div
       className="stage-rail"
@@ -554,23 +566,24 @@ function StageRail({
         ["--rail-progress" as string]: `${progress * 100}%`,
       }}
     >
-      <div className="stage-rail-track" aria-hidden />
+      <div className="stage-rail-track" aria-hidden>
+        <div className="stage-rail-track-fill" aria-hidden />
+      </div>
       {stages.map((s, idx) => {
         const label = `Stage ${idx + 1} of ${stages.length}: ${s.agent_name} — ${s.status}`;
         return (
-          <button
+          <div
             key={s.stage_id}
-            type="button"
             role="listitem"
             aria-label={label}
             title={label}
-            onClick={() => onJumpToStage?.(s.stage_id)}
-            className={`stage-rail-pill swatch-${s.colour ?? "slate"} status-${s.status}`}
+            className={`stage-rail-node swatch-${s.colour ?? "slate"} status-${s.status}`}
           >
-            <span className="stage-rail-num" aria-hidden>{idx + 1}</span>
+            <span className="stage-rail-num" aria-hidden>
+              {s.status === "done" ? <CheckIcon /> : idx + 1}
+            </span>
             <span className="stage-rail-agent">{s.agent_name}</span>
-            <span className="stage-rail-status-text">{s.status}</span>
-          </button>
+          </div>
         );
       })}
     </div>
@@ -587,9 +600,9 @@ function TaskDetailSkeleton() {
         </div>
       </div>
       <div className="stage-rail skeleton-rail">
-        <div className="stage-rail-pill skel-pill" />
-        <div className="stage-rail-pill skel-pill" />
-        <div className="stage-rail-pill skel-pill" />
+        <div className="stage-rail-node skel-pill" />
+        <div className="stage-rail-node skel-pill" />
+        <div className="stage-rail-node skel-pill" />
       </div>
       <div className="task-thread-wrap">
         <div className="task-thread" style={{ padding: "20px 0" }}>
@@ -601,17 +614,66 @@ function TaskDetailSkeleton() {
   );
 }
 
-function IssueSeed({ task }: { task: Task }) {
+function IssueSeed({
+  task,
+  open,
+  onToggle,
+}: {
+  task: Task;
+  open: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <div className="issue-seed">
-      <div className="issue-seed-header">
-        <span className="issue-seed-icon" aria-hidden>📄</span>
+    <div className={`issue-seed${open ? " open" : " collapsed"}`}>
+      <button
+        type="button"
+        className="issue-seed-header"
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="issue-seed-marker" aria-hidden>
+          <DocIcon />
+        </span>
         <span className="issue-seed-label">issue.md</span>
-        <span className="muted">seeded into every stage</span>
+        <span className="issue-seed-tag">seeded into every stage</span>
+        <span className="issue-seed-chev" aria-hidden>
+          <ChevronIcon direction={open ? "down" : "right"} />
+        </span>
+      </button>
+      {open && (
+        <div className="issue-seed-body">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.issue_md}</ReactMarkdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InlineNotice({
+  level,
+  title,
+  body,
+  onDismiss,
+}: {
+  level: "warn" | "info" | "error";
+  title: string;
+  body?: string;
+  onDismiss?: () => void;
+}) {
+  return (
+    <div className={`inline-notice inline-notice-${level}`} role="alert">
+      <span className="inline-notice-icon" aria-hidden>
+        {level === "warn" ? <AlertIcon /> : <InfoIcon />}
+      </span>
+      <div className="inline-notice-body">
+        <div className="inline-notice-title">{title}</div>
+        {body && <div className="inline-notice-text">{body}</div>}
       </div>
-      <div className="issue-seed-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.issue_md}</ReactMarkdown>
-      </div>
+      {onDismiss && (
+        <button type="button" className="ghost inline-notice-dismiss" onClick={onDismiss}>
+          dismiss
+        </button>
+      )}
     </div>
   );
 }
@@ -627,14 +689,13 @@ function MessageBubble({
   stages: TaskStage[];
   anchorStageID?: string;
 }) {
-  // Compute everything *before* any conditional return so React's hook order
-  // stays stable across renders.
   const colour = !msg.stage_id
     ? "slate"
     : stages.find((s) => s.stage_id === msg.stage_id)?.colour ?? "slate";
   const sameAsPrev = !!prev &&
     prev.role === msg.role &&
-    prev.agent_name === msg.agent_name;
+    prev.agent_name === msg.agent_name &&
+    prev.stage_id === msg.stage_id;
 
   const anchorAttr = anchorStageID ? { "data-stage-anchor": anchorStageID } : {};
 
@@ -657,7 +718,8 @@ function MessageBubble({
   if (msg.role === "error") {
     return (
       <div className="msg-error" {...anchorAttr}>
-        <span>⚠ {msg.content}</span>
+        <AlertIcon />
+        <span>{msg.content}</span>
       </div>
     );
   }
@@ -667,11 +729,19 @@ function MessageBubble({
 
   return (
     <div
-      className={`msg-row${isUser ? " user" : ""}${isSynthesis ? " synthesis" : ""}`}
+      className={`msg-row${isUser ? " user" : ""}${isSynthesis ? " synthesis" : ""}${sameAsPrev ? " continuation" : ""}`}
       data-colour={colour}
       {...anchorAttr}
     >
-      <div className="msg-stripe" />
+      {!isUser && (
+        <div className="msg-avatar" aria-hidden>
+          {!sameAsPrev && (
+            <span className="msg-avatar-dot">
+              {(msg.agent_name ?? "?").slice(0, 1).toUpperCase()}
+            </span>
+          )}
+        </div>
+      )}
       <div className="msg-bubble">
         {!sameAsPrev && (
           <div className="msg-header">
@@ -679,7 +749,6 @@ function MessageBubble({
               <span className="msg-author">You</span>
             ) : (
               <>
-                <span className={`agent-swatch swatch-${colour}`} />
                 <span className="msg-author">{msg.agent_name || "agent"}</span>
                 {isSynthesis && (
                   <span className="msg-synthesis-tag">synthesis</span>
@@ -702,11 +771,15 @@ function MessageBubble({
 function ThinkingBubble({ agentName, colour }: { agentName: string; colour: string }) {
   return (
     <div className="msg-row" data-colour={colour}>
-      <div className="msg-stripe" />
+      <div className="msg-avatar" aria-hidden>
+        <span className="msg-avatar-dot">
+          {agentName.slice(0, 1).toUpperCase()}
+        </span>
+      </div>
       <div className="msg-bubble">
         <div className="msg-header">
-          <span className={`agent-swatch swatch-${colour}`} />
           <span className="msg-author">{agentName}</span>
+          <span className="msg-time muted">thinking</span>
         </div>
         <div className="msg-body thinking">
           <span className="dot" />
@@ -756,7 +829,7 @@ function NoWorkflowComposer({
   }
   return (
     <div className="composer attach-prompt">
-      <div className="composer-talking">
+      <div className="composer-bar">
         <span className="muted">Attach a workflow to begin.</span>
       </div>
       <div className="composer-actions">
@@ -800,7 +873,6 @@ function formatTime(iso: string): string {
   if (!t) return "";
   const d = new Date(t);
   const ageMs = Date.now() - t;
-  // < 24h: HH:MM. < 7d: weekday + HH:MM. Otherwise: full date.
   if (ageMs < 24 * 3600 * 1000) {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
@@ -823,6 +895,82 @@ function BackArrow() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+
+function DownArrow() {
+  return (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+function ForwardArrow() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 12h13" />
+      <polyline points="13 6 19 12 13 18" />
+    </svg>
+  );
+}
+
+function CheckArrow() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function DocIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 3 14 8 19 8" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <line x1="12" y1="11" x2="12" y2="17" />
+      <line x1="12" y1="7.5" x2="12.01" y2="7.5" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ direction }: { direction: "down" | "right" }) {
+  return (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      {direction === "down" ? (
+        <polyline points="6 9 12 15 18 9" />
+      ) : (
+        <polyline points="9 6 15 12 9 18" />
+      )}
     </svg>
   );
 }
