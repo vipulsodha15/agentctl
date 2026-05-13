@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agentctl/agentctl/internal/ulidgen"
+	"github.com/agentctl/agentctl/internal/secrets"
 )
 
 // SimRuntime drives each stage's agent against the Anthropic Messages API
@@ -27,13 +27,154 @@ import (
 // each non-empty user message triggers a new completion which is delivered
 // back via OnAssistantMessage.
 type SimRuntime struct {
-	logger  *slog.Logger
-	apiKey  string
-	baseURL string
-	model   string
-	client  *http.Client
-	mu      sync.Mutex
-	stages  map[string]*simStage
+	logger     *slog.Logger
+	auth       *AuthSource
+	defaultURL string
+	model      string
+	client     *http.Client
+	mu         sync.Mutex
+	stages     map[string]*simStage
+}
+
+// AuthSource resolves an Anthropic credential at call time so that:
+//  1. `agentctl init` rewriting secrets.json picks up without a daemon
+//     restart.
+//  2. `agentctl auth login` refreshing the OAuth credentials file is
+//     observed on the next call.
+//
+// Resolution order (first non-empty wins):
+//  1. secrets.json AnthropicAuthToken (+ AnthropicBaseURL) → Bearer
+//  2. secrets.json AnthropicAPIKey → x-api-key
+//  3. OAuth credentials file at ClaudeCredsFile → Bearer
+//  4. env var ANTHROPIC_API_KEY → x-api-key (test/CI fallback)
+type AuthSource struct {
+	SecretsPath string
+	CredsFile   string
+}
+
+type resolvedAuth struct {
+	kind    string // "x-api-key" | "bearer"
+	value   string
+	baseURL string // overrides default if set
+	source  string // human-readable origin for logs/errors
+}
+
+// resolve reads disk on every call. Cheap: secrets.json is small and we only
+// hit it on user-initiated turns.
+func (a *AuthSource) resolve(defaultURL string) (resolvedAuth, error) {
+	if a != nil && a.SecretsPath != "" {
+		if sec, err := secrets.Load(a.SecretsPath); err == nil {
+			if sec.AnthropicAuthToken != "" {
+				base := sec.AnthropicBaseURL
+				if base == "" {
+					base = defaultURL
+				}
+				return resolvedAuth{kind: "bearer", value: sec.AnthropicAuthToken, baseURL: base, source: "secrets.json (auth_token)"}, nil
+			}
+			if sec.AnthropicAPIKey != "" {
+				return resolvedAuth{kind: "x-api-key", value: sec.AnthropicAPIKey, baseURL: defaultURL, source: "secrets.json (api_key)"}, nil
+			}
+			if sec.ResolvedAuthMode() == secrets.AuthModeOAuth && a.CredsFile != "" {
+				if tok, err := readOAuthAccessToken(a.CredsFile); err == nil && tok != "" {
+					return resolvedAuth{kind: "bearer", value: tok, baseURL: defaultURL, source: "oauth credentials file"}, nil
+				}
+			}
+		}
+	}
+	if env := os.Getenv("ANTHROPIC_API_KEY"); env != "" {
+		base := strings.TrimRight(os.Getenv("ANTHROPIC_BASE_URL"), "/")
+		if base == "" {
+			base = defaultURL
+		}
+		return resolvedAuth{kind: "x-api-key", value: env, baseURL: base, source: "env (ANTHROPIC_API_KEY)"}, nil
+	}
+	return resolvedAuth{}, errors.New("no Anthropic credential configured — run `agentctl init` to add an API key, `agentctl auth login` for OAuth, or set ANTHROPIC_API_KEY")
+}
+
+// readOAuthAccessToken pulls the bearer token out of the credentials.json
+// the bundled `claude` CLI writes after `agentctl auth login`. The shape
+// looks like:
+//
+//	{ "claudeAiOauth": { "accessToken": "sk-ant-oat...", ... } }
+//
+// We tolerate alternative key names that older builds of the CLI may have
+// emitted (accessToken, oauth_access_token), so a credentials file written
+// by a slightly different claude version still works.
+func readOAuthAccessToken(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return "", err
+	}
+	if v, ok := raw["claudeAiOauth"].(map[string]any); ok {
+		if tok, ok := v["accessToken"].(string); ok && tok != "" {
+			return tok, nil
+		}
+	}
+	for _, k := range []string{"accessToken", "access_token", "oauth_access_token"} {
+		if v, ok := raw[k].(string); ok && v != "" {
+			return v, nil
+		}
+	}
+	return "", errors.New("no accessToken in credentials file")
+}
+
+// SimRuntimeOptions configures NewSimRuntime. Production wiring populates
+// Auth from the agentd layout so the runtime tracks daemon-managed secrets
+// rather than its own env-var path.
+type SimRuntimeOptions struct {
+	Logger *slog.Logger
+	Auth   *AuthSource
+	Model  string
+}
+
+func NewSimRuntime(logger *slog.Logger) *SimRuntime {
+	return NewSimRuntimeWithOptions(SimRuntimeOptions{Logger: logger})
+}
+
+func NewSimRuntimeWithOptions(opts SimRuntimeOptions) *SimRuntime {
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	model := opts.Model
+	if model == "" {
+		model = os.Getenv("AGENTCTL_DEFAULT_MODEL")
+	}
+	if model == "" {
+		model = "claude-sonnet-4-5"
+	}
+	defaultURL := strings.TrimRight(os.Getenv("ANTHROPIC_BASE_URL"), "/")
+	if defaultURL == "" {
+		defaultURL = "https://api.anthropic.com"
+	}
+	return &SimRuntime{
+		logger:     opts.Logger,
+		auth:       opts.Auth,
+		defaultURL: defaultURL,
+		model:      model,
+		client:     &http.Client{Timeout: 60 * time.Second},
+		stages:     map[string]*simStage{},
+	}
+}
+
+// HasCredential returns true if at least one credential source resolves now.
+// Used by the agentd boot path to log whether the runtime can actually talk
+// to Anthropic at start time.
+func (r *SimRuntime) HasCredential() bool {
+	_, err := r.resolveAuth()
+	return err == nil
+}
+
+func (r *SimRuntime) resolveAuth() (resolvedAuth, error) {
+	if r.auth != nil {
+		return r.auth.resolve(r.defaultURL)
+	}
+	// No AuthSource wired — fall back to env-only.
+	stub := &AuthSource{}
+	return stub.resolve(r.defaultURL)
 }
 
 type simStage struct {
@@ -49,6 +190,19 @@ type simStage struct {
 	// not produce overlapping responses. Buffered at 1: we accept queued
 	// messages eagerly, but only one runTurn is in flight per stage.
 	turnSem chan struct{}
+	// authErrOnce ensures the "no credential configured" banner is surfaced
+	// only once per stage rather than on every turn.
+	authErrOnce sync.Once
+}
+
+// isAuthConfigError is true if err is the synthetic "no credential
+// configured" sentinel from resolveAuth, as opposed to a real network or
+// HTTP-4xx error from Anthropic.
+func isAuthConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "no Anthropic credential configured")
 }
 
 type apiMessage struct {
@@ -56,37 +210,9 @@ type apiMessage struct {
 	Content string `json:"content"`
 }
 
-func NewSimRuntime(logger *slog.Logger) *SimRuntime {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	baseURL := strings.TrimRight(os.Getenv("ANTHROPIC_BASE_URL"), "/")
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
-	model := os.Getenv("AGENTCTL_DEFAULT_MODEL")
-	if model == "" {
-		model = "claude-sonnet-4-5"
-	}
-	return &SimRuntime{
-		logger:  logger,
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		model:   model,
-		client:  &http.Client{Timeout: 60 * time.Second},
-		stages:  map[string]*simStage{},
-	}
-}
-
-// HasAPIKey returns true if the runtime has been configured with an API key.
-// Used by the agentd boot path to switch into a no-API canned-reply mode.
-func (r *SimRuntime) HasAPIKey() bool { return r.apiKey != "" }
-
 func (r *SimRuntime) StartStage(ctx context.Context, in StartStageInput) (StartStageResult, error) {
 	// SimRuntime doesn't create real session rows, so we leave SessionID
 	// blank — the stage row's session_id stays NULL and the FK doesn't fire.
-	_ = ulidgen.New
 	system := in.Agent.Prompt
 	system += "\n\n---\nYou are part of a multi-stage workflow."
 	if in.PrevAgent != "" {
@@ -189,6 +315,9 @@ func (r *SimRuntime) Synthesize(ctx context.Context, in SendMessageInput) (strin
 	reply, err := r.callAnthropic(ctx, system, msgsCopy)
 	if err != nil {
 		r.logger.Warn("sim.synthesize_failed", slog.String("error", err.Error()))
+		if !isAuthConfigError(err) && stage.cbErr != nil {
+			stage.cbErr("Synthesis call failed: " + err.Error())
+		}
 		reply = canonicalSynthesis(stage.agentName)
 	}
 	stage.mu.Lock()
@@ -252,8 +381,15 @@ func (r *SimRuntime) runTurn(stage *simStage) {
 	reply, err := r.callAnthropic(context.Background(), system, msgsCopy)
 	if err != nil {
 		r.logger.Warn("sim.turn_failed", slog.String("stage", stage.stageID), slog.String("error", err.Error()))
-		if stage.cbErr != nil {
+		// Only surface real API errors inline as a red bubble. Auth-config
+		// errors are reported once per stage (suppressed afterwards) so the
+		// chat doesn't fill up with the same banner on every turn.
+		if !isAuthConfigError(err) && stage.cbErr != nil {
 			stage.cbErr(err.Error())
+		} else if isAuthConfigError(err) && stage.cbErr != nil {
+			stage.authErrOnce.Do(func() {
+				stage.cbErr("Anthropic auth is not configured. Run `agentctl init` to add an API key, or `agentctl auth login` for an OAuth subscription. While unconfigured, the agent will use canned replies.")
+			})
 		}
 		reply = r.cannedReply(stage, msgsCopy)
 	}
@@ -272,8 +408,9 @@ func (r *SimRuntime) runTurn(stage *simStage) {
 }
 
 func (r *SimRuntime) callAnthropic(ctx context.Context, system string, msgs []apiMessage) (string, error) {
-	if r.apiKey == "" {
-		return "", errors.New("ANTHROPIC_API_KEY not set")
+	auth, err := r.resolveAuth()
+	if err != nil {
+		return "", err
 	}
 	type req struct {
 		Model     string       `json:"model"`
@@ -283,12 +420,16 @@ func (r *SimRuntime) callAnthropic(ctx context.Context, system string, msgs []ap
 	}
 	body := req{Model: r.model, MaxTokens: 2048, System: system, Messages: msgs}
 	buf, _ := json.Marshal(body)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", r.baseURL+"/v1/messages", bytes.NewReader(buf))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", auth.baseURL+"/v1/messages", bytes.NewReader(buf))
 	if err != nil {
 		return "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", r.apiKey)
+	if auth.kind == "bearer" {
+		httpReq.Header.Set("Authorization", "Bearer "+auth.value)
+	} else {
+		httpReq.Header.Set("x-api-key", auth.value)
+	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
