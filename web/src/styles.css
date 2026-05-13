@@ -4017,3 +4017,445 @@ button.danger:hover { background: #b22f2f; }
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
+
+/* ════════════════════════════════════════════════════════════════
+ *  Workflow editor — canvas + node-graph
+ * ════════════════════════════════════════════════════════════════ */
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+  font-size: var(--text-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  border-radius: var(--radius-sm);
+  padding: 7px 13px;
+  text-decoration: none;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+  transition:
+    background var(--transition),
+    border-color var(--transition),
+    color var(--transition),
+    box-shadow var(--transition);
+}
+.button-link:hover {
+  background: var(--c-surface-2);
+  border-color: var(--c-border-strong);
+}
+.button-link.primary {
+  background: var(--c-fg);
+  border-color: var(--c-fg);
+  color: var(--c-canvas);
+}
+.button-link.primary:hover {
+  background: var(--c-fg-2);
+  border-color: var(--c-fg-2);
+  color: var(--c-canvas);
+}
+
+.field-error {
+  font-size: var(--text-xs);
+  color: var(--c-err-fg);
+  margin-top: 2px;
+}
+
+.kbd-inline {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: var(--c-surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 16px;
+  text-align: center;
+  color: var(--c-fg-mute);
+}
+
+button.back-link {
+  background: transparent;
+  border-color: transparent;
+  padding: 2px 4px;
+  margin-left: -4px;
+  margin-bottom: 6px;
+  color: var(--c-fg-mute);
+  font-size: var(--text-xs);
+}
+button.back-link:hover:not(:disabled) {
+  background: var(--c-surface-2);
+  border-color: transparent;
+  color: var(--c-fg);
+}
+
+.workflow-detail-head {
+  gap: 14px;
+}
+.workflow-detail-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.workflow-editor-page {
+  max-width: 1100px;
+}
+
+.workflow-editor-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 20px 28px;
+  padding: 22px 24px;
+  margin-bottom: 18px;
+}
+.workflow-editor-meta:hover { border-color: var(--c-border); }
+@media (max-width: 720px) {
+  .workflow-editor-meta { grid-template-columns: 1fr; }
+}
+
+.workflow-canvas-panel {
+  padding: 22px 24px;
+  margin-bottom: 18px;
+}
+.workflow-canvas-panel:hover { border-color: var(--c-border); }
+
+.workflow-canvas-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.workflow-canvas-hint {
+  font-size: var(--text-xs);
+  margin-top: 4px;
+}
+.workflow-canvas-count {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs);
+  color: var(--c-fg-mute);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border-soft);
+}
+
+/* Canvas is a horizontal scroll strip with a faint dotted backdrop, so the
+ * sparse + buttons in the empty state still feel anchored to a workspace. */
+.workflow-canvas {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 20px 18px;
+  min-height: 220px;
+  overflow-x: auto;
+  overflow-y: visible;
+  background-color: var(--c-canvas-2);
+  background-image:
+    radial-gradient(var(--c-border) 1px, transparent 1px);
+  background-size: 18px 18px;
+  background-position: 0 0;
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--radius-md);
+}
+.workflow-canvas-row {
+  display: flex;
+  align-items: stretch;
+}
+
+/* The "+" slot. Three flavors:
+ *   empty    — centered, large, only one on the canvas
+ *   between  — sits before each node and acts as an insert point
+ *   trailing — sits after the last node, the primary "append" affordance
+ */
+.workflow-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.workflow-slot-empty {
+  flex: 1;
+  min-height: 180px;
+}
+.workflow-slot-between,
+.workflow-slot-trailing {
+  padding: 0 6px;
+}
+.workflow-slot-line {
+  width: 24px;
+  border-top: 1px dashed var(--c-border-strong);
+  flex-shrink: 0;
+}
+.workflow-slot-between .workflow-slot-line,
+.workflow-slot-trailing .workflow-slot-line {
+  width: 18px;
+}
+.workflow-slot-between .workflow-slot-button {
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out);
+}
+.workflow-canvas:hover .workflow-slot-between .workflow-slot-button,
+.workflow-slot-between .workflow-slot-button:focus-visible,
+.workflow-slot-between.active .workflow-slot-button {
+  opacity: 1;
+}
+
+.workflow-slot-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: var(--c-surface);
+  border: 1px dashed var(--c-border-strong);
+  color: var(--c-fg-mute);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background var(--transition),
+    border-color var(--transition),
+    color var(--transition),
+    transform 160ms var(--ease-out);
+}
+.workflow-slot-button:hover:not(:disabled) {
+  background: var(--c-accent-soft);
+  border-color: var(--c-accent);
+  border-style: solid;
+  color: var(--c-accent-fg);
+  transform: scale(1.04);
+}
+.workflow-slot-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.workflow-slot-button.active {
+  background: var(--c-fg);
+  border-color: var(--c-fg);
+  border-style: solid;
+  color: var(--c-canvas);
+}
+.workflow-slot-empty .workflow-slot-button {
+  width: 56px;
+  height: 56px;
+  border-width: 2px;
+}
+.workflow-slot-empty .workflow-slot-button svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* Stage node card. The colored ribbon on the left echoes the agent swatch
+ * so a glance at the canvas tells you the chain of roles at a glance. */
+.workflow-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  padding: 14px 14px 10px;
+  box-shadow: 0 1px 0 rgba(17, 20, 24, 0.02);
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
+}
+.workflow-node::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--agent-fg, var(--c-border-strong));
+}
+.workflow-node:hover {
+  border-color: var(--c-border-strong);
+  box-shadow: 0 2px 8px rgba(17, 20, 24, 0.04);
+}
+.workflow-node.missing {
+  border-style: dashed;
+}
+.workflow-node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.workflow-node-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--c-fg);
+  color: var(--c-canvas);
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.workflow-node-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workflow-node-remove {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--c-fg-subtle);
+  opacity: 0;
+  transition:
+    opacity 160ms var(--ease-out),
+    color var(--transition),
+    background var(--transition);
+}
+.workflow-node:hover .workflow-node-remove,
+.workflow-node-remove:focus-visible {
+  opacity: 1;
+}
+.workflow-node-remove:hover:not(:disabled) {
+  color: var(--c-err-fg);
+  background: var(--c-err-soft);
+}
+.workflow-node-desc {
+  font-size: var(--text-xs);
+  color: var(--c-fg-mute);
+  margin-top: 8px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.workflow-node-missing {
+  color: var(--c-err-fg);
+  font-style: italic;
+}
+.workflow-node-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 10px;
+  border-top: 1px solid var(--c-border-soft);
+  padding-top: 8px;
+}
+.workflow-node-move {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--c-fg-subtle);
+}
+.workflow-node-move:hover:not(:disabled) {
+  color: var(--c-fg);
+  background: var(--c-surface-2);
+}
+
+/* Agent picker — fixed-positioned popover rendered into a portal so it floats
+ * over the canvas regardless of horizontal scroll. Positioning is computed at
+ * runtime relative to the slot's "+" button. */
+.workflow-picker {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(17, 20, 24, 0.12);
+  z-index: 200;
+  overflow: hidden;
+  animation: workflow-picker-in 140ms var(--ease-out) both;
+}
+@keyframes workflow-picker-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.workflow-picker-search {
+  border: none;
+  border-bottom: 1px solid var(--c-border-soft);
+  border-radius: 0;
+  padding: 10px 12px;
+  font-size: var(--text-sm);
+  background: var(--c-surface);
+}
+.workflow-picker-search:focus {
+  outline: none;
+  box-shadow: none;
+  border-bottom-color: var(--c-accent);
+}
+.workflow-picker-list {
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.workflow-picker-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: var(--text-xs);
+}
+.workflow-picker-item {
+  appearance: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--c-fg);
+  transition: background var(--transition);
+}
+.workflow-picker-item:hover,
+.workflow-picker-item.active {
+  background: var(--c-accent-soft);
+}
+.workflow-picker-item .agent-swatch {
+  margin-top: 4px;
+}
+.workflow-picker-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.workflow-picker-item-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 550;
+}
+.workflow-picker-item-desc {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.workflow-editor-actions {
+  margin-top: 4px;
+}
