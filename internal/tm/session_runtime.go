@@ -100,25 +100,10 @@ func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (St
 		return StartStageResult{}, fmt.Errorf("session runtime: create: %w", err)
 	}
 
-	stream, err := r.sm.Attach(ctx, res.SessionID)
-	if err != nil {
+	if _, err := r.attach(ctx, in.StageID, res.SessionID, in.OnAssistantMessage, in.OnToolUse, in.OnError); err != nil {
 		_ = r.sm.Terminate(context.Background(), res.SessionID)
-		return StartStageResult{}, fmt.Errorf("session runtime: attach: %w", err)
+		return StartStageResult{}, err
 	}
-
-	stage := &sessionStage{
-		stageID:     in.StageID,
-		sessionID:   res.SessionID,
-		cbAssistant: in.OnAssistantMessage,
-		cbTool:      in.OnToolUse,
-		cbErr:       in.OnError,
-		stream:      stream,
-	}
-	r.mu.Lock()
-	r.stages[in.StageID] = stage
-	r.mu.Unlock()
-
-	go r.runReader(stage)
 
 	// Seed the conversation: the agent introduces itself in response to either
 	// the task brief (stage 1) or the prior stage's synthesis (stage N>1).
@@ -137,13 +122,17 @@ func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (St
 	return StartStageResult{SessionID: res.SessionID}, nil
 }
 
+// SendUserMessage routes the message straight to sm.Manager by SessionID.
+// It deliberately does not consult r.stages: the map is a streaming-attachment
+// cache, not the source of truth. sm.Manager auto-restarts a stopped container
+// on Send, so a message that arrives after an idle sweep — or after agentd
+// restarted and dropped its in-memory caches — still lands on the agent.
 func (r *SessionRuntime) SendUserMessage(ctx context.Context, in SendMessageInput) error {
-	stage, err := r.lookupStage(in.StageID)
-	if err != nil {
-		return err
+	if in.SessionID == "" {
+		return errors.New("session runtime: send requires session id")
 	}
-	_, err = r.sm.Send(ctx, sm.SendRequest{
-		SessionID: stage.sessionID,
+	_, err := r.sm.Send(ctx, sm.SendRequest{
+		SessionID: in.SessionID,
 		Content:   in.Content,
 		ClientID:  in.StageID,
 	})
@@ -151,9 +140,16 @@ func (r *SessionRuntime) SendUserMessage(ctx context.Context, in SendMessageInpu
 }
 
 func (r *SessionRuntime) Synthesize(ctx context.Context, in SendMessageInput) (string, error) {
+	if in.SessionID == "" {
+		return "", errors.New("session runtime: synth requires session id")
+	}
+	// Synthesize needs the runReader running so it can correlate the
+	// assistant reply to this Send's turn id. The manager is expected to
+	// EnsureAttached before calling Handoff, but guard here too in case the
+	// stage was evicted for any reason.
 	stage, err := r.lookupStage(in.StageID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("session runtime: synth requires attached stage; call EnsureAttached first: %w", err)
 	}
 
 	stage.synthMu.Lock()
@@ -238,8 +234,58 @@ func (r *SessionRuntime) lookupStage(stageID string) (*sessionStage, error) {
 	stage, ok := r.stages[stageID]
 	r.mu.Unlock()
 	if !ok {
-		return nil, errors.New("session runtime: stage not found")
+		return nil, errors.New("session runtime: stage not attached")
 	}
+	return stage, nil
+}
+
+// EnsureAttached idempotently attaches the event stream for a stage that
+// already has a session id. The manager calls this on rehydrate and before
+// any operation that requires the runReader to be running (Handoff/Synthesize).
+func (r *SessionRuntime) EnsureAttached(ctx context.Context, in AttachInput) error {
+	if in.SessionID == "" {
+		return errors.New("session runtime: attach requires session id")
+	}
+	r.mu.Lock()
+	if _, ok := r.stages[in.StageID]; ok {
+		r.mu.Unlock()
+		return nil
+	}
+	r.mu.Unlock()
+	_, err := r.attach(ctx, in.StageID, in.SessionID, in.OnAssistantMessage, in.OnToolUse, in.OnError)
+	return err
+}
+
+// attach subscribes to the sm fan hub for sessionID, records the stage in
+// the in-memory map, and spawns runReader. It is the single place that
+// creates a sessionStage entry. The map is not consulted for routing
+// decisions — it exists solely so events from the container flow through
+// the manager's callbacks into the chat thread.
+func (r *SessionRuntime) attach(ctx context.Context, stageID, sessionID string, cbAssistant func(string), cbTool func(string, json.RawMessage), cbErr func(string)) (*sessionStage, error) {
+	stream, err := r.sm.Attach(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session runtime: attach: %w", err)
+	}
+	stage := &sessionStage{
+		stageID:     stageID,
+		sessionID:   sessionID,
+		cbAssistant: cbAssistant,
+		cbTool:      cbTool,
+		cbErr:       cbErr,
+		stream:      stream,
+	}
+	r.mu.Lock()
+	// A racing EnsureAttached could have populated the map between our
+	// check and the Attach above. Resolve by keeping the first attachment
+	// and closing this one.
+	if existing, ok := r.stages[stageID]; ok {
+		r.mu.Unlock()
+		stream.Close()
+		return existing, nil
+	}
+	r.stages[stageID] = stage
+	r.mu.Unlock()
+	go r.runReader(stage)
 	return stage, nil
 }
 
