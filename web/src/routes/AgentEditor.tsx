@@ -252,6 +252,9 @@ export function AgentEditor() {
             </label>
             <label className="field">
               <span className="field-label">Description</span>
+              <span className="field-hint">
+                One-line summary shown alongside the agent.
+              </span>
               <input
                 type="text"
                 value={description}
@@ -259,7 +262,7 @@ export function AgentEditor() {
                   setDescription(e.target.value);
                   markDirty();
                 }}
-                placeholder="One-line summary shown alongside the agent."
+                placeholder="e.g. Investigates production bugs and proposes fixes."
               />
             </label>
           </div>

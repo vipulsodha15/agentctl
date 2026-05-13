@@ -244,6 +244,9 @@ export function WorkflowEditor() {
             </label>
             <label className="field">
               <span className="field-label">Description</span>
+              <span className="field-hint">
+                One-line summary shown alongside the workflow.
+              </span>
               <input
                 type="text"
                 value={description}
@@ -251,7 +254,7 @@ export function WorkflowEditor() {
                   setDescription(e.target.value);
                   markDirty();
                 }}
-                placeholder="One-line summary shown alongside the workflow."
+                placeholder="e.g. Plan a change, build it, then review."
               />
             </label>
           </div>
