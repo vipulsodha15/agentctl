@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError, apiJson, jsonBody } from "../api";
 import type {
@@ -148,18 +149,6 @@ export function AgentEditor() {
     if (!touched) setTouched(true);
   }
 
-  function toggleSet(
-    set: Set<string>,
-    setter: (next: Set<string>) => void,
-    name: string,
-  ) {
-    const next = new Set(set);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    setter(next);
-    markDirty();
-  }
-
   async function save() {
     setSubmitError(null);
     if (!canSubmit) return;
@@ -252,6 +241,9 @@ export function AgentEditor() {
             </label>
             <label className="field">
               <span className="field-label">Description</span>
+              <span className="field-hint">
+                One-line summary shown alongside the agent.
+              </span>
               <input
                 type="text"
                 value={description}
@@ -259,7 +251,7 @@ export function AgentEditor() {
                   setDescription(e.target.value);
                   markDirty();
                 }}
-                placeholder="One-line summary shown alongside the agent."
+                placeholder="e.g. Investigates production bugs and proposes fixes."
               />
             </label>
           </div>
@@ -338,6 +330,10 @@ export function AgentEditor() {
             title="MCPs allowed"
             help="Pick which MCP servers this agent can use. Leave unconstrained to allow all registered MCPs."
             emptyHint="No MCPs registered. Add them under Settings."
+            pickButtonLabel="Pick MCPs…"
+            modalTitle="Pick MCPs"
+            modalHelp="Tick the MCP servers this agent can use."
+            itemNoun="MCP"
             constrained={mcpsConstrained}
             setConstrained={(v) => {
               setMcpsConstrained(v);
@@ -349,13 +345,20 @@ export function AgentEditor() {
               sub: `${m.transport} · ${m.kind}${m.description ? ` · ${m.description}` : ""}`,
             }))}
             selected={mcpsAllowed}
-            onToggle={(n) => toggleSet(mcpsAllowed, setMcpsAllowed, n)}
+            onChange={(next) => {
+              setMcpsAllowed(next);
+              markDirty();
+            }}
           />
 
           <AllowlistPanel
             title="Skills allowed"
             help="Pick which skills this agent can use. Leave unconstrained to allow all installed skills."
             emptyHint="No skills installed."
+            pickButtonLabel="Pick skills…"
+            modalTitle="Pick skills"
+            modalHelp="Tick the skills this agent can use."
+            itemNoun="skill"
             constrained={skillsConstrained}
             setConstrained={(v) => {
               setSkillsConstrained(v);
@@ -367,7 +370,10 @@ export function AgentEditor() {
               sub: s.description,
             }))}
             selected={skillsAllowed}
-            onToggle={(n) => toggleSet(skillsAllowed, setSkillsAllowed, n)}
+            onChange={(next) => {
+              setSkillsAllowed(next);
+              markDirty();
+            }}
           />
 
           {submitError && <div className="error-text">{submitError}</div>}
@@ -405,23 +411,36 @@ interface AllowlistPanelProps {
   title: string;
   help: string;
   emptyHint: string;
+  pickButtonLabel: string;
+  modalTitle: string;
+  modalHelp: string;
+  itemNoun: string;
   constrained: boolean;
   setConstrained: (v: boolean) => void;
   items: AllowlistItem[];
   selected: Set<string>;
-  onToggle: (name: string) => void;
+  onChange: (next: Set<string>) => void;
 }
 
 function AllowlistPanel({
   title,
   help,
   emptyHint,
+  pickButtonLabel,
+  modalTitle,
+  modalHelp,
+  itemNoun,
   constrained,
   setConstrained,
   items,
   selected,
-  onToggle,
+  onChange,
 }: AllowlistPanelProps) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const selectedItems = useMemo(
+    () => items.filter((it) => selected.has(it.key)),
+    [items, selected],
+  );
   return (
     <div className="panel" style={{ padding: "20px 22px", marginTop: 16 }}>
       <div className="field" style={{ marginBottom: 12 }}>
@@ -443,30 +462,188 @@ function AllowlistPanel({
       ) : items.length === 0 ? (
         <div className="empty">{emptyHint}</div>
       ) : (
-        <div>
-          {items.map((it) => (
-            <label key={it.key} className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={selected.has(it.key)}
-                onChange={() => onToggle(it.key)}
-              />
-              <span>
-                <strong style={{ fontWeight: 600 }}>{it.label}</strong>
-                {it.sub && (
-                  <>
-                    {" "}
-                    <span style={{ color: "var(--c-fg-mute)", fontSize: 12 }}>
-                      {it.sub}
-                    </span>
-                  </>
-                )}
+        <div className="allowlist-summary">
+          <div className="allowlist-chips">
+            {selectedItems.length === 0 ? (
+              <span className="allowlist-empty muted">
+                Nothing selected — this agent will have no {itemNoun}s.
               </span>
-            </label>
-          ))}
+            ) : (
+              selectedItems.map((it) => (
+                <span key={it.key} className="allowlist-chip">
+                  {it.label}
+                </span>
+              ))
+            )}
+          </div>
+          <button
+            type="button"
+            className="ghost allowlist-edit-button"
+            onClick={() => setModalOpen(true)}
+          >
+            {pickButtonLabel}
+          </button>
         </div>
       )}
+      {modalOpen && (
+        <AllowlistModal
+          title={modalTitle}
+          help={modalHelp}
+          itemNoun={itemNoun}
+          items={items}
+          initialSelected={selected}
+          onSave={(next) => {
+            onChange(next);
+            setModalOpen(false);
+          }}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+interface AllowlistModalProps {
+  title: string;
+  help: string;
+  itemNoun: string;
+  items: AllowlistItem[];
+  initialSelected: Set<string>;
+  onSave: (next: Set<string>) => void;
+  onClose: () => void;
+}
+
+function AllowlistModal({
+  title,
+  help,
+  itemNoun,
+  items,
+  initialSelected,
+  onSave,
+  onClose,
+}: AllowlistModalProps) {
+  const [query, setQuery] = useState("");
+  const [draft, setDraft] = useState<Set<string>>(() => new Set(initialSelected));
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(
+      (it) =>
+        it.label.toLowerCase().includes(q) ||
+        (it.sub ? it.sub.toLowerCase().includes(q) : false),
+    );
+  }, [items, query]);
+
+  useEffect(() => {
+    searchRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  function toggle(key: string) {
+    setDraft((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setDraft(new Set(items.map((it) => it.key)));
+  }
+  function clearAll() {
+    setDraft(new Set());
+  }
+
+  const allSelected = draft.size === items.length && items.length > 0;
+
+  return createPortal(
+    <div className="modal-scrim" onClick={onClose}>
+      <div
+        className="modal allowlist-modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label={title}
+      >
+        <div className="allowlist-modal-head">
+          <h3>{title}</h3>
+          <p className="muted allowlist-modal-help">{help}</p>
+        </div>
+        <input
+          ref={searchRef}
+          className="allowlist-modal-search"
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Search ${itemNoun}s…`}
+          spellCheck={false}
+        />
+        <div className="allowlist-modal-list">
+          {filtered.length === 0 ? (
+            <div className="allowlist-modal-empty muted">No matches.</div>
+          ) : (
+            filtered.map((it) => {
+              const on = draft.has(it.key);
+              return (
+                <button
+                  key={it.key}
+                  type="button"
+                  className={`allowlist-card${on ? " selected" : ""}`}
+                  onClick={() => toggle(it.key)}
+                  aria-pressed={on}
+                >
+                  <span className="allowlist-card-check" aria-hidden>
+                    {on ? "✓" : ""}
+                  </span>
+                  <span className="allowlist-card-body">
+                    <span className="allowlist-card-name">{it.label}</span>
+                    {it.sub && (
+                      <span className="allowlist-card-desc">{it.sub}</span>
+                    )}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+        <div className="allowlist-modal-foot">
+          <div className="allowlist-modal-bulk">
+            <span className="muted">
+              {draft.size} of {items.length} selected
+            </span>
+            <button
+              type="button"
+              className="ghost allowlist-bulk-link"
+              onClick={allSelected ? clearAll : selectAll}
+            >
+              {allSelected ? "Clear all" : "Select all"}
+            </button>
+          </div>
+          <div className="form-actions" style={{ margin: 0 }}>
+            <button type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => onSave(draft)}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
