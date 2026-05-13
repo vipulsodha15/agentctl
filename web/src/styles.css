@@ -4517,11 +4517,31 @@ button.back-link:hover:not(:disabled) {
 .allowlist-chip {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
   background: var(--c-surface-2);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-full);
   font-size: var(--text-sm);
+  color: var(--c-fg);
+}
+.allowlist-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--c-fg-mute);
+  font-size: 16px;
+  line-height: 1;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.allowlist-chip-remove:hover {
+  background: var(--c-surface);
   color: var(--c-fg);
 }
 .allowlist-empty {
@@ -4529,6 +4549,9 @@ button.back-link:hover:not(:disabled) {
   align-self: center;
 }
 .allowlist-edit-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   padding: 6px 12px;
   font-size: var(--text-sm);
   border: 1px solid var(--c-border);
@@ -4541,6 +4564,17 @@ button.back-link:hover:not(:disabled) {
 .allowlist-edit-button:hover {
   border-color: var(--c-fg-mute);
   background: var(--c-surface-2);
+}
+.allowlist-edit-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  background: var(--c-accent-soft);
+  color: var(--c-accent-fg);
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .allowlist-modal {
