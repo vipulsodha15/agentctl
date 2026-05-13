@@ -365,6 +365,10 @@ export function TaskDetail() {
                 !(
                   m.role === "system" &&
                   m.content.startsWith("Task opened.")
+                ) &&
+                !(
+                  (m.role === "assistant" || m.role === "synthesis") &&
+                  m.content.trim() === ""
                 ),
             )
             .map((m, idx, arr) => (

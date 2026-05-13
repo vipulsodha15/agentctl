@@ -36,6 +36,14 @@ class _TextBlock:
 
 
 @dataclass
+class _ToolUseBlock:
+    id: str = "tu_1"
+    name: str = "Read"
+    input: dict = None
+    type: str = "tool_use"
+
+
+@dataclass
 class _AssistantMessageFake:
     content: list
     model: str = "claude-opus-4-7"
@@ -77,6 +85,17 @@ class TranslateMessageTest(unittest.TestCase):
         data = next(d for k, d in out if k == runtime.EVENT_ASSISTANT_MESSAGE)
         self.assertEqual(data["content"], "hello")
         self.assertNotIn("text", data)
+
+    def test_assistant_message_with_only_tool_use_emits_nothing(self) -> None:
+        # When Claude follows up a tool result with another batch of tool
+        # calls and no text, the SDK delivers an AssistantMessage whose
+        # content is purely tool_use blocks. The collapsed text is "" — we
+        # must not emit an assistant.message for that, otherwise the
+        # task-chat thread paints an empty bubble per tool-only turn.
+        msg = _AssistantMessageFake(content=[_ToolUseBlock(input={"path": "a.go"})])
+        out = runtime.translate_message(msg, turn_id="t3")
+        kinds = [k for k, _ in out]
+        self.assertNotIn(runtime.EVENT_ASSISTANT_MESSAGE, kinds)
 
 
 if __name__ == "__main__":  # pragma: no cover
