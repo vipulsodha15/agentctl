@@ -4459,3 +4459,33 @@ button.back-link:hover:not(:disabled) {
 .workflow-editor-actions {
   margin-top: 4px;
 }
+
+.agent-colour-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.agent-colour-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--agent-bg);
+  border: 1.5px solid var(--agent-edge);
+  cursor: pointer;
+}
+.agent-colour-swatch:hover {
+  border-color: var(--agent-fg);
+}
+.agent-colour-swatch.active {
+  border-color: var(--agent-fg);
+  box-shadow: 0 0 0 2px var(--agent-fg) inset;
+}
+.agent-colour-swatch .agent-swatch {
+  width: 14px;
+  height: 14px;
+}
