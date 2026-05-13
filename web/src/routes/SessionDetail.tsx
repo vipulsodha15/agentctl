@@ -16,6 +16,7 @@ import { McpPanel } from "../components/McpPanel";
 import { StopButton } from "../components/StopButton";
 import { CostPanel } from "../components/CostPanel";
 import { ChangesPanel } from "../components/ChangesPanel";
+import { ConfirmModal } from "../components/ConfirmModal";
 
 interface State {
   status: SessionStatus | "unknown";
@@ -788,6 +789,7 @@ export function SessionDetail() {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const [tab, setTab] = useState<"conversation" | "changes">("conversation");
   const [endBusy, setEndBusy] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
   const [costRefreshKey, setCostRefreshKey] = useState(0);
   const [filter, setFilter] = useState<TranscriptFilter>("all");
   const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => {
@@ -865,16 +867,19 @@ export function SessionDetail() {
     return () => handle.close();
   }, [id]);
 
-  const onEnd = useCallback(async () => {
+  const onEnd = useCallback(() => {
     if (!id) return;
-    if (!window.confirm("End session? Container, volume, and history will be removed.")) {
-      return;
-    }
+    setConfirmEnd(true);
+  }, [id]);
+
+  const doEnd = useCallback(async () => {
+    if (!id) return;
     setEndBusy(true);
     try {
       await apiJson(`/v1/sessions/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
+      setConfirmEnd(false);
       navigate("/sessions");
     } catch (err) {
       const msg =
@@ -883,6 +888,7 @@ export function SessionDetail() {
           : String(err);
       alert(`Failed to end session: ${msg}`);
       setEndBusy(false);
+      setConfirmEnd(false);
     }
   }, [id, navigate]);
 
@@ -1006,6 +1012,16 @@ export function SessionDetail() {
           </>
         )}
       </aside>
+      <ConfirmModal
+        open={confirmEnd}
+        title="End session?"
+        message="Container, volume, and history will be removed."
+        confirmLabel={endBusy ? "Ending…" : "End session"}
+        variant="danger"
+        busy={endBusy}
+        onConfirm={doEnd}
+        onCancel={() => setConfirmEnd(false)}
+      />
     </section>
   );
 }

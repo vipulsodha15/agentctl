@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, api, apiJson } from "../api";
+import { ConfirmModal } from "../components/ConfirmModal";
 import type { Agent, ListAgentsResponse } from "../types";
 
 export function AgentList() {
@@ -10,6 +11,7 @@ export function AgentList() {
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   const load = useCallback((preferName?: string | null) => {
     apiJson<ListAgentsResponse>("/v1/agents")
@@ -42,11 +44,9 @@ export function AgentList() {
 
   const agent = agents.find((a) => a.name === selected);
 
-  async function onDelete(name: string) {
-    const ok = window.confirm(
-      `Delete agent "${name}"? Workflows that reference it will block the delete.`,
-    );
-    if (!ok) return;
+  async function confirmDelete() {
+    const name = pendingDelete;
+    if (!name) return;
     setBusy(true);
     setError(null);
     try {
@@ -71,6 +71,7 @@ export function AgentList() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+      setPendingDelete(null);
     }
   }
 
@@ -124,7 +125,7 @@ export function AgentList() {
               onDuplicate={() =>
                 navigate(`/agents/new?from=${encodeURIComponent(agent.name)}`)
               }
-              onDelete={() => onDelete(agent.name)}
+              onDelete={() => setPendingDelete(agent.name)}
             />
           ) : (
             <div className="empty">
@@ -134,6 +135,16 @@ export function AgentList() {
           )}
         </div>
       </div>
+      <ConfirmModal
+        open={pendingDelete !== null}
+        title={`Delete agent "${pendingDelete ?? ""}"?`}
+        message="Workflows that reference it will block the delete."
+        confirmLabel="Delete"
+        variant="danger"
+        busy={busy}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </section>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { ApiError, apiJson, jsonBody } from "../api";
+import { ConfirmModal } from "../components/ConfirmModal";
 import type {
   Agent,
   ListAgentsResponse,
@@ -35,6 +36,7 @@ export function WorkflowEditor() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   // Cancel-confirm guard when there are unsaved changes.
   const cleanRef = useRef(false);
@@ -186,10 +188,16 @@ export function WorkflowEditor() {
 
   function cancel() {
     if (touched) {
-      const ok = window.confirm("Discard unsaved changes?");
-      if (!ok) return;
+      setConfirmDiscard(true);
+      return;
     }
     cleanRef.current = true;
+    navigate("/workflows");
+  }
+
+  function discardAndLeave() {
+    cleanRef.current = true;
+    setConfirmDiscard(false);
     navigate("/workflows");
   }
 
@@ -307,6 +315,16 @@ export function WorkflowEditor() {
           </div>
         </>
       )}
+      <ConfirmModal
+        open={confirmDiscard}
+        title="Discard unsaved changes?"
+        message="Your edits will be lost."
+        confirmLabel="Discard"
+        cancelLabel="Keep editing"
+        variant="danger"
+        onConfirm={discardAndLeave}
+        onCancel={() => setConfirmDiscard(false)}
+      />
     </section>
   );
 }

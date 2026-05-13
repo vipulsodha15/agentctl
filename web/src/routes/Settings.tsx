@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
+import { ConfirmModal } from "../components/ConfirmModal";
 import type {
   AddMcpRequest,
   AddSkillRequest,
@@ -72,6 +73,7 @@ function McpSection() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<McpFormState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingRemove, setPendingRemove] = useState<McpEntry | null>(null);
 
   async function load() {
     try {
@@ -105,14 +107,9 @@ function McpSection() {
     });
   }
 
-  async function onRemove(entry: McpEntry) {
-    if (
-      !window.confirm(
-        `Remove MCP "${entry.name}"? Running sessions are unaffected.`,
-      )
-    ) {
-      return;
-    }
+  async function confirmRemove() {
+    const entry = pendingRemove;
+    if (!entry) return;
     setBusy(true);
     try {
       await apiJson(`/v1/mcps/${encodeURIComponent(entry.name)}`, {
@@ -123,6 +120,7 @@ function McpSection() {
       setError(formatErr(err));
     } finally {
       setBusy(false);
+      setPendingRemove(null);
     }
   }
 
@@ -219,7 +217,7 @@ function McpSection() {
                   </button>{" "}
                   <button
                     className="danger"
-                    onClick={() => onRemove(m)}
+                    onClick={() => setPendingRemove(m)}
                     disabled={busy}
                   >
                     Remove
@@ -330,6 +328,16 @@ function McpSection() {
           </div>
         </form>
       )}
+      <ConfirmModal
+        open={pendingRemove !== null}
+        title={`Remove MCP "${pendingRemove?.name ?? ""}"?`}
+        message="Running sessions are unaffected."
+        confirmLabel="Remove"
+        variant="danger"
+        busy={busy}
+        onConfirm={confirmRemove}
+        onCancel={() => setPendingRemove(null)}
+      />
     </div>
   );
 }
@@ -363,6 +371,7 @@ function SkillsSection() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<SkillFormState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingRemove, setPendingRemove] = useState<SkillEntry | null>(null);
 
   async function load() {
     try {
@@ -382,14 +391,9 @@ function SkillsSection() {
     setForm({ ...EMPTY_SKILL_FORM });
   }
 
-  async function onRemove(entry: SkillEntry) {
-    if (
-      !window.confirm(
-        `Remove custom skill "${entry.name}"? Running sessions are unaffected.`,
-      )
-    ) {
-      return;
-    }
+  async function confirmRemove() {
+    const entry = pendingRemove;
+    if (!entry) return;
     setBusy(true);
     try {
       await apiJson(`/v1/skills/${encodeURIComponent(entry.name)}`, {
@@ -400,6 +404,7 @@ function SkillsSection() {
       setError(formatErr(err));
     } finally {
       setBusy(false);
+      setPendingRemove(null);
     }
   }
 
@@ -472,7 +477,7 @@ function SkillsSection() {
                   {s.source === "custom" ? (
                     <button
                       className="danger"
-                      onClick={() => onRemove(s)}
+                      onClick={() => setPendingRemove(s)}
                       disabled={busy}
                     >
                       Remove
@@ -554,6 +559,16 @@ function SkillsSection() {
           </div>
         </form>
       )}
+      <ConfirmModal
+        open={pendingRemove !== null}
+        title={`Remove custom skill "${pendingRemove?.name ?? ""}"?`}
+        message="Running sessions are unaffected."
+        confirmLabel="Remove"
+        variant="danger"
+        busy={busy}
+        onConfirm={confirmRemove}
+        onCancel={() => setPendingRemove(null)}
+      />
     </div>
   );
 }

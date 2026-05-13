@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError, apiJson, jsonBody } from "../api";
+import { ConfirmModal } from "../components/ConfirmModal";
 import type {
   Agent,
   ListAgentsResponse,
@@ -55,6 +56,7 @@ export function AgentEditor() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const cleanRef = useRef(false);
   useEffect(() => {
@@ -184,10 +186,16 @@ export function AgentEditor() {
 
   function cancel() {
     if (touched) {
-      const ok = window.confirm("Discard unsaved changes?");
-      if (!ok) return;
+      setConfirmDiscard(true);
+      return;
     }
     cleanRef.current = true;
+    navigate("/agents");
+  }
+
+  function discardAndLeave() {
+    cleanRef.current = true;
+    setConfirmDiscard(false);
     navigate("/agents");
   }
 
@@ -397,6 +405,16 @@ export function AgentEditor() {
           </div>
         </>
       )}
+      <ConfirmModal
+        open={confirmDiscard}
+        title="Discard unsaved changes?"
+        message="Your edits will be lost."
+        confirmLabel="Discard"
+        cancelLabel="Keep editing"
+        variant="danger"
+        onConfirm={discardAndLeave}
+        onCancel={() => setConfirmDiscard(false)}
+      />
     </section>
   );
 }
