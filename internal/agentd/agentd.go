@@ -135,13 +135,27 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	taskHub := fan.NewHub()
-	simRuntime := tm.NewSimRuntime(log.New(log.Options{Component: "tm"}))
+	tmLog := log.New(log.Options{Component: "tm"})
+	simRuntime := tm.NewSimRuntimeWithOptions(tm.SimRuntimeOptions{
+		Logger: tmLog,
+		Auth: &tm.AuthSource{
+			SecretsPath: opts.Layout.SecretsFile,
+			CredsFile:   opts.Layout.ClaudeCredsFile,
+		},
+		Model: cfg.Model.Default,
+	})
+	if simRuntime.HasCredential() {
+		logger.Info("tm.credential_resolved")
+	} else {
+		logger.Warn("tm.no_credential",
+			slog.String("hint", "run `agentctl init` to add an API key, or `agentctl auth login` for OAuth"))
+	}
 	taskMgr := tm.New(tm.Options{
 		Store:   st,
 		Library: taskLib,
 		Runtime: simRuntime,
 		Hub:     taskHub,
-		Logger:  log.New(log.Options{Component: "tm"}),
+		Logger:  tmLog,
 	})
 	_ = taskMgr
 
