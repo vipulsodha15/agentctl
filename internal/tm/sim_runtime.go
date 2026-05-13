@@ -57,6 +57,14 @@ type resolvedAuth struct {
 	value   string
 	baseURL string // overrides default if set
 	source  string // human-readable origin for logs/errors
+	// oauth is true only when value is a Claude subscription OAuth access
+	// token read from .credentials.json. Such tokens require the
+	// `anthropic-beta: oauth-2025-04-20` header and a system prompt that
+	// starts with the Claude Code identity string — otherwise Anthropic
+	// rejects the request (typically as a 429 rate_limit_error with a
+	// generic "Error" message). A custom-endpoint bearer from secrets.json
+	// is a plain proxy token and must NOT trigger that path.
+	oauth bool
 }
 
 // resolve reads disk on every call. Cheap: secrets.json is small and we only
@@ -76,7 +84,7 @@ func (a *AuthSource) resolve(defaultURL string) (resolvedAuth, error) {
 			}
 			if sec.ResolvedAuthMode() == secrets.AuthModeOAuth && a.CredsFile != "" {
 				if tok, err := readOAuthAccessToken(a.CredsFile); err == nil && tok != "" {
-					return resolvedAuth{kind: "bearer", value: tok, baseURL: defaultURL, source: "oauth credentials file"}, nil
+					return resolvedAuth{kind: "bearer", value: tok, baseURL: defaultURL, source: "oauth credentials file", oauth: true}, nil
 				}
 			}
 		}
@@ -407,10 +415,28 @@ func (r *SimRuntime) runTurn(stage *simStage) {
 	}
 }
 
+// claudeCodeSystemPrefix is the identity string Anthropic requires at the
+// start of the system prompt when authenticating with a Claude OAuth
+// subscription bearer token. Without it the API rejects the request — most
+// commonly as a 429 rate_limit_error with a generic "Error" message rather
+// than an obvious 401, which makes the failure mode easy to misread as a
+// real rate limit.
+const claudeCodeSystemPrefix = "You are Claude Code, Anthropic's official CLI for Claude."
+
 func (r *SimRuntime) callAnthropic(ctx context.Context, system string, msgs []apiMessage) (string, error) {
 	auth, err := r.resolveAuth()
 	if err != nil {
 		return "", err
+	}
+	if auth.oauth {
+		// OAuth subscription tokens are gated on the Claude Code identity
+		// being the first thing in the system prompt. Prepend rather than
+		// replace so the agent's own role/framing still shapes the reply.
+		if system == "" {
+			system = claudeCodeSystemPrefix
+		} else if !strings.HasPrefix(system, claudeCodeSystemPrefix) {
+			system = claudeCodeSystemPrefix + "\n\n" + system
+		}
 	}
 	type req struct {
 		Model     string       `json:"model"`
@@ -431,6 +457,9 @@ func (r *SimRuntime) callAnthropic(ctx context.Context, system string, msgs []ap
 		httpReq.Header.Set("x-api-key", auth.value)
 	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	if auth.oauth {
+		httpReq.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	}
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
 		return "", err
