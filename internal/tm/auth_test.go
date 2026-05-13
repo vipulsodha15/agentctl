@@ -1,6 +1,11 @@
 package tm
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +45,9 @@ func TestAuthSource_PrefersBearerOverAPIKey(t *testing.T) {
 	if got.baseURL != "https://proxy.example.com" {
 		t.Errorf("bearer must use AnthropicBaseURL, got %q", got.baseURL)
 	}
+	if got.oauth {
+		t.Errorf("custom-endpoint bearer must NOT be flagged oauth=true")
+	}
 }
 
 func TestAuthSource_APIKeyWhenNoToken(t *testing.T) {
@@ -75,6 +83,119 @@ func TestAuthSource_OAuthFromCredentialsFile(t *testing.T) {
 	got := a.testResolve(t, "https://api.anthropic.com")
 	if got.kind != "bearer" || got.value != "sk-ant-oat-xyz" {
 		t.Errorf("oauth resolution failed: %+v", got)
+	}
+	if !got.oauth {
+		t.Errorf("OAuth credentials file must set oauth=true (drives anthropic-beta + system prefix); got %+v", got)
+	}
+}
+
+// TestCallAnthropic_OAuthHeadersAndSystemPrefix is a regression test for the
+// 429 the task-chat path returned when authenticating via `agentctl auth
+// login`. Anthropic gates Claude OAuth subscription tokens on the
+// `anthropic-beta: oauth-2025-04-20` header AND a system prompt that begins
+// with the Claude Code identity string; without either, the API returned
+// 429 rate_limit_error with a generic "Error" message. Session chat avoided
+// this because it shells out to the bundled `claude` CLI, which sets those
+// itself.
+func TestCallAnthropic_OAuthHeadersAndSystemPrefix(t *testing.T) {
+	var gotAuth, gotBeta, gotAPIKey, gotVersion, gotSystem string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotBeta = r.Header.Get("anthropic-beta")
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		raw, _ := io.ReadAll(r.Body)
+		var payload struct {
+			System string `json:"system"`
+		}
+		_ = json.Unmarshal(raw, &payload)
+		gotSystem = payload.System
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := os.WriteFile(secretsPath, []byte(`{"v":1,"anthropic_auth_mode":"oauth"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credsPath := filepath.Join(dir, ".credentials.json")
+	if err := os.WriteFile(credsPath, []byte(`{"claudeAiOauth":{"accessToken":"sk-ant-oat-xyz"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewSimRuntimeWithOptions(SimRuntimeOptions{
+		Auth: &AuthSource{SecretsPath: secretsPath, CredsFile: credsPath},
+	})
+	// Point both the default base URL and any per-call override at the test
+	// server. resolve() returns baseURL=defaultURL for the OAuth path.
+	r.defaultURL = srv.URL
+
+	got, err := r.callAnthropic(context.Background(), "agent system prompt", []apiMessage{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("callAnthropic: %v", err)
+	}
+	if got != "ok" {
+		t.Errorf("unexpected reply: %q", got)
+	}
+	if gotAuth != "Bearer sk-ant-oat-xyz" {
+		t.Errorf("Authorization header wrong: %q", gotAuth)
+	}
+	if gotAPIKey != "" {
+		t.Errorf("x-api-key must not be set when using bearer: %q", gotAPIKey)
+	}
+	if gotVersion != "2023-06-01" {
+		t.Errorf("anthropic-version wrong: %q", gotVersion)
+	}
+	if gotBeta != "oauth-2025-04-20" {
+		t.Errorf("anthropic-beta missing or wrong: %q (this is the headline 429 fix)", gotBeta)
+	}
+	if !strings.HasPrefix(gotSystem, claudeCodeSystemPrefix) {
+		t.Errorf("system prompt must start with Claude Code identity string; got %q", gotSystem)
+	}
+	if !strings.Contains(gotSystem, "agent system prompt") {
+		t.Errorf("agent's own system prompt must be preserved after the prefix; got %q", gotSystem)
+	}
+}
+
+// TestCallAnthropic_CustomBearerSkipsOAuthHeader guards against accidentally
+// sending the anthropic-beta header to a custom LLM gateway that authenticates
+// with a Bearer token but is NOT Anthropic OAuth — that gateway has no reason
+// to receive the OAuth beta header, and adding the Claude Code system prefix
+// could disturb the gateway's own prompt accounting.
+func TestCallAnthropic_CustomBearerSkipsOAuthHeader(t *testing.T) {
+	var gotBeta, gotSystem string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		raw, _ := io.ReadAll(r.Body)
+		var payload struct {
+			System string `json:"system"`
+		}
+		_ = json.Unmarshal(raw, &payload)
+		gotSystem = payload.System
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	body := `{"v":1,"anthropic_auth_token":"proxy-tok","anthropic_base_url":"` + srv.URL + `"}`
+	if err := os.WriteFile(secretsPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewSimRuntimeWithOptions(SimRuntimeOptions{
+		Auth: &AuthSource{SecretsPath: secretsPath},
+	})
+
+	if _, err := r.callAnthropic(context.Background(), "agent system prompt", []apiMessage{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatalf("callAnthropic: %v", err)
+	}
+	if gotBeta != "" {
+		t.Errorf("anthropic-beta must NOT be set for a custom-endpoint bearer; got %q", gotBeta)
+	}
+	if strings.HasPrefix(gotSystem, claudeCodeSystemPrefix) {
+		t.Errorf("Claude Code identity prefix must NOT be prepended for a custom-endpoint bearer; got %q", gotSystem)
 	}
 }
 
