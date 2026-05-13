@@ -41,7 +41,7 @@ export function TaskDetail() {
   const [confirmAbandon, setConfirmAbandon] = useState(false);
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [wsStatus, setWsStatus] = useState<WSStatus>("connecting");
-  const [issueOpen, setIssueOpen] = useState(true);
+  const [issueOpen, setIssueOpen] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const [convState, dispatchConv] = useReducer(
@@ -288,42 +288,32 @@ export function TaskDetail() {
 
   return (
     <section className="task-detail">
-      <header className="task-detail-header">
-        <div className="task-detail-title">
-          <Link to="/tasks" className="back-link">
+      <header className="task-topbar">
+        <div className="task-topbar-left">
+          <Link to="/tasks" className="back-link" title="Back to tasks">
             <BackArrow />
-            <span>Tasks</span>
           </Link>
-          <div className="task-detail-headline">
-            <h2>{task.name}</h2>
+          <div className="task-topbar-title" title={task.name}>
+            <span className="task-topbar-name">{task.name}</span>
             <span className="task-id-chip" title={task.task_id}>
               #{task.task_id.slice(-6)}
             </span>
           </div>
-          <div className="task-detail-meta">
-            <StatusPill status={task.status} />
-            <span className="meta-divider" aria-hidden />
-            <span className="meta-item">
-              <span className="meta-key">workflow</span>
-              <span className="meta-val">{task.workflow_name || "—"}</span>
+          <StatusPill status={task.status} />
+          {activeStage && (
+            <span className={`agent-tag swatch-${activeStage.colour ?? "slate"}`} title={`Current agent: ${activeStage.agent_name}`}>
+              <span className="agent-tag-dot" aria-hidden />
+              {activeStage.agent_name}
             </span>
-            {activeStage && (
-              <>
-                <span className="meta-divider" aria-hidden />
-                <span className="meta-item">
-                  <span className="meta-key">current</span>
-                  <span className={`agent-tag swatch-${activeStage.colour ?? "slate"}`}>
-                    <span className="agent-tag-dot" aria-hidden />
-                    {activeStage.agent_name}
-                  </span>
-                </span>
-              </>
-            )}
-            <span className="meta-divider" aria-hidden />
-            <WSStatusBadge status={wsStatus} />
-          </div>
+          )}
         </div>
-        <div className="task-detail-actions">
+        <div className="task-topbar-right">
+          <WSStatusBadge status={wsStatus} />
+          <IssueSeedChip
+            task={task}
+            open={issueOpen}
+            onToggle={() => setIssueOpen((v) => !v)}
+          />
           {!terminal && (
             <button
               onClick={() => setConfirmAbandon(true)}
@@ -336,10 +326,15 @@ export function TaskDetail() {
         </div>
       </header>
 
-      <StageRail stages={stages} taskStatus={task.status} />
+      <StageStrip stages={stages} taskStatus={task.status} />
 
       <div className="task-thread-wrap" ref={threadRef}>
-        <IssueSeed task={task} open={issueOpen} onToggle={() => setIssueOpen((v) => !v)} />
+        {issueOpen && (
+          <IssueSeedPanel
+            task={task}
+            onClose={() => setIssueOpen(false)}
+          />
+        )}
         {apiKeyMissing && error && (
           <InlineNotice
             level="warn"
@@ -349,8 +344,6 @@ export function TaskDetail() {
           />
         )}
 
-        {/* Past stages — compact synthesis cards + seam dividers. Full
-            transcript replay for handed-off stages is a follow-up. */}
         {doneStages.map((s) => (
           <PriorStageCard
             key={s.stage_id}
@@ -361,17 +354,8 @@ export function TaskDetail() {
           />
         ))}
 
-        {/* Active stage — render the underlying session conversation in
-            full session-chat fidelity (tool calls, streaming deltas, cost
-            chips, …). */}
         {activeStage && activeSessionID && (
-          <div
-            className={`task-active-stage swatch-${activeStage.colour ?? "slate"}`}
-          >
-            <StageHeader
-              stage={activeStage}
-              label="now talking with"
-            />
+          <div className="task-active-thread">
             <ConversationView
               messages={convState.messages}
               warnings={convState.warnings}
@@ -395,20 +379,6 @@ export function TaskDetail() {
         <NoWorkflowComposer taskId={task.task_id} onAttached={load} />
       ) : (
         <div className="composer">
-          <div className="composer-bar">
-            <div className="composer-talking">
-              <span className="muted">talking to</span>
-              <span className={`agent-tag swatch-${activeStage.colour ?? "slate"}`}>
-                <span className="agent-tag-dot" aria-hidden />
-                {activeStage.agent_name}
-              </span>
-            </div>
-            <span className="composer-hint">
-              <kbd>⌘</kbd>
-              <kbd>↵</kbd>
-              <span>send</span>
-            </span>
-          </div>
           <textarea
             ref={composerRef}
             className="composer-input"
@@ -416,9 +386,14 @@ export function TaskDetail() {
             value={composer}
             onChange={(e) => setComposer(e.target.value)}
             onKeyDown={onKeyDown}
-            rows={3}
+            rows={2}
           />
           <div className="composer-actions">
+            <span className="composer-hint">
+              <kbd>⌘</kbd>
+              <kbd>↵</kbd>
+              <span>to send</span>
+            </span>
             <button onClick={send} disabled={!composer.trim() || sending}>
               {sending ? "Sending…" : "Send"}
             </button>
@@ -529,7 +504,7 @@ function WSStatusBadge({ status }: { status: WSStatus }) {
   );
 }
 
-function StageRail({
+function StageStrip({
   stages,
   taskStatus,
 }: {
@@ -537,39 +512,37 @@ function StageRail({
   taskStatus: TaskStatus;
 }) {
   if (stages.length === 0) return null;
-  const doneCount = stages.filter((s) => s.status === "done").length;
-  const activeCount = stages.filter((s) => s.status === "active").length;
-  let progress =
-    (doneCount + activeCount * 0.5) / Math.max(stages.length, 1);
-  if (taskStatus === "done") progress = 1;
+  const activeIdx = stages.findIndex((s) => s.status === "active");
   return (
-    <div
-      className="stage-rail"
-      role="list"
-      aria-label="Workflow stages"
-      style={{
-        ["--rail-n" as string]: String(stages.length),
-        ["--rail-progress" as string]: `${progress * 100}%`,
-      }}
-    >
-      <div className="stage-rail-track" aria-hidden>
-        <div className="stage-rail-track-fill" aria-hidden />
-      </div>
+    <div className="stage-strip" role="list" aria-label="Workflow stages">
       {stages.map((s, idx) => {
+        const isDone = s.status === "done" || taskStatus === "done";
+        const isActive = s.status === "active";
         const label = `Stage ${idx + 1} of ${stages.length}: ${s.agent_name} — ${s.status}`;
         return (
-          <div
-            key={s.stage_id}
-            role="listitem"
-            aria-label={label}
-            title={label}
-            className={`stage-rail-node swatch-${s.colour ?? "slate"} status-${s.status}`}
-          >
-            <span className="stage-rail-num" aria-hidden>
-              {s.status === "done" ? <CheckIcon /> : idx + 1}
+          <span key={s.stage_id} className="stage-strip-item">
+            <span
+              role="listitem"
+              aria-label={label}
+              title={label}
+              className={`stage-pill swatch-${s.colour ?? "slate"} ${
+                isDone ? "is-done" : isActive ? "is-active" : "is-pending"
+              }`}
+            >
+              <span className="stage-pill-num" aria-hidden>
+                {isDone ? <CheckIcon /> : idx + 1}
+              </span>
+              <span className="stage-pill-name">{s.agent_name}</span>
             </span>
-            <span className="stage-rail-agent">{s.agent_name}</span>
-          </div>
+            {idx < stages.length - 1 && (
+              <span
+                className={`stage-strip-sep${idx < activeIdx ? " is-done" : ""}`}
+                aria-hidden
+              >
+                <ForwardArrow />
+              </span>
+            )}
+          </span>
         );
       })}
     </div>
@@ -579,16 +552,13 @@ function StageRail({
 function TaskDetailSkeleton() {
   return (
     <>
-      <div className="task-detail-header skeleton-header">
-        <div>
-          <div className="skel skel-line w-12" />
-          <div className="skel skel-line w-32" style={{ marginTop: 8 }} />
-        </div>
+      <div className="task-topbar skeleton-header">
+        <div className="skel skel-line w-32" />
       </div>
-      <div className="stage-rail skeleton-rail">
-        <div className="stage-rail-node skel-pill" />
-        <div className="stage-rail-node skel-pill" />
-        <div className="stage-rail-node skel-pill" />
+      <div className="stage-strip">
+        <div className="skel skel-line w-12" />
+        <div className="skel skel-line w-12" />
+        <div className="skel skel-line w-12" />
       </div>
       <div className="task-thread-wrap">
         <div style={{ padding: "20px 0" }}>
@@ -600,8 +570,8 @@ function TaskDetailSkeleton() {
   );
 }
 
-function IssueSeed({
-  task,
+function IssueSeedChip({
+  task: _task,
   open,
   onToggle,
 }: {
@@ -610,46 +580,49 @@ function IssueSeed({
   onToggle: () => void;
 }) {
   return (
-    <div className={`issue-seed${open ? " open" : " collapsed"}`}>
-      <button
-        type="button"
-        className="issue-seed-header"
-        onClick={onToggle}
-        aria-expanded={open}
-      >
-        <span className="issue-seed-marker" aria-hidden>
-          <DocIcon />
-        </span>
-        <span className="issue-seed-label">issue.md</span>
-        <span className="issue-seed-tag">seeded into every stage</span>
-        <span className="issue-seed-chev" aria-hidden>
-          <ChevronIcon direction={open ? "down" : "right"} />
-        </span>
-      </button>
-      {open && (
-        <div className="issue-seed-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.issue_md}</ReactMarkdown>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      className={`issue-seed-chip${open ? " open" : ""}`}
+      onClick={onToggle}
+      aria-expanded={open}
+      title="View the issue brief — seeded into every stage"
+    >
+      <DocIcon />
+      <span>issue.md</span>
+      <span className="issue-seed-chip-chev" aria-hidden>
+        <ChevronIcon direction={open ? "down" : "right"} />
+      </span>
+    </button>
   );
 }
 
-function StageHeader({
-  stage,
-  label,
+function IssueSeedPanel({
+  task,
+  onClose,
 }: {
-  stage: TaskStage;
-  label: string;
+  task: Task;
+  onClose: () => void;
 }) {
   return (
-    <div className={`task-stage-header swatch-${stage.colour ?? "slate"}`}>
-      <span className="task-stage-position">Stage {stage.position}</span>
-      <span className="muted">{label}</span>
-      <span className={`agent-tag swatch-${stage.colour ?? "slate"}`}>
-        <span className="agent-tag-dot" aria-hidden />
-        {stage.agent_name}
-      </span>
+    <div className="issue-seed-panel" role="region" aria-label="issue.md">
+      <div className="issue-seed-panel-head">
+        <span className="issue-seed-panel-title">
+          <DocIcon />
+          <span>issue.md</span>
+          <span className="muted">— seeded into every stage</span>
+        </span>
+        <button
+          type="button"
+          className="ghost"
+          onClick={onClose}
+          aria-label="Close issue.md"
+        >
+          Close
+        </button>
+      </div>
+      <div className="issue-seed-panel-body">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.issue_md}</ReactMarkdown>
+      </div>
     </div>
   );
 }
