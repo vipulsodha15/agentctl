@@ -59,6 +59,15 @@ type sessionStage struct {
 	synthMID string      // message id of the in-flight Synthesize send
 	synthTID string      // turn id once observed via EventTurnStart
 	synthCh  chan string // reader writes the synth reply here
+
+	// lastTurnMID / lastTurnTID record the most recent TurnStart observed
+	// by the reader. sm.Manager broadcasts TurnStart *before* Send returns
+	// its MessageID, so the reader can process the synth turn's TurnStart
+	// before Synthesize has had a chance to set synthMID. Synthesize
+	// performs a retroactive lookup against these after Send returns to
+	// recover the synth TurnID even when the events lapped the goroutine.
+	lastTurnMID string
+	lastTurnTID string
 }
 
 func NewSessionRuntime(api SessionAPI, logger *slog.Logger) *SessionRuntime {
@@ -174,6 +183,12 @@ func (r *SessionRuntime) Synthesize(ctx context.Context, in SendMessageInput) (s
 	}
 	stage.mu.Lock()
 	stage.synthMID = res.MessageID
+	// TurnStart for this Send is broadcast before Send returns, so the
+	// reader may have already processed it with an empty synthMID. Reconcile
+	// against the last-observed TurnStart so the synth TurnID is captured.
+	if stage.synthTID == "" && stage.lastTurnMID == res.MessageID {
+		stage.synthTID = stage.lastTurnTID
+	}
 	stage.mu.Unlock()
 
 	select {
@@ -244,6 +259,8 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 			_ = json.Unmarshal(ev.Data, &d)
 			s.mu.Lock()
 			s.busy = true
+			s.lastTurnMID = d.MessageID
+			s.lastTurnTID = d.TurnID
 			if s.synthMID != "" && s.synthMID == d.MessageID {
 				s.synthTID = d.TurnID
 			}
