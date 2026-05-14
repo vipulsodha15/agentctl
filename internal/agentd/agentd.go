@@ -204,6 +204,9 @@ func Run(ctx context.Context, opts Options) error {
 	if err := manager.Rehydrate(ctx); err != nil {
 		logger.Warn("manager.rehydrate_failed", slog.String("error", err.Error()))
 	}
+	if err := taskMgr.Rehydrate(ctx); err != nil {
+		logger.Warn("task_manager.rehydrate_failed", slog.String("error", err.Error()))
+	}
 
 	logStream := &log.SessionLogStreamer{SessionsDir: opts.Layout.SessionsDir}
 

@@ -44,6 +44,9 @@ type StageRuntime interface {
 	// ready for messages. The returned sessionID is recorded on the stage row.
 	StartStage(ctx context.Context, in StartStageInput) (StartStageResult, error)
 	// SendUserMessage delivers a user message to the active stage's agent.
+	// Sends are routed by SessionID (which is the canonical identifier the
+	// session manager understands) rather than by an in-memory stage map, so
+	// they keep working across agentd restarts and idle-container sweeps.
 	SendUserMessage(ctx context.Context, in SendMessageInput) error
 	// Synthesize delivers the handoff auto-prompt and *synchronously* returns
 	// the agent's response, locking the assistant reply that corresponds to
@@ -51,6 +54,11 @@ type StageRuntime interface {
 	Synthesize(ctx context.Context, in SendMessageInput) (string, error)
 	// IsBusy reports whether a turn is currently in flight for this stage.
 	IsBusy(stageID string) bool
+	// EnsureAttached re-establishes the event-stream attachment + callbacks
+	// for a stage that already has a session (e.g. after an agentd restart).
+	// Idempotent: a no-op if the stage is already attached. Required before
+	// Synthesize/IsBusy can observe in-flight turns reliably.
+	EnsureAttached(ctx context.Context, in AttachInput) error
 	// StopStage tears down the stage's session.
 	StopStage(ctx context.Context, sessionID string) error
 }
@@ -86,6 +94,19 @@ type SendMessageInput struct {
 	StageID   string
 	SessionID string
 	Content   string
+}
+
+// AttachInput is what the manager hands the runtime to re-establish the
+// event-stream attachment for an already-running stage (callbacks, IDs).
+// It carries the same fields StartStage would set, minus the agent prompt
+// and seed-message bits which only matter on first spawn.
+type AttachInput struct {
+	TaskID             string
+	StageID            string
+	SessionID          string
+	OnAssistantMessage func(content string)
+	OnToolUse          func(tool string, input json.RawMessage)
+	OnError            func(message string)
 }
 
 // Hub matches a small subset of fan.Hub for broadcasting task events.
@@ -361,13 +382,23 @@ func (m *Manager) Handoff(ctx context.Context, taskID string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: no active stage", ErrPreconditionFailed)
 	}
-	if m.opts.Runtime.IsBusy(stage.ID) {
-		m.mu.Unlock()
-		return ErrStageBusy
-	}
 	stageCopy := *stage
 	taskCopy := *task
 	m.mu.Unlock()
+
+	// Make sure the runtime is attached to this stage's event stream — the
+	// stages map is a cache and may be empty (e.g. agentd restarted since
+	// the stage started). After this, IsBusy / Synthesize can rely on the
+	// runReader observing turn events.
+	if stageCopy.SessionID != "" {
+		if err := m.opts.Runtime.EnsureAttached(ctx, m.attachInputFor(stageCopy.ID, stageCopy.SessionID, taskCopy.ID)); err != nil {
+			m.recordMessage(ctx, taskCopy.ID, stageCopy.ID, stageCopy.AgentName, RoleError, "Synthesis attach failed: "+err.Error())
+			return err
+		}
+	}
+	if m.opts.Runtime.IsBusy(stageCopy.ID) {
+		return ErrStageBusy
+	}
 
 	isFinal := stageCopy.Position == len(taskCopy.Stages)
 
@@ -768,6 +799,60 @@ func (m *Manager) lockSynthesisAndAdvance(ctx context.Context, taskID, stageID, 
 			break
 		}
 	}
+}
+
+// attachInputFor builds the AttachInput the runtime needs to wire its event
+// stream's callbacks back into this Manager. It mirrors the closures created
+// by spawnStage so a rehydrated stage emits messages identically to a freshly
+// spawned one.
+func (m *Manager) attachInputFor(stageID, sessionID, taskID string) AttachInput {
+	return AttachInput{
+		TaskID:    taskID,
+		StageID:   stageID,
+		SessionID: sessionID,
+		OnAssistantMessage: func(content string) {
+			m.handleAssistantMessage(stageID, content)
+		},
+		OnError: func(message string) {
+			m.handleError(stageID, message)
+		},
+	}
+}
+
+// Rehydrate re-attaches the runtime to every stage that the DB says is
+// active and has a session id. Called from agentd at startup so events
+// from a still-running container (or one that auto-restarts on the next
+// Send) flow back into the chat thread without the user needing to send
+// a message first.
+func (m *Manager) Rehydrate(ctx context.Context) error {
+	rows, err := m.opts.Store.DB().QueryContext(ctx,
+		`SELECT stage_id, task_id, session_id FROM stages WHERE status='active' AND session_id IS NOT NULL AND session_id != ''`)
+	if err != nil {
+		return fmt.Errorf("tm: rehydrate query: %w", err)
+	}
+	defer rows.Close()
+	type row struct{ stageID, taskID, sessionID string }
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.stageID, &r.taskID, &r.sessionID); err != nil {
+			return fmt.Errorf("tm: rehydrate scan: %w", err)
+		}
+		pending = append(pending, r)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("tm: rehydrate rows: %w", err)
+	}
+	for _, r := range pending {
+		if err := m.opts.Runtime.EnsureAttached(ctx, m.attachInputFor(r.stageID, r.sessionID, r.taskID)); err != nil {
+			m.logger.Warn("tm.rehydrate_attach_failed",
+				slog.String("stage_id", r.stageID),
+				slog.String("session_id", r.sessionID),
+				slog.String("error", err.Error()))
+			continue
+		}
+	}
+	return nil
 }
 
 func (m *Manager) spawnStage(ctx context.Context, task *Task, stage *Stage, prevAgent, handoffIn string) error {

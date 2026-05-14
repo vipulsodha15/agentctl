@@ -448,3 +448,70 @@ func TestSessionRuntime_StopStage_TerminatesAndStopsReader(t *testing.T) {
 		t.Errorf("stage must be removed from the map after StopStage")
 	}
 }
+
+// TestSessionRuntime_Send_RoutesBySessionID_WithoutMapEntry guards the
+// post-idle-sweep / post-agentd-restart path: SendUserMessage must route
+// straight to sm.Send by SessionID without requiring the stages map to be
+// populated. Regression test for the "container not restarted, message
+// lost" bug.
+func TestSessionRuntime_Send_RoutesBySessionID_WithoutMapEntry(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	if err := r.SendUserMessage(context.Background(), SendMessageInput{
+		TaskID: "t1", StageID: "s1", SessionID: "sess-restored", Content: "hello",
+	}); err != nil {
+		t.Fatalf("SendUserMessage: %v", err)
+	}
+	sent := api.lastSent()
+	if sent.SessionID != "sess-restored" {
+		t.Errorf("send must target the SessionID from the input; got %q", sent.SessionID)
+	}
+	if sent.Content != "hello" {
+		t.Errorf("content not forwarded: %q", sent.Content)
+	}
+}
+
+func TestSessionRuntime_Send_RejectsEmptySessionID(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	err := r.SendUserMessage(context.Background(), SendMessageInput{
+		TaskID: "t1", StageID: "s1", SessionID: "", Content: "hi",
+	})
+	if err == nil {
+		t.Fatal("must error when SessionID is empty")
+	}
+}
+
+func TestSessionRuntime_EnsureAttached_IdempotentAndStartsReader(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+
+	var gotMu sync.Mutex
+	var got []string
+	cb := func(c string) {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		got = append(got, c)
+	}
+	in := AttachInput{TaskID: "t1", StageID: "s1", SessionID: "sess-rehydrated", OnAssistantMessage: cb}
+	if err := r.EnsureAttached(context.Background(), in); err != nil {
+		t.Fatalf("EnsureAttached: %v", err)
+	}
+	// Second call is a no-op (no second Attach on the fake).
+	if err := r.EnsureAttached(context.Background(), in); err != nil {
+		t.Fatalf("EnsureAttached (second): %v", err)
+	}
+	api.mu.Lock()
+	attaches := len(api.streams)
+	api.mu.Unlock()
+	if attaches != 1 {
+		t.Errorf("EnsureAttached must be idempotent; saw %d Attach calls", attaches)
+	}
+	// Reader must be running: event pushed to the stream surfaces via the callback.
+	api.stream("sess-rehydrated").push(proto.EventAssistantMessage, proto.AssistantMessageData{TurnID: "T1", Content: "post-rehydrate reply"})
+	waitFor(t, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) == 1 && got[0] == "post-rehydrate reply"
+	}, "rehydrated reader must fan events to callback")
+}
