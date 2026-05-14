@@ -258,8 +258,10 @@ button.danger:hover:not(:disabled) {
   border-color: #f0d4d4;
   color: var(--c-err-fg);
 }
-button.danger:focus-visible {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-err) 22%, transparent);
+.modal button:focus-visible {
+  box-shadow: none;
+  outline: 2px solid var(--c-fg);
+  outline-offset: -3px;
 }
 
 button.ghost {
