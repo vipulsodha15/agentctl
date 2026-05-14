@@ -941,7 +941,6 @@ input[type="checkbox"] {
 .msg .content {
   font-size: var(--text-md);
   color: var(--c-fg);
-  white-space: pre-wrap;
   word-wrap: break-word;
   line-height: 1.65;
 }
@@ -3940,7 +3939,6 @@ button.danger:hover { background: #b22f2f; }
   padding: 24px;
   max-width: 420px;
   width: 90%;
-  box-shadow: 0 24px 60px rgba(17, 20, 24, 0.2);
 }
 .modal h3 {
   margin-top: 0;
