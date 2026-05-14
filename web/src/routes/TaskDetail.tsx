@@ -15,6 +15,7 @@ import type {
   SnapshotData,
   Task,
   TaskDetailResponse,
+  TaskMessage,
   TaskStage,
   TaskStatus,
 } from "../types";
@@ -36,6 +37,14 @@ export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [task, setTask] = useState<Task | null>(null);
+  // task_messages is the authoritative chat log written on every send /
+  // handoff / synthesis / error. Used as the fallback transcript when the
+  // active stage's session WS snapshot is empty — either because the shim
+  // hasn't flushed its SDK JSONL records yet (in-flight turn, freshly
+  // spawned stage) or because the stage's container pre-dates the JSONL
+  // mirror fix. As soon as convState has rich session content (tool calls,
+  // streaming, cost chips), it wins.
+  const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
@@ -72,6 +81,7 @@ export function TaskDetail() {
     try {
       const r = await apiJson<TaskDetailResponse>(`/v1/tasks/${id}`);
       setTask(r.task);
+      setTaskMessages(r.messages ?? []);
       setError(null);
     } catch (err) {
       setError(
@@ -127,6 +137,18 @@ export function TaskDetail() {
           event.kind === "task.stage_advanced"
         ) {
           load();
+        } else if (event.kind === "task.message") {
+          // Append newly recorded task_messages so the fallback transcript
+          // stays in sync without a full refetch.
+          const msg = event.data as TaskMessage | undefined;
+          if (msg && typeof msg.seq === "number") {
+            setTaskMessages((prev) => {
+              if (prev.some((m) => m.seq === msg.seq)) return prev;
+              const next = [...prev, msg];
+              next.sort((a, b) => a.seq - b.seq);
+              return next;
+            });
+          }
         }
       };
       ws.onerror = () => {
@@ -358,7 +380,11 @@ export function TaskDetail() {
         {activeStage && activeSessionID && (
           <div className="task-active-thread">
             <ConversationView
-              messages={convState.messages}
+              messages={
+                convState.messages.length > 0
+                  ? convState.messages
+                  : taskMessagesAsConversation(taskMessages, activeStage.stage_id)
+              }
               warnings={convState.warnings}
               inFlight={convState.inFlight}
               mcps={convState.mcps}
@@ -839,6 +865,43 @@ function safeJson<T = unknown>(s: string): T | null {
   } catch {
     return null;
   }
+}
+
+// taskMessagesAsConversation maps the flat task_messages log into the same
+// ConversationMessage shape the session WS produces, so ConversationView can
+// render either source. Used as the fallback transcript whenever the active
+// stage's session WS snapshot is empty — e.g. a fresh stage before the
+// shim's first end-of-turn flush, a refresh mid-turn, or a stage whose
+// container pre-dates the JSONL mirror fix.
+function taskMessagesAsConversation(
+  msgs: TaskMessage[],
+  activeStageID: string,
+): ConversationMessage[] {
+  const out: ConversationMessage[] = [];
+  for (const m of msgs) {
+    // Only carry the active stage's history into the live thread; prior
+    // stages render via PriorStageCard. Cross-stage system rows (seam,
+    // task-opened seed) have no stage_id and are fine to drop here.
+    if (m.stage_id && m.stage_id !== activeStageID) continue;
+    const id = `tm-${m.seq}`;
+    switch (m.role) {
+      case "user":
+        out.push({ id, kind: "user", text: m.content });
+        break;
+      case "assistant":
+      case "synthesis":
+        out.push({ id, kind: "assistant", text: m.content });
+        break;
+      case "error":
+        out.push({ id, kind: "notice", text: m.content, notice_level: "error" });
+        break;
+      case "system":
+      case "seam":
+        out.push({ id, kind: "notice", text: m.content, notice_level: "info" });
+        break;
+    }
+  }
+  return out;
 }
 
 function BackArrow() {
