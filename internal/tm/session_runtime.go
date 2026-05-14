@@ -88,13 +88,11 @@ func NewSessionRuntime(api SessionAPI, logger *slog.Logger) *SessionRuntime {
 func (r *SessionRuntime) HasCredential() bool { return true }
 
 func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (StartStageResult, error) {
-	system := buildStageSystemPrompt(in)
 	res, err := r.sm.Create(ctx, sm.CreateRequest{
-		Name:         fmt.Sprintf("task-%s-stage-%d", in.TaskID, in.Position),
-		MCPs:         in.Agent.MCPsAllowed,
-		Model:        in.Agent.Model,
-		Repos:        nil,
-		SystemPrompt: system,
+		Name:  fmt.Sprintf("task-%s-stage-%d", in.TaskID, in.Position),
+		MCPs:  in.Agent.MCPsAllowed,
+		Model: in.Agent.Model,
+		Repos: nil,
 	})
 	if err != nil {
 		return StartStageResult{}, fmt.Errorf("session runtime: create: %w", err)
@@ -348,11 +346,18 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 	}
 }
 
-// buildStageSystemPrompt composes what the in-container SDK sees as
-// `system_prompt` (forwarded via the agentd.greet payload). The agent's own
-// prompt comes first; the multi-stage framing is appended so the agent
-// knows its position in the workflow.
-func buildStageSystemPrompt(in StartStageInput) string {
+// buildStageSeedMessage composes the first user message in the new stage's
+// session. It carries everything the agent needs to take on its role: the
+// agent's own prompt, the multi-stage workflow framing, and either the
+// original task brief (stage 1) or the prior stage's synthesis (stage N>1).
+//
+// We deliberately do NOT set sm.CreateRequest.SystemPrompt: passing a custom
+// string to ClaudeAgentOptions(system_prompt=…) switches the SDK out of its
+// Claude Code preset, which is the only mode that writes the JSONL
+// transcript the shim mirrors into SQLite. Without that mirror, refresh
+// loses history. So the agent role lives in the seed message instead and
+// the SDK stays in Claude Code mode.
+func buildStageSeedMessage(in StartStageInput) string {
 	var b strings.Builder
 	b.WriteString(in.Agent.Prompt)
 	b.WriteString("\n\n---\nYou are part of a multi-stage workflow.")
@@ -364,15 +369,8 @@ func buildStageSystemPrompt(in StartStageInput) string {
 	} else {
 		b.WriteString("\nYou are the final stage.")
 	}
-	return b.String()
-}
+	b.WriteString("\n\n---\n\n")
 
-// buildStageSeedMessage composes the first user message in the new stage's
-// session — either the original task brief (stage 1) or the prior stage's
-// synthesis (stage N>1). The seed message goes through the chat thread so
-// the user can see what the agent was handed.
-func buildStageSeedMessage(in StartStageInput) string {
-	var b strings.Builder
 	if in.HandoffInMD == "" {
 		b.WriteString("# Task\n\n")
 		b.WriteString(in.IssueMD)
