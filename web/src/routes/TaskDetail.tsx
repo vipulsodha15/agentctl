@@ -15,7 +15,6 @@ import type {
   SnapshotData,
   Task,
   TaskDetailResponse,
-  TaskMessage,
   TaskStage,
   TaskStatus,
 } from "../types";
@@ -36,12 +35,6 @@ type WSStatus = "connecting" | "live" | "reconnecting" | "offline";
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const [task, setTask] = useState<Task | null>(null);
-  // task_messages — the authoritative chat log written on every send /
-  // handoff / synthesis / error. We display these whenever the session WS
-  // hasn't produced its own (richer) conversation yet, so a refresh during
-  // an in-flight turn — or on a freshly-spawned stage whose shim has not
-  // yet flushed SDK JSONL records — still shows the user's history.
-  const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
@@ -78,7 +71,6 @@ export function TaskDetail() {
     try {
       const r = await apiJson<TaskDetailResponse>(`/v1/tasks/${id}`);
       setTask(r.task);
-      setTaskMessages(r.messages ?? []);
       setError(null);
     } catch (err) {
       setError(
@@ -134,18 +126,6 @@ export function TaskDetail() {
           event.kind === "task.stage_advanced"
         ) {
           load();
-        } else if (event.kind === "task.message") {
-          // Append newly recorded task_messages so the chat history stays
-          // up to date even before the session WS mirrors anything.
-          const msg = event.data as TaskMessage | undefined;
-          if (msg && typeof msg.seq === "number") {
-            setTaskMessages((prev) => {
-              if (prev.some((m) => m.seq === msg.seq)) return prev;
-              const next = [...prev, msg];
-              next.sort((a, b) => a.seq - b.seq);
-              return next;
-            });
-          }
         }
       };
       ws.onerror = () => {
@@ -377,11 +357,7 @@ export function TaskDetail() {
         {activeStage && activeSessionID && (
           <div className="task-active-thread">
             <ConversationView
-              messages={
-                convState.messages.length > 0
-                  ? convState.messages
-                  : taskMessagesAsConversation(taskMessages, activeStage.stage_id)
-              }
+              messages={convState.messages}
               warnings={convState.warnings}
               inFlight={convState.inFlight}
               mcps={convState.mcps}
@@ -862,42 +838,6 @@ function safeJson<T = unknown>(s: string): T | null {
   } catch {
     return null;
   }
-}
-
-// taskMessagesAsConversation maps the flat task_messages log into the same
-// ConversationMessage shape the session WS produces, so ConversationView can
-// render either source. Used as the fallback transcript whenever the active
-// stage's session WS hasn't yet delivered SDK records — e.g. a fresh stage
-// before the shim's first end-of-turn flush, or a refresh mid-turn.
-function taskMessagesAsConversation(
-  msgs: TaskMessage[],
-  activeStageID: string,
-): ConversationMessage[] {
-  const out: ConversationMessage[] = [];
-  for (const m of msgs) {
-    // Only carry the active stage's history into the live thread; prior
-    // stages render via PriorStageCard. Cross-stage system rows (seam,
-    // task-opened seed) have no stage_id and are fine to drop here.
-    if (m.stage_id && m.stage_id !== activeStageID) continue;
-    const id = `tm-${m.seq}`;
-    switch (m.role) {
-      case "user":
-        out.push({ id, kind: "user", text: m.content });
-        break;
-      case "assistant":
-      case "synthesis":
-        out.push({ id, kind: "assistant", text: m.content });
-        break;
-      case "error":
-        out.push({ id, kind: "notice", text: m.content, notice_level: "error" });
-        break;
-      case "system":
-      case "seam":
-        out.push({ id, kind: "notice", text: m.content, notice_level: "info" });
-        break;
-    }
-  }
-  return out;
 }
 
 function BackArrow() {

@@ -166,7 +166,11 @@ func waitFor(t *testing.T, fn func() bool, msg string) {
 	t.Fatalf("timeout: %s", msg)
 }
 
-func TestSessionRuntime_StartStage_SystemPromptCarriesAgentAndFraming(t *testing.T) {
+func TestSessionRuntime_StartStage_SeedCarriesAgentAndFraming(t *testing.T) {
+	// Stage role + workflow framing must travel in the SEED user message,
+	// not via SystemPrompt — passing a custom system_prompt to the SDK
+	// switches it out of Claude Code preset mode and breaks the JSONL
+	// mirror that backs refresh history.
 	api := newFakeSessionAPI()
 	r := NewSessionRuntime(api, nil)
 	_, err := r.StartStage(context.Background(), StartStageInput{
@@ -181,14 +185,18 @@ func TestSessionRuntime_StartStage_SystemPromptCarriesAgentAndFraming(t *testing
 		t.Fatalf("StartStage: %v", err)
 	}
 	req := api.lastCreate()
-	if !strings.HasPrefix(req.SystemPrompt, "You are a bug investigator.") {
-		t.Errorf("SystemPrompt must start with agent.Prompt; got %q", req.SystemPrompt)
+	if req.SystemPrompt != "" {
+		t.Errorf("SystemPrompt must be empty so the SDK keeps Claude Code preset; got %q", req.SystemPrompt)
 	}
-	if !strings.Contains(req.SystemPrompt, "The next agent will be fixer.") {
-		t.Errorf("SystemPrompt missing next-agent framing; got %q", req.SystemPrompt)
+	seed := api.lastSent().Content
+	if !strings.HasPrefix(seed, "You are a bug investigator.") {
+		t.Errorf("seed must start with agent.Prompt; got %q", seed)
 	}
-	if strings.Contains(req.SystemPrompt, "previous agent") {
-		t.Errorf("stage 1 must not advertise a previous agent; got %q", req.SystemPrompt)
+	if !strings.Contains(seed, "The next agent will be fixer.") {
+		t.Errorf("seed missing next-agent framing; got %q", seed)
+	}
+	if strings.Contains(seed, "previous agent") {
+		t.Errorf("stage 1 must not advertise a previous agent; got %q", seed)
 	}
 	if req.Model != "claude-sonnet-4-6" {
 		t.Errorf("Model not forwarded: %q", req.Model)
@@ -216,14 +224,16 @@ func TestSessionRuntime_StartStage_FinalStageFramingAndSeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartStage: %v", err)
 	}
-	sys := api.lastCreate().SystemPrompt
-	if !strings.Contains(sys, "previous agent was bug-investigator") {
-		t.Errorf("missing prev-agent framing: %q", sys)
-	}
-	if !strings.Contains(sys, "You are the final stage.") {
-		t.Errorf("missing final-stage framing: %q", sys)
+	if sys := api.lastCreate().SystemPrompt; sys != "" {
+		t.Errorf("SystemPrompt must be empty so the SDK keeps Claude Code preset; got %q", sys)
 	}
 	seed := api.lastSent().Content
+	if !strings.Contains(seed, "previous agent was bug-investigator") {
+		t.Errorf("seed missing prev-agent framing: %q", seed)
+	}
+	if !strings.Contains(seed, "You are the final stage.") {
+		t.Errorf("seed missing final-stage framing: %q", seed)
+	}
 	if !strings.Contains(seed, "# Handoff from bug-investigator") {
 		t.Errorf("seed must surface the prior stage's handoff; got %q", seed)
 	}
