@@ -258,6 +258,9 @@ button.danger:hover:not(:disabled) {
   border-color: #f0d4d4;
   color: var(--c-err-fg);
 }
+button.danger:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-err) 22%, transparent);
+}
 
 button.ghost {
   background: transparent;
