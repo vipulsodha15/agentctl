@@ -3953,6 +3953,21 @@ button.danger:hover { background: #b22f2f; }
 }
 .modal p { font-size: var(--text-sm); line-height: 1.55; }
 
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  max-height: min(86vh, 820px);
+  overflow-y: auto;
+  padding: 22px 24px;
+}
+.modal-form-sm { max-width: 420px; }
+.modal-form-md { max-width: 560px; }
+.modal-form-lg { max-width: 760px; }
+.modal-form .form-grid {
+  max-width: none;
+  margin-top: 12px;
+}
+
 .task-error-banner {
   position: fixed;
   bottom: 24px;
