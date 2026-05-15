@@ -37,13 +37,14 @@ export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [task, setTask] = useState<Task | null>(null);
-  // task_messages is the authoritative chat log written on every send /
-  // handoff / synthesis / error. Used as the fallback transcript when the
-  // active stage's session WS snapshot is empty — either because the shim
-  // hasn't flushed its SDK JSONL records yet (in-flight turn, freshly
-  // spawned stage) or because the stage's container pre-dates the JSONL
-  // mirror fix. As soon as convState has rich session content (tool calls,
-  // streaming, cost chips), it wins.
+  // task_messages is the durable text-only chat log written on every send /
+  // handoff / synthesis / error. Used as the text backbone whenever the
+  // active stage's session WS snapshot has no text bubbles yet — either
+  // because the shim hasn't flushed its SDK JSONL records (mid-turn,
+  // freshly spawned stage) or because the container pre-dates the JSONL
+  // mirror fix. Tool/thinking/notice rows from convState are appended on
+  // top so live tool widgets render even before the JSONL flush. As soon
+  // as convState carries actual text bubbles, it wins outright.
   const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
@@ -380,11 +381,11 @@ export function TaskDetail() {
         {activeStage && activeSessionID && (
           <div className="task-active-thread">
             <ConversationView
-              messages={
-                convState.messages.length > 0
-                  ? convState.messages
-                  : taskMessagesAsConversation(taskMessages, activeStage.stage_id)
-              }
+              messages={mergeTranscript(
+                convState.messages,
+                taskMessages,
+                activeStage.stage_id,
+              )}
               warnings={convState.warnings}
               inFlight={convState.inFlight}
               mcps={convState.mcps}
@@ -867,12 +868,44 @@ function safeJson<T = unknown>(s: string): T | null {
   }
 }
 
+// mergeTranscript chooses what to feed ConversationView for the active stage.
+//
+// convState is the rich stream from the session WS — text bubbles, tool
+// widgets, thinking blocks, MCP/skill notices, cost chips. It's authoritative
+// once the SDK's JSONL has been flushed (end-of-turn) and the snapshot lands.
+//
+// task_messages is the durable text-only chat log written eagerly on every
+// send / handoff / synthesis / error. It covers two holes the JSONL doesn't:
+//   1. Stages whose container pre-dates the JSONL mirror — no JSONL exists.
+//   2. Mid-turn refresh on a fresh stage — JSONL hasn't been flushed yet.
+// It has no tool/thinking rows because task_messages doesn't persist those.
+//
+// Strategy: if convState carries any text bubbles, trust it as the canonical
+// transcript (the snapshot landed). Otherwise render the task_messages
+// fallback for text history AND append any rich rows convState has accrued
+// from live events (tool calls, thinking, MCP notices) so the user still
+// sees tools, skills, and thinking as collapsed widgets even while the
+// JSONL snapshot is empty.
+function mergeTranscript(
+  convMessages: ConversationMessage[],
+  taskMessages: TaskMessage[],
+  activeStageID: string,
+): ConversationMessage[] {
+  const convHasText = convMessages.some(
+    (m) => m.kind === "user" || m.kind === "assistant",
+  );
+  if (convHasText) return convMessages;
+  const fallback = taskMessagesAsConversation(taskMessages, activeStageID);
+  const richExtras = convMessages.filter(
+    (m) => m.kind === "tool" || m.kind === "thinking" || m.kind === "notice",
+  );
+  return fallback.length === 0 && richExtras.length === 0
+    ? convMessages
+    : [...fallback, ...richExtras];
+}
+
 // taskMessagesAsConversation maps the flat task_messages log into the same
-// ConversationMessage shape the session WS produces, so ConversationView can
-// render either source. Used as the fallback transcript whenever the active
-// stage's session WS snapshot is empty — e.g. a fresh stage before the
-// shim's first end-of-turn flush, a refresh mid-turn, or a stage whose
-// container pre-dates the JSONL mirror fix.
+// ConversationMessage shape the session WS produces.
 function taskMessagesAsConversation(
   msgs: TaskMessage[],
   activeStageID: string,
