@@ -500,6 +500,123 @@ func TestMCPsUnavailableWithoutRegistry(t *testing.T) {
 	}
 }
 
+type stubSecrets struct {
+	info       GitHubTokenInfo
+	updated    string
+	updatedVal bool
+	updateErr  error
+}
+
+func (s *stubSecrets) GetGitHub(_ context.Context) (GitHubTokenInfo, error) {
+	return s.info, nil
+}
+
+func (s *stubSecrets) UpdateGitHub(_ context.Context, token string, validate bool) (GitHubTokenInfo, error) {
+	if s.updateErr != nil {
+		return GitHubTokenInfo{}, s.updateErr
+	}
+	s.updated = token
+	s.updatedVal = validate
+	s.info = GitHubTokenInfo{HasToken: true, Kind: "classic", Hint: token[len(token)-4:]}
+	return s.info, nil
+}
+
+func startServerWithSecrets(t *testing.T, token string, sec SecretsService) *Server {
+	t.Helper()
+	apiSrv := api.New(api.Options{Docker: stubDocker{}})
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	s := New(Options{Addr: addr, Token: token, API: apiSrv, Manager: &stubManager{}, Secrets: sec, Logger: logger})
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestGitHubTokenGetReportsPresence(t *testing.T) {
+	sec := &stubSecrets{info: GitHubTokenInfo{HasToken: true, Kind: "fine-grained", Hint: "abcd"}}
+	s := startServerWithSecrets(t, "tok", sec)
+	req, _ := http.NewRequest("GET", "http://"+s.Addr()+"/v1/secrets/github", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body GitHubTokenInfo
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.HasToken || body.Kind != "fine-grained" || body.Hint != "abcd" {
+		t.Errorf("unexpected body: %+v", body)
+	}
+}
+
+func TestGitHubTokenUpdate(t *testing.T) {
+	sec := &stubSecrets{}
+	s := startServerWithSecrets(t, "tok", sec)
+	req, _ := http.NewRequest("PUT",
+		"http://"+s.Addr()+"/v1/secrets/github",
+		strings.NewReader(`{"token":"ghp_abcdefghij","skip_validate":true}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Origin", "http://"+s.Addr())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if sec.updated != "ghp_abcdefghij" {
+		t.Errorf("token not stored, got %q", sec.updated)
+	}
+	if sec.updatedVal {
+		t.Errorf("expected validate=false when skip_validate=true")
+	}
+}
+
+func TestGitHubTokenUpdateRejectsEmpty(t *testing.T) {
+	sec := &stubSecrets{}
+	s := startServerWithSecrets(t, "tok", sec)
+	req, _ := http.NewRequest("PUT",
+		"http://"+s.Addr()+"/v1/secrets/github",
+		strings.NewReader(`{"token":""}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Origin", "http://"+s.Addr())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty token, got %d", resp.StatusCode)
+	}
+}
+
+func TestGitHubTokenUnavailableWithoutService(t *testing.T) {
+	s := startServer(t, "tok", &stubManager{})
+	req, _ := http.NewRequest("GET", "http://"+s.Addr()+"/v1/secrets/github", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
 func TestSendMessageViaWeb(t *testing.T) {
 	mgr := &stubManager{}
 	s := startServer(t, "tok", mgr)

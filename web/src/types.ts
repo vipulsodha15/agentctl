@@ -101,6 +101,19 @@ export interface UpdateMcpRequest {
   description?: string;
 }
 
+// GitHub token settings — the daemon only ever reports presence and a short
+// hint, never the raw token.
+export interface GitHubTokenInfo {
+  has_token: boolean;
+  kind?: string;
+  hint?: string;
+}
+
+export interface UpdateGitHubTokenRequest {
+  token: string;
+  skip_validate?: boolean;
+}
+
 // Skills manifest shape (R9)
 export interface SkillEntry {
   name: string;

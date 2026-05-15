@@ -1,13 +1,17 @@
 package secrets
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const (
@@ -118,4 +122,40 @@ func ReadWebToken(path string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// InferGitHubPATKind classifies a GitHub PAT by its well-known prefix.
+func InferGitHubPATKind(pat string) string {
+	switch {
+	case strings.HasPrefix(pat, "github_pat_"):
+		return "fine-grained"
+	case strings.HasPrefix(pat, "ghp_"), strings.HasPrefix(pat, "gho_"), strings.HasPrefix(pat, "ghs_"):
+		return "classic"
+	default:
+		return "unknown"
+	}
+}
+
+// ValidateGitHubPAT calls GET /user against the GitHub API to confirm the
+// token is accepted. Returns nil on success, a descriptive error otherwise.
+func ValidateGitHubPAT(ctx context.Context, pat string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+pat)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("github api: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == 401 {
+		return fmt.Errorf("github PAT rejected (401)")
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("github api status %d", resp.StatusCode)
+	}
+	return nil
 }

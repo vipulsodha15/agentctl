@@ -84,3 +84,17 @@ type UsageService interface {
 type TaskHub interface {
 	Subscribe(channel string) (fan.Stream, func(), error)
 }
+
+// GitHubTokenInfo describes the stored GitHub PAT without revealing it.
+type GitHubTokenInfo struct {
+	HasToken bool   `json:"has_token"`
+	Kind     string `json:"kind,omitempty"`
+	Hint     string `json:"hint,omitempty"`
+}
+
+// SecretsService manages user-editable secrets surfaced through the web UI.
+// Today only the GitHub PAT is exposed; the API may grow later.
+type SecretsService interface {
+	GetGitHub(ctx context.Context) (GitHubTokenInfo, error)
+	UpdateGitHub(ctx context.Context, token string, validate bool) (GitHubTokenInfo, error)
+}
