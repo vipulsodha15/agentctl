@@ -309,6 +309,55 @@ def _extract_session_id(message: Any) -> Optional[str]:
     return None
 
 
+def _tool_use_event(block: Any, turn_id: str) -> list[tuple[str, dict]]:
+    """Build a tool.call event if ``block`` is a tool_use content block.
+
+    Handles both the SDK's typed object form (``ToolUseBlock``) and the raw
+    dict form the JSONL records use, so callers can pass anything inside an
+    ``AssistantMessage.content`` array without pre-checking.
+    """
+    if isinstance(block, dict):
+        if block.get("type") != "tool_use":
+            return []
+        return [(EVENT_TOOL_CALL, {
+            "turn_id": turn_id,
+            "tool_use_id": str(block.get("id") or block.get("tool_use_id") or ""),
+            "name": str(block.get("name") or ""),
+            "input": _to_jsonable(block.get("input", {})),
+        })]
+    bcls = type(block).__name__
+    if bcls not in ("ToolUseBlock", "ToolUse", "ToolCall"):
+        return []
+    return [(EVENT_TOOL_CALL, {
+        "turn_id": turn_id,
+        "tool_use_id": getattr(block, "id", None) or getattr(block, "tool_use_id", "") or "",
+        "name": getattr(block, "name", "") or "",
+        "input": _to_jsonable(getattr(block, "input", {})),
+    })]
+
+
+def _tool_result_event(block: Any, turn_id: str) -> list[tuple[str, dict]]:
+    """Build a tool.result event if ``block`` is a tool_result content block."""
+    if isinstance(block, dict):
+        if block.get("type") != "tool_result":
+            return []
+        return [(EVENT_TOOL_RESULT, {
+            "turn_id": turn_id,
+            "tool_use_id": str(block.get("tool_use_id") or ""),
+            "content": _to_jsonable(block.get("content", "")),
+            "is_error": bool(block.get("is_error", False)),
+        })]
+    bcls = type(block).__name__
+    if bcls not in ("ToolResultBlock", "ToolResult"):
+        return []
+    return [(EVENT_TOOL_RESULT, {
+        "turn_id": turn_id,
+        "tool_use_id": getattr(block, "tool_use_id", "") or "",
+        "content": _to_jsonable(getattr(block, "content", "")),
+        "is_error": bool(getattr(block, "is_error", False)),
+    })]
+
+
 def translate_message(message: Any, *, turn_id: str) -> list[tuple[str, dict]]:
     """Map a single SDK message into ``runtime.event`` payload tuples.
 
@@ -338,6 +387,11 @@ def translate_message(message: Any, *, turn_id: str) -> list[tuple[str, dict]]:
         out.append((EVENT_ASSISTANT_DELTA, {"turn_id": turn_id, "delta": text}))
         return out
     if cls in ("AssistantMessage", "AssistantFinal"):
+        # Claude SDK packs tool calls as ToolUseBlock items inside the
+        # AssistantMessage's content array — they don't arrive as top-level
+        # messages. We walk the content blocks so the web sees tool.call
+        # events live during the turn, instead of having to wait for the
+        # end-of-turn JSONL flush + a fresh snapshot on next attach.
         text = getattr(message, "text", None)
         if text is None:
             text = _coerce_assistant_text(getattr(message, "content", None))
@@ -348,9 +402,22 @@ def translate_message(message: Any, *, turn_id: str) -> list[tuple[str, dict]]:
         # rounded boxes next to the agent's real reply.
         if text:
             out.append((EVENT_ASSISTANT_MESSAGE, {"turn_id": turn_id, "content": text}))
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                out.extend(_tool_use_event(block, turn_id))
         usage = getattr(message, "usage", None)
         if usage is not None:
             out.append((EVENT_USAGE, {"turn_id": turn_id, "model": getattr(message, "model", ""), **_usage_dict(usage)}))
+        return out
+    if cls in ("UserMessage", "UserFinal"):
+        # Tool results round-trip as ToolResultBlock items inside a
+        # follow-up UserMessage.content array. Surface them as tool.result
+        # events so the web fills the pending tool widget's output panel.
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                out.extend(_tool_result_event(block, turn_id))
         return out
     if cls in ("ToolUseBlock", "ToolCall", "ToolUse"):
         out.append((EVENT_TOOL_CALL, {
