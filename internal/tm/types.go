@@ -74,10 +74,13 @@ type Message struct {
 	Content   string    `json:"content"`
 }
 
-// CreateTaskRequest is the input to NewTask.
+// CreateTaskRequest is the input to NewTask. Either WorkflowName or
+// AgentName may be set (not both): WorkflowName runs the named multi-stage
+// workflow, AgentName runs a single-stage task with just that agent.
 type CreateTaskRequest struct {
 	Name         string `json:"name,omitempty"`
 	WorkflowName string `json:"workflow_name,omitempty"`
+	AgentName    string `json:"agent_name,omitempty"`
 	RepoURL      string `json:"repo_url,omitempty"`
 	SourceKind   string `json:"source_kind,omitempty"`
 	SourceURL    string `json:"source_url,omitempty"`

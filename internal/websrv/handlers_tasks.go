@@ -20,6 +20,7 @@ type TaskService interface {
 	TaskMessages(ctx context.Context, id string) ([]tm.Message, error)
 	CreateTask(ctx context.Context, req tm.CreateTaskRequest) (*tm.Task, error)
 	AttachWorkflow(ctx context.Context, id, workflow string) (*tm.Task, error)
+	Attach(ctx context.Context, id, workflow, agent string) (*tm.Task, error)
 	Send(ctx context.Context, req tm.SendMessageRequest) error
 	Handoff(ctx context.Context, id string) error
 	Complete(ctx context.Context, id string) error
@@ -280,12 +281,13 @@ func (s *Server) handleAttachWorkflow(w http.ResponseWriter, r *http.Request, id
 	}
 	var req struct {
 		Workflow string `json:"workflow"`
+		Agent    string `json:"agent"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
 		return
 	}
-	task, err := s.tasks.AttachWorkflow(r.Context(), id, req.Workflow)
+	task, err := s.tasks.Attach(r.Context(), id, req.Workflow, req.Agent)
 	if err != nil {
 		mapTaskError(w, err)
 		return
