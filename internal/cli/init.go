@@ -312,7 +312,7 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 
 	if f.githubPAT != "" {
 		if !skipGitHub {
-			if err := secrets.ValidateGitHubPAT(context.Background(),f.githubPAT); err != nil {
+			if err := secrets.ValidateGitHubPAT(context.Background(), f.githubPAT); err != nil {
 				return secrets.Secrets{}, err
 			}
 		}
@@ -329,7 +329,7 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 			return secrets.Secrets{}, fmt.Errorf("GITHUB_PAT required (use --github-pat)")
 		}
 		if !skipGitHub {
-			if err := secrets.ValidateGitHubPAT(context.Background(),v); err != nil {
+			if err := secrets.ValidateGitHubPAT(context.Background(), v); err != nil {
 				return secrets.Secrets{}, err
 			}
 		}
@@ -733,4 +733,3 @@ func validateAnthropic(key string) error {
 	}
 	return nil
 }
-

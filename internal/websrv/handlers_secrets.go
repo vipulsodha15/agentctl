@@ -30,8 +30,8 @@ func (s *Server) handleGetGitHubToken(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateGitHubTokenRequest struct {
-	Token       string `json:"token"`
-	SkipValidate bool  `json:"skip_validate,omitempty"`
+	Token        string `json:"token"`
+	SkipValidate bool   `json:"skip_validate,omitempty"`
 }
 
 func (s *Server) handleUpdateGitHubToken(w http.ResponseWriter, r *http.Request) {
