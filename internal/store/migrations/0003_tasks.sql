@@ -1,10 +1,10 @@
--- Tasks and stages — workflows-task-management-architecture.md §4.1.
--- A task is a workflow + issue + repo; a stage is one agent's run within
+-- Tasks and stages — assembly-lines-task-management-architecture.md §4.1.
+-- A task is an assembly line + issue + repo; a stage is one agent's run within
 -- the task, backed by exactly one session.
 CREATE TABLE tasks (
     task_id           TEXT PRIMARY KEY,
     name              TEXT NOT NULL,
-    workflow_name     TEXT,                              -- NULL while not-started
+    assembly_line_name TEXT,                             -- NULL while not-started
     repo_url          TEXT,
     base_sha          TEXT,
     source_kind       TEXT NOT NULL

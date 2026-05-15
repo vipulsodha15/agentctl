@@ -427,7 +427,7 @@ export function TaskDetail() {
             : "Task abandoned. The thread is read-only."}
         </div>
       ) : !activeStage ? (
-        <NoWorkflowComposer taskId={task.task_id} onAttached={load} />
+        <NoAssemblyLineComposer taskId={task.task_id} onAttached={load} />
       ) : (
         <div className="composer">
           <div className="composer-input-wrap">
@@ -548,7 +548,7 @@ function StageStrip({
   if (stages.length === 0) return null;
   const activeIdx = stages.findIndex((s) => s.status === "active");
   return (
-    <div className="stage-strip" role="list" aria-label="Workflow stages">
+    <div className="stage-strip" role="list" aria-label="Assembly line stages">
       {stages.map((s, idx) => {
         const isDone = s.status === "done" || taskStatus === "done";
         const isActive = s.status === "active";
@@ -797,22 +797,22 @@ function InlineNotice({
   );
 }
 
-function NoWorkflowComposer({
+function NoAssemblyLineComposer({
   taskId,
   onAttached,
 }: {
   taskId: string;
   onAttached: () => void;
 }) {
-  const [workflows, setWorkflows] = useState<string[] | null>(null);
+  const [assemblyLines, setAssemblyLines] = useState<string[] | null>(null);
   const [agents, setAgents] = useState<string[] | null>(null);
-  const [mode, setMode] = useState<"workflow" | "agent">("workflow");
+  const [mode, setMode] = useState<"assembly-line" | "agent">("assembly-line");
   const [picking, setPicking] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [attaching, setAttaching] = useState(false);
   useEffect(() => {
-    apiJson<{ workflows: { name: string }[] }>("/v1/workflows")
-      .then((r) => setWorkflows((r.workflows ?? []).map((w) => w.name)))
+    apiJson<{ assembly_lines: { name: string }[] }>("/v1/assembly-lines")
+      .then((r) => setAssemblyLines((r.assembly_lines ?? []).map((w) => w.name)))
       .catch((e) => setErr(String(e)));
     apiJson<{ agents: { name: string }[] }>("/v1/agents")
       .then((r) => setAgents((r.agents ?? []).map((a) => a.name)))
@@ -830,7 +830,9 @@ function NoWorkflowComposer({
       await api(`/v1/tasks/${taskId}/attach`, {
         method: "POST",
         ...jsonBody(
-          mode === "workflow" ? { workflow: picking } : { agent: picking },
+          mode === "assembly-line"
+            ? { assembly_line: picking }
+            : { agent: picking },
         ),
       });
       onAttached();
@@ -844,12 +846,12 @@ function NoWorkflowComposer({
       setAttaching(false);
     }
   }
-  const options = mode === "workflow" ? workflows : agents;
+  const options = mode === "assembly-line" ? assemblyLines : agents;
   const loading = options === null;
   return (
     <div className="composer attach-prompt">
       <div className="composer-bar">
-        <span className="muted">Attach a workflow or a single agent to begin.</span>
+        <span className="muted">Attach an assembly line or a single agent to begin.</span>
         <span
           className="segmented"
           role="tablist"
@@ -859,12 +861,12 @@ function NoWorkflowComposer({
           <button
             type="button"
             role="tab"
-            aria-selected={mode === "workflow"}
-            className={`segmented-btn${mode === "workflow" ? " active" : ""}`}
-            onClick={() => setMode("workflow")}
+            aria-selected={mode === "assembly-line"}
+            className={`segmented-btn${mode === "assembly-line" ? " active" : ""}`}
+            onClick={() => setMode("assembly-line")}
             disabled={attaching}
           >
-            Workflow
+            Assembly line
           </button>
           <button
             type="button"
@@ -886,11 +888,11 @@ function NoWorkflowComposer({
         >
           <option value="">
             {loading
-              ? mode === "workflow"
-                ? "Loading workflows…"
+              ? mode === "assembly-line"
+                ? "Loading assembly lines…"
                 : "Loading agents…"
-              : mode === "workflow"
-                ? "— pick a workflow —"
+              : mode === "assembly-line"
+                ? "— pick an assembly line —"
                 : "— pick an agent —"}
           </option>
           {(options ?? []).map((n) => (

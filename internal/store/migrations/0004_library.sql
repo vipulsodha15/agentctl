@@ -1,4 +1,4 @@
--- Move agent and workflow definitions out of the filesystem and into sqlite
+-- Move agent and assembly line definitions out of the filesystem and into sqlite
 -- so the daemon is stateless-container friendly (no PVC required for the
 -- authoring artefacts; the same DB that already holds tasks/sessions/usage
 -- is the one source of truth).
@@ -16,7 +16,7 @@ CREATE TABLE agents (
     updated_at  TEXT NOT NULL
 );
 
-CREATE TABLE workflows (
+CREATE TABLE assembly_lines (
     name        TEXT PRIMARY KEY,
     source      TEXT NOT NULL
                   CHECK (source IN ('builtin','custom')),

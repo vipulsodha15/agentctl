@@ -19,7 +19,7 @@ import (
 )
 
 // HandoffAutoPrompt is the verbatim text injected as a user message when the
-// user clicks "Hand off". See workflows-task-management-architecture.md §7.1.
+// user clicks "Hand off". See assembly-lines-task-management-architecture.md §7.1.
 const HandoffAutoPrompt = `Produce your synthesis for the next stage now using this structure:
 
 ## Summary
@@ -154,8 +154,8 @@ func New(opts Options) *Manager {
 // every stage's session — see arch §8.2.
 func ChannelForTask(taskID string) string { return "task:" + taskID }
 
-// CreateTask inserts a new task row. If req.WorkflowName is set, stages are
-// inserted in pending state and stage 1 transitions to active. If
+// CreateTask inserts a new task row. If req.AssemblyLineName is set, stages
+// are inserted in pending state and stage 1 transitions to active. If
 // req.AgentName is set instead, the task is created with a single active
 // stage for that agent. The two are mutually exclusive.
 func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task, error) {
@@ -168,14 +168,14 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	if req.SourceKind != SourceGithubIssue && req.SourceKind != SourceFreeform {
 		return nil, fmt.Errorf("%w: source_kind must be github_issue or freeform", ErrValidation)
 	}
-	if req.WorkflowName != "" && req.AgentName != "" {
-		return nil, fmt.Errorf("%w: set workflow_name or agent_name, not both", ErrValidation)
+	if req.AssemblyLineName != "" && req.AgentName != "" {
+		return nil, fmt.Errorf("%w: set assembly_line_name or agent_name, not both", ErrValidation)
 	}
 	if req.Name == "" {
 		req.Name = trimTitle(req.IssueMD)
 	}
 
-	agentNames, err := m.resolveAgentNames(req.WorkflowName, req.AgentName)
+	agentNames, err := m.resolveAgentNames(req.AssemblyLineName, req.AgentName)
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +199,9 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO tasks
-        (task_id, name, workflow_name, repo_url, base_sha, source_kind, source_url, issue_md, current_stage_id, status, created_at, started_at)
+        (task_id, name, assembly_line_name, repo_url, base_sha, source_kind, source_url, issue_md, current_stage_id, status, created_at, started_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
-		taskID, req.Name, nullable(req.WorkflowName), nullable(req.RepoURL), nullable(""),
+		taskID, req.Name, nullable(req.AssemblyLineName), nullable(req.RepoURL), nullable(""),
 		req.SourceKind, nullable(req.SourceURL), req.IssueMD,
 		status, now.Format(time.RFC3339Nano), nullableTime(startedAt)); err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
@@ -251,7 +251,7 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	}
 
 	task := &Task{
-		ID: taskID, Name: req.Name, WorkflowName: req.WorkflowName,
+		ID: taskID, Name: req.Name, AssemblyLineName: req.AssemblyLineName,
 		RepoURL: req.RepoURL, SourceKind: req.SourceKind, SourceURL: req.SourceURL,
 		IssueMD: req.IssueMD, Status: status, CreatedAt: now, Stages: stages,
 	}
@@ -270,19 +270,19 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	return task, nil
 }
 
-// resolveAgentNames turns a workflow name or single agent name into the
-// ordered list of agent names that make up the task's stages. Returns nil
-// when both are empty (a not-started task).
-func (m *Manager) resolveAgentNames(workflowName, agentName string) ([]string, error) {
-	if workflowName != "" {
-		wf, err := m.opts.Library.GetWorkflow(workflowName)
+// resolveAgentNames turns an assembly line name or single agent name into
+// the ordered list of agent names that make up the task's stages. Returns
+// nil when both are empty (a not-started task).
+func (m *Manager) resolveAgentNames(assemblyLineName, agentName string) ([]string, error) {
+	if assemblyLineName != "" {
+		wf, err := m.opts.Library.GetAssemblyLine(assemblyLineName)
 		if err != nil {
-			return nil, fmt.Errorf("%w: workflow %q", ErrWorkflowNotFound, workflowName)
+			return nil, fmt.Errorf("%w: assembly line %q", ErrAssemblyLineNotFound, assemblyLineName)
 		}
 		names := make([]string, 0, len(wf.Stages))
 		for _, st := range wf.Stages {
 			if _, err := m.opts.Library.GetAgent(st.Agent); err != nil {
-				return nil, fmt.Errorf("%w: workflow %q references missing agent %q", ErrValidation, wf.Name, st.Agent)
+				return nil, fmt.Errorf("%w: assembly line %q references missing agent %q", ErrValidation, wf.Name, st.Agent)
 			}
 			names = append(names, st.Agent)
 		}
@@ -297,23 +297,23 @@ func (m *Manager) resolveAgentNames(workflowName, agentName string) ([]string, e
 	return nil, nil
 }
 
-// AttachWorkflow flips a not-started task to working with stages from a
-// named workflow. Wraps Attach for backward compatibility.
-func (m *Manager) AttachWorkflow(ctx context.Context, taskID, workflow string) (*Task, error) {
-	return m.Attach(ctx, taskID, workflow, "")
+// AttachAssemblyLine flips a not-started task to working with stages from a
+// named assembly line. Wraps Attach for backward compatibility.
+func (m *Manager) AttachAssemblyLine(ctx context.Context, taskID, assemblyLine string) (*Task, error) {
+	return m.Attach(ctx, taskID, assemblyLine, "")
 }
 
-// Attach flips a not-started task to working. Either workflow or agent must
-// be set (not both): the workflow path installs its full stage list, the
-// agent path installs a single stage running just that agent.
-func (m *Manager) Attach(ctx context.Context, taskID, workflow, agent string) (*Task, error) {
-	if workflow != "" && agent != "" {
-		return nil, fmt.Errorf("%w: set workflow or agent, not both", ErrValidation)
+// Attach flips a not-started task to working. Either assemblyLine or agent
+// must be set (not both): the assembly-line path installs its full stage
+// list, the agent path installs a single stage running just that agent.
+func (m *Manager) Attach(ctx context.Context, taskID, assemblyLine, agent string) (*Task, error) {
+	if assemblyLine != "" && agent != "" {
+		return nil, fmt.Errorf("%w: set assembly_line or agent, not both", ErrValidation)
 	}
-	if workflow == "" && agent == "" {
-		return nil, fmt.Errorf("%w: workflow or agent is required", ErrValidation)
+	if assemblyLine == "" && agent == "" {
+		return nil, fmt.Errorf("%w: assembly_line or agent is required", ErrValidation)
 	}
-	agentNames, err := m.resolveAgentNames(workflow, agent)
+	agentNames, err := m.resolveAgentNames(assemblyLine, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +351,8 @@ func (m *Manager) Attach(ctx context.Context, taskID, workflow, agent string) (*
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET workflow_name=?, status='working', started_at=?, current_stage_id=? WHERE task_id=?`,
-		nullable(workflow), now.Format(time.RFC3339Nano), stageIDs[0], taskID); err != nil {
+		`UPDATE tasks SET assembly_line_name=?, status='working', started_at=?, current_stage_id=? WHERE task_id=?`,
+		nullable(assemblyLine), now.Format(time.RFC3339Nano), stageIDs[0], taskID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -398,7 +398,7 @@ func (m *Manager) Send(ctx context.Context, req SendMessageRequest) error {
 
 // Handoff triggers the synthesis auto-prompt on the active stage. The
 // runtime's Synthesize call returns the agent's reply synchronously, which
-// the manager locks as the stage's synthesis before advancing the workflow.
+// the manager locks as the stage's synthesis before advancing the assembly line.
 //
 // Returns ErrStageBusy if a turn is currently in flight; the SPA disables
 // the Hand off button in that case.
@@ -521,7 +521,7 @@ func (m *Manager) Abandon(ctx context.Context, taskID string) error {
 // ListTasks returns all tasks ordered by created_at desc.
 func (m *Manager) ListTasks(ctx context.Context) ([]Task, error) {
 	rows, err := m.opts.Store.DB().QueryContext(ctx,
-		`SELECT task_id, name, workflow_name, repo_url, base_sha, source_kind, source_url, issue_md, current_stage_id, status, created_at, started_at, ended_at
+		`SELECT task_id, name, assembly_line_name, repo_url, base_sha, source_kind, source_url, issue_md, current_stage_id, status, created_at, started_at, ended_at
          FROM tasks ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -588,7 +588,7 @@ func (m *Manager) TaskMessages(ctx context.Context, taskID string) ([]Message, e
 
 func (m *Manager) loadTaskTx(ctx context.Context, tx *sql.Tx, taskID string) (*Task, error) {
 	row := m.opts.Store.DB().QueryRowContext(ctx,
-		`SELECT task_id, name, workflow_name, repo_url, base_sha, source_kind, source_url, issue_md, current_stage_id, status, created_at, started_at, ended_at
+		`SELECT task_id, name, assembly_line_name, repo_url, base_sha, source_kind, source_url, issue_md, current_stage_id, status, created_at, started_at, ended_at
          FROM tasks WHERE task_id=?`, taskID)
 	t, err := scanTaskRow(row)
 	if err != nil {
@@ -644,7 +644,7 @@ func scanTaskRow(s scanner) (Task, error) {
 	if err := s.Scan(&t.ID, &t.Name, &wf, &repo, &base, &t.SourceKind, &surl, &t.IssueMD, &csid, &t.Status, &createdAt, &startedAt, &endedAt); err != nil {
 		return t, err
 	}
-	t.WorkflowName = wf.String
+	t.AssemblyLineName = wf.String
 	t.RepoURL = repo.String
 	t.BaseSHA = base.String
 	t.SourceURL = surl.String

@@ -145,7 +145,7 @@ developer to manually `agentctl skill add`.
 
 **Why deferred.** v1 has `agentctl skill export` + `add` for
 hand-distribution; that covers small-team use. The git-sync
-+ signature workflow is a substantial separate design.
++ signature assembly line is a substantial separate design.
 
 ## V2.x. Other deferred items
 

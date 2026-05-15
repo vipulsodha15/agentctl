@@ -222,12 +222,12 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w)
 		}
 		return
-	case path == "/v1/workflows":
+	case path == "/v1/assembly-lines":
 		switch method {
 		case http.MethodGet:
-			s.handleListWorkflows(w, r)
+			s.handleListAssemblyLines(w, r)
 		case http.MethodPost:
-			s.requireOrigin(w, r, s.handleAddWorkflow)
+			s.requireOrigin(w, r, s.handleAddAssemblyLine)
 		default:
 			methodNotAllowed(w)
 		}
@@ -262,17 +262,17 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if name, ok := matchPrefix(path, "/v1/workflows/"); ok && !strings.Contains(name, "/") {
+	if name, ok := matchPrefix(path, "/v1/assembly-lines/"); ok && !strings.Contains(name, "/") {
 		switch method {
 		case http.MethodGet:
-			s.handleGetWorkflow(w, r, name)
+			s.handleGetAssemblyLine(w, r, name)
 		case http.MethodPut:
 			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
-				s.handlePutWorkflow(w, r, name)
+				s.handlePutAssemblyLine(w, r, name)
 			})
 		case http.MethodDelete:
 			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
-				s.handleRemoveWorkflow(w, r, name)
+				s.handleRemoveAssemblyLine(w, r, name)
 			})
 		default:
 			methodNotAllowed(w)
@@ -414,7 +414,7 @@ func (s *Server) routeTaskItem(w http.ResponseWriter, r *http.Request, rest stri
 	switch {
 	case suffix == "attach" && method == http.MethodPost:
 		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
-			s.handleAttachWorkflow(w, r, id)
+			s.handleAttachAssemblyLine(w, r, id)
 		})
 	case suffix == "messages" && method == http.MethodPost:
 		s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {

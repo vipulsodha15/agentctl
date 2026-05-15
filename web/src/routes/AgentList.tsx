@@ -138,7 +138,7 @@ export function AgentList() {
       <ConfirmModal
         open={pendingDelete !== null}
         title={`Delete agent "${pendingDelete ?? ""}"?`}
-        message="Workflows that reference it will block the delete."
+        message="Assembly lines that reference it will block the delete."
         confirmLabel="Delete"
         variant="danger"
         busy={busy}
@@ -161,14 +161,14 @@ function AgentDetail({ agent, busy, onEdit, onDuplicate, onDelete }: DetailProps
   const isBuiltin = agent.source === "builtin";
   return (
     <div>
-      <div className="agent-header workflow-detail-head">
+      <div className="agent-header assembly-line-detail-head">
         <span className={`agent-swatch large swatch-${agent.colour ?? "slate"}`} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="agent-name">{agent.name}</div>
           <div className="muted">{agent.description}</div>
         </div>
         {isBuiltin && <span className="badge-builtin">builtin</span>}
-        <div className="workflow-detail-actions">
+        <div className="assembly-line-detail-actions">
           {isBuiltin ? (
             <button type="button" onClick={onDuplicate} disabled={busy}>
               Duplicate

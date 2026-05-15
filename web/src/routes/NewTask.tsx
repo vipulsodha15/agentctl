@@ -5,33 +5,33 @@ import type {
   Agent,
   CreateTaskRequest,
   ListAgentsResponse,
-  ListWorkflowsResponse,
+  ListAssemblyLinesResponse,
   Task,
-  Workflow,
+  AssemblyLine,
 } from "../types";
 
-type AssignMode = "workflow" | "agent";
+type AssignMode = "assembly-line" | "agent";
 
 export function NewTask() {
   const navigate = useNavigate();
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [assemblyLines, setAssemblyLines] = useState<AssemblyLine[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [name, setName] = useState("");
   const [issueMD, setIssueMD] = useState("");
-  const [assignMode, setAssignMode] = useState<AssignMode>("workflow");
-  const [workflowName, setWorkflowName] = useState<string>("");
+  const [assignMode, setAssignMode] = useState<AssignMode>("assembly-line");
+  const [assemblyLineName, setAssemblyLineName] = useState<string>("");
   const [agentName, setAgentName] = useState<string>("");
   const [repoURL, setRepoURL] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    apiJson<ListWorkflowsResponse>("/v1/workflows")
+    apiJson<ListAssemblyLinesResponse>("/v1/assembly-lines")
       .then((r) => {
-        const list = r.workflows ?? [];
-        setWorkflows(list);
+        const list = r.assembly_lines ?? [];
+        setAssemblyLines(list);
         if (list.length > 0) {
-          setWorkflowName((prev) => prev || list[0].name);
+          setAssemblyLineName((prev) => prev || list[0].name);
         }
       })
       .catch((err) => setError(String(err)));
@@ -56,8 +56,8 @@ export function NewTask() {
     try {
       const req: CreateTaskRequest = {
         name: name.trim() || undefined,
-        workflow_name:
-          assignMode === "workflow" ? workflowName || undefined : undefined,
+        assembly_line_name:
+          assignMode === "assembly-line" ? assemblyLineName || undefined : undefined,
         agent_name:
           assignMode === "agent" ? agentName || undefined : undefined,
         repo_url: repoURL.trim() || undefined,
@@ -80,7 +80,7 @@ export function NewTask() {
     }
   }
 
-  const selectedWorkflow = workflows.find((w) => w.name === workflowName);
+  const selectedAssemblyLine = assemblyLines.find((w) => w.name === assemblyLineName);
   const selectedAgent = agents.find((a) => a.name === agentName);
 
   return (
@@ -89,7 +89,7 @@ export function NewTask() {
         <div style={{ flex: 1 }}>
           <h2>New task</h2>
           <div className="muted" style={{ marginTop: 4 }}>
-            Run a multi-stage workflow, or chat with a single agent.
+            Run a multi-stage assembly line, or chat with a single agent.
           </div>
         </div>
       </div>
@@ -131,16 +131,16 @@ export function NewTask() {
             <div
               className="segmented"
               role="tablist"
-              aria-label="Assign task to a workflow or a single agent"
+              aria-label="Assign task to an assembly line or a single agent"
             >
               <button
                 type="button"
                 role="tab"
-                aria-selected={assignMode === "workflow"}
-                className={`segmented-btn${assignMode === "workflow" ? " active" : ""}`}
-                onClick={() => setAssignMode("workflow")}
+                aria-selected={assignMode === "assembly-line"}
+                className={`segmented-btn${assignMode === "assembly-line" ? " active" : ""}`}
+                onClick={() => setAssignMode("assembly-line")}
               >
-                Workflow
+                Assembly line
               </button>
               <button
                 type="button"
@@ -153,15 +153,15 @@ export function NewTask() {
               </button>
             </div>
           </div>
-          {assignMode === "workflow" ? (
+          {assignMode === "assembly-line" ? (
             <label className="field">
-              <span className="field-label">Workflow</span>
+              <span className="field-label">Assembly line</span>
               <select
-                value={workflowName}
-                onChange={(e) => setWorkflowName(e.target.value)}
+                value={assemblyLineName}
+                onChange={(e) => setAssemblyLineName(e.target.value)}
               >
                 <option value="">(none — attach later)</option>
-                {workflows.map((w) => (
+                {assemblyLines.map((w) => (
                   <option key={w.name} value={w.name}>
                     {w.name} — {w.description}
                   </option>
@@ -200,15 +200,15 @@ export function NewTask() {
         </div>
         <div className="panel task-create-preview">
           <div className="section-label" style={{ marginBottom: 8 }}>
-            {assignMode === "workflow" ? "Workflow preview" : "Agent preview"}
+            {assignMode === "assembly-line" ? "Assembly line preview" : "Agent preview"}
           </div>
-          {assignMode === "workflow" ? (
-            selectedWorkflow ? (
-              <WorkflowPreview workflow={selectedWorkflow} />
+          {assignMode === "assembly-line" ? (
+            selectedAssemblyLine ? (
+              <AssemblyLinePreview assemblyLine={selectedAssemblyLine} />
             ) : (
               <div className="muted">
-                No workflow selected. You can attach one later from the task
-                page.
+                No assembly line selected. You can attach one later from the
+                task page.
               </div>
             )
           ) : selectedAgent ? (
@@ -224,15 +224,15 @@ export function NewTask() {
   );
 }
 
-function WorkflowPreview({ workflow }: { workflow: Workflow }) {
+function AssemblyLinePreview({ assemblyLine }: { assemblyLine: AssemblyLine }) {
   return (
     <div>
-      <div className="task-preview-name">{workflow.name}</div>
+      <div className="task-preview-name">{assemblyLine.name}</div>
       <div className="muted" style={{ marginBottom: 16 }}>
-        {workflow.description}
+        {assemblyLine.description}
       </div>
       <div className="task-preview-stages">
-        {workflow.stages.map((s, idx) => (
+        {assemblyLine.stages.map((s, idx) => (
           <div key={idx} className="task-preview-stage">
             <span className="task-preview-step">{idx + 1}</span>
             <span className="task-preview-arrow" aria-hidden>→</span>

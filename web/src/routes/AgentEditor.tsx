@@ -200,7 +200,7 @@ export function AgentEditor() {
   }
 
   return (
-    <section className="page workflow-editor-page">
+    <section className="page assembly-line-editor-page">
       <div className="page-header">
         <div style={{ flex: 1 }}>
           <button
@@ -225,7 +225,7 @@ export function AgentEditor() {
 
       {loaded && !loadError && (
         <>
-          <div className="panel workflow-editor-meta">
+          <div className="panel assembly-line-editor-meta">
             <label className="field">
               <span className="field-label">Name</span>
               <span className="field-hint">
@@ -318,7 +318,7 @@ export function AgentEditor() {
             <div className="field" style={{ marginBottom: 0 }}>
               <span className="field-label">Prompt</span>
               <span className="field-hint">
-                System instructions for this agent's role in a workflow stage.
+                System instructions for this agent's role in an assembly line stage.
                 Markdown is allowed.
               </span>
               <textarea
@@ -386,7 +386,7 @@ export function AgentEditor() {
 
           {submitError && <div className="error-text">{submitError}</div>}
 
-          <div className="form-actions workflow-editor-actions">
+          <div className="form-actions assembly-line-editor-actions">
             <button type="button" onClick={cancel} disabled={submitting}>
               Cancel
             </button>

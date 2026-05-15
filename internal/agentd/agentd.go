@@ -111,9 +111,9 @@ func Run(ctx context.Context, opts Options) error {
 		CustomDir:  opts.Layout.CustomSkills,
 	})
 
-	// Task library — agents + workflows live in sqlite (one durable store
+	// Task library — agents + assembly lines live in sqlite (one durable store
 	// for all daemon state). Built-in YAMLs ship embedded in the binary
-	// and are upserted into the agents/workflows tables on every boot;
+	// and are upserted into the agents/assembly_lines tables on every boot;
 	// custom rows authored through the API/CLI are never overwritten.
 	if written, err := ttl.Materialize(ctx, st.DB()); err != nil {
 		logger.Warn("ttl.materialize_failed", slog.String("error", err.Error()))
@@ -122,14 +122,14 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	taskLib := ttl.New(ttl.Options{DB: st.DB()})
 	if issues, err := taskLib.Load(ctx); err == nil {
-		if len(issues.AgentErrors) > 0 || len(issues.WorkflowErrors) > 0 {
+		if len(issues.AgentErrors) > 0 || len(issues.AssemblyLineErrors) > 0 {
 			logger.Warn("ttl.load_issues",
 				slog.Int("agent_errors", len(issues.AgentErrors)),
-				slog.Int("workflow_errors", len(issues.WorkflowErrors)))
+				slog.Int("assembly_line_errors", len(issues.AssemblyLineErrors)))
 		}
 		logger.Info("ttl.loaded",
 			slog.Int("agents", len(taskLib.ListAgents())),
-			slog.Int("workflows", len(taskLib.ListWorkflows())))
+			slog.Int("assembly_lines", len(taskLib.ListAssemblyLines())))
 	} else {
 		logger.Warn("ttl.load_failed", slog.String("error", err.Error()))
 	}

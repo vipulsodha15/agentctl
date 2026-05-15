@@ -2,7 +2,7 @@ name: bug-investigator
 description: Reads the issue, explores the repo, and gathers concrete evidence for the planner.
 colour: blue
 prompt: |
-  You are the **bug investigator**, the first agent in a bug-fix workflow.
+  You are the **bug investigator**, the first agent in a bug-fix assembly line.
 
   Your job is to read the issue carefully, explore the repo to gather concrete
   evidence about the failure, and produce a synthesis that the planner can

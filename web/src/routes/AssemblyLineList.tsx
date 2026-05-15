@@ -5,14 +5,14 @@ import { ConfirmModal } from "../components/ConfirmModal";
 import type {
   Agent,
   ListAgentsResponse,
-  ListWorkflowsResponse,
-  Workflow,
+  ListAssemblyLinesResponse,
+  AssemblyLine,
 } from "../types";
 
-export function WorkflowList() {
+export function AssemblyLineList() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [assemblyLines, setAssemblyLines] = useState<AssemblyLine[]>([]);
   const [agents, setAgents] = useState<Record<string, Agent>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -22,12 +22,12 @@ export function WorkflowList() {
   const load = useCallback(
     (preferName?: string | null) => {
       Promise.all([
-        apiJson<ListWorkflowsResponse>("/v1/workflows"),
+        apiJson<ListAssemblyLinesResponse>("/v1/assembly-lines"),
         apiJson<ListAgentsResponse>("/v1/agents"),
       ])
         .then(([w, a]) => {
-          const list = w.workflows ?? [];
-          setWorkflows(list);
+          const list = w.assembly_lines ?? [];
+          setAssemblyLines(list);
           const map: Record<string, Agent> = {};
           for (const ag of a.agents ?? []) map[ag.name] = ag;
           setAgents(map);
@@ -59,7 +59,7 @@ export function WorkflowList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const wf = workflows.find((w) => w.name === selected);
+  const wf = assemblyLines.find((w) => w.name === selected);
 
   async function confirmDelete() {
     const name = pendingDelete;
@@ -67,7 +67,7 @@ export function WorkflowList() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api(`/v1/workflows/${encodeURIComponent(name)}`, {
+      const res = await api(`/v1/assembly-lines/${encodeURIComponent(name)}`, {
         method: "DELETE",
       });
       if (!res.ok && res.status !== 204) {
@@ -96,25 +96,25 @@ export function WorkflowList() {
     <section className="page">
       <div className="page-header">
         <div style={{ flex: 1 }}>
-          <h2>Workflows</h2>
+          <h2>Assembly lines</h2>
           <div className="muted" style={{ marginTop: 4 }}>
-            Ordered chains of role-distinct agents. Each task runs one workflow.
+            Ordered chains of role-distinct agents. Each task runs one assembly line.
           </div>
         </div>
-        <Link to="/workflows/new" className="button-link primary">
-          + New workflow
+        <Link to="/assembly-lines/new" className="button-link primary">
+          + New assembly line
         </Link>
       </div>
       {error && <div className="error-text">{error}</div>}
       <div className="two-pane">
         <div className="two-pane-list">
-          {workflows.length === 0 && (
+          {assemblyLines.length === 0 && (
             <div className="empty" style={{ padding: 24 }}>
-              No workflows yet.{" "}
-              <Link to="/workflows/new">Create the first one.</Link>
+              No assembly lines yet.{" "}
+              <Link to="/assembly-lines/new">Create the first one.</Link>
             </div>
           )}
-          {workflows.map((w) => (
+          {assemblyLines.map((w) => (
             <button
               key={w.name}
               className={`list-item${w.name === selected ? " active" : ""}`}
@@ -124,7 +124,7 @@ export function WorkflowList() {
                 <div className="list-item-title">{w.name}</div>
                 <div className="list-item-sub muted">{w.description}</div>
               </div>
-              <div className="workflow-stagecount">
+              <div className="assembly-line-stagecount">
                 {w.stages.length} stage{w.stages.length === 1 ? "" : "s"}
               </div>
               {w.source === "builtin" && (
@@ -135,29 +135,29 @@ export function WorkflowList() {
         </div>
         <div className="two-pane-detail panel">
           {wf ? (
-            <WorkflowDetail
-              workflow={wf}
+            <AssemblyLineDetail
+              assemblyLine={wf}
               agents={agents}
               busy={busy}
               onEdit={() =>
-                navigate(`/workflows/${encodeURIComponent(wf.name)}/edit`)
+                navigate(`/assembly-lines/${encodeURIComponent(wf.name)}/edit`)
               }
               onDuplicate={() =>
-                navigate(`/workflows/new?from=${encodeURIComponent(wf.name)}`)
+                navigate(`/assembly-lines/new?from=${encodeURIComponent(wf.name)}`)
               }
               onDelete={() => setPendingDelete(wf.name)}
             />
           ) : (
             <div className="empty">
-              Select a workflow to inspect, or{" "}
-              <Link to="/workflows/new">create a new one</Link>.
+              Select an assembly line to inspect, or{" "}
+              <Link to="/assembly-lines/new">create a new one</Link>.
             </div>
           )}
         </div>
       </div>
       <ConfirmModal
         open={pendingDelete !== null}
-        title={`Delete workflow "${pendingDelete ?? ""}"?`}
+        title={`Delete assembly line "${pendingDelete ?? ""}"?`}
         message="Tasks already in flight keep their stages, but new tasks cannot use it."
         confirmLabel="Delete"
         variant="danger"
@@ -170,7 +170,7 @@ export function WorkflowList() {
 }
 
 interface DetailProps {
-  workflow: Workflow;
+  assemblyLine: AssemblyLine;
   agents: Record<string, Agent>;
   busy: boolean;
   onEdit: () => void;
@@ -178,24 +178,24 @@ interface DetailProps {
   onDelete: () => void;
 }
 
-function WorkflowDetail({
-  workflow,
+function AssemblyLineDetail({
+  assemblyLine,
   agents,
   busy,
   onEdit,
   onDuplicate,
   onDelete,
 }: DetailProps) {
-  const isBuiltin = workflow.source === "builtin";
+  const isBuiltin = assemblyLine.source === "builtin";
   return (
     <div>
-      <div className="agent-header workflow-detail-head">
+      <div className="agent-header assembly-line-detail-head">
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="agent-name">{workflow.name}</div>
-          <div className="muted">{workflow.description}</div>
+          <div className="agent-name">{assemblyLine.name}</div>
+          <div className="muted">{assemblyLine.description}</div>
         </div>
         {isBuiltin && <span className="badge-builtin">builtin</span>}
-        <div className="workflow-detail-actions">
+        <div className="assembly-line-detail-actions">
           {isBuiltin ? (
             <button type="button" onClick={onDuplicate} disabled={busy}>
               Duplicate
@@ -220,29 +220,29 @@ function WorkflowDetail({
       <div className="section-label" style={{ marginTop: 24 }}>
         Stages
       </div>
-      <div className="workflow-stages">
-        {workflow.stages.map((s, idx) => {
+      <div className="assembly-line-stages">
+        {assemblyLine.stages.map((s, idx) => {
           const a = agents[s.agent];
           return (
-            <div key={idx} className="workflow-stage-card">
-              <div className="workflow-stage-head">
-                <span className="workflow-stage-num">{idx + 1}</span>
+            <div key={idx} className="assembly-line-stage-card">
+              <div className="assembly-line-stage-head">
+                <span className="assembly-line-stage-num">{idx + 1}</span>
                 <span className={`agent-swatch swatch-${a?.colour ?? "slate"}`} />
                 <div>
-                  <div className="workflow-stage-agent">{s.agent}</div>
+                  <div className="assembly-line-stage-agent">{s.agent}</div>
                   {a ? (
-                    <div className="muted workflow-stage-desc">
+                    <div className="muted assembly-line-stage-desc">
                       {a.description}
                     </div>
                   ) : (
-                    <div className="muted workflow-stage-desc">
+                    <div className="muted assembly-line-stage-desc">
                       Agent no longer defined.
                     </div>
                   )}
                 </div>
               </div>
-              {idx < workflow.stages.length - 1 && (
-                <div className="workflow-stage-connector" aria-hidden />
+              {idx < assemblyLine.stages.length - 1 && (
+                <div className="assembly-line-stage-connector" aria-hidden />
               )}
             </div>
           );

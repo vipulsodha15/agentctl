@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-//go:embed builtins/agents/*.yaml builtins/workflows/*.yaml
+//go:embed builtins/agents/*.yaml builtins/assembly-lines/*.yaml
 var builtinsFS embed.FS
 
-// Materialize upserts the embedded built-in agents and workflows into the
-// agents/workflows tables. Existing rows for built-in names are refreshed
+// Materialize upserts the embedded built-in agents and assembly lines into the
+// agents/assembly_lines tables. Existing rows for built-in names are refreshed
 // on every boot so a binary update can ship corrected prompts; custom
 // rows are untouched (the source column distinguishes them).
 //
@@ -25,7 +25,7 @@ func Materialize(ctx context.Context, db DB) (int, error) {
 		sub, table string
 	}{
 		{"builtins/agents", "agents"},
-		{"builtins/workflows", "workflows"},
+		{"builtins/assembly-lines", "assembly_lines"},
 	} {
 		entries, err := fs.ReadDir(builtinsFS, kind.sub)
 		if err != nil {
@@ -51,13 +51,13 @@ func Materialize(ctx context.Context, db DB) (int, error) {
 				if verr := validateAgent(a); verr != nil {
 					return written, fmt.Errorf("validate builtin agent %s: %w", name, verr)
 				}
-			case "workflows":
-				w, perr := ParseWorkflowYAML(body)
+			case "assembly_lines":
+				w, perr := ParseAssemblyLineYAML(body)
 				if perr != nil {
-					return written, fmt.Errorf("parse builtin workflow %s: %w", name, perr)
+					return written, fmt.Errorf("parse builtin assembly line %s: %w", name, perr)
 				}
-				if verr := validateWorkflow(w); verr != nil {
-					return written, fmt.Errorf("validate builtin workflow %s: %w", name, verr)
+				if verr := validateAssemblyLine(w); verr != nil {
+					return written, fmt.Errorf("validate builtin assembly line %s: %w", name, verr)
 				}
 			}
 			q := fmt.Sprintf(`INSERT INTO %s (name, source, yaml_body, created_at, updated_at)

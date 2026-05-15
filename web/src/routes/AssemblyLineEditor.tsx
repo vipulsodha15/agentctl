@@ -6,31 +6,31 @@ import { ConfirmModal } from "../components/ConfirmModal";
 import type {
   Agent,
   ListAgentsResponse,
-  ListWorkflowsResponse,
-  Workflow,
-  WorkflowStageDef,
+  ListAssemblyLinesResponse,
+  AssemblyLine,
+  AssemblyLineStageDef,
 } from "../types";
 
-// Mirrors validateWorkflow / nameRe in internal/ttl/ttl.go.
+// Mirrors validateAssemblyLine / nameRe in internal/ttl/ttl.go.
 const NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const MAX_STAGES = 16;
 
 type Mode = "new" | "edit";
 
-export function WorkflowEditor() {
+export function AssemblyLineEditor() {
   const navigate = useNavigate();
   const params = useParams<{ name?: string }>();
   const location = useLocation();
   const mode: Mode = params.name ? "edit" : "new";
 
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [assemblyLines, setAssemblyLines] = useState<AssemblyLine[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [stages, setStages] = useState<WorkflowStageDef[]>([]);
+  const [stages, setStages] = useState<AssemblyLineStageDef[]>([]);
   const [picker, setPicker] = useState<number | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
@@ -55,19 +55,19 @@ export function WorkflowEditor() {
     let cancelled = false;
     Promise.all([
       apiJson<ListAgentsResponse>("/v1/agents"),
-      apiJson<ListWorkflowsResponse>("/v1/workflows"),
+      apiJson<ListAssemblyLinesResponse>("/v1/assembly-lines"),
     ])
       .then(([a, w]) => {
         if (cancelled) return;
         setAgents(a.agents ?? []);
-        setWorkflows(w.workflows ?? []);
+        setAssemblyLines(w.assembly_lines ?? []);
         if (mode === "edit" && params.name) {
-          const wf = (w.workflows ?? []).find((x) => x.name === params.name);
+          const wf = (w.assembly_lines ?? []).find((x) => x.name === params.name);
           if (!wf) {
-            setLoadError(`Workflow "${params.name}" not found.`);
+            setLoadError(`AssemblyLine "${params.name}" not found.`);
           } else if (wf.source === "builtin") {
             setLoadError(
-              `"${wf.name}" is a built-in workflow and cannot be edited. Use Duplicate to make a copy.`,
+              `"${wf.name}" is a built-in assembly line and cannot be edited. Use Duplicate to make a copy.`,
             );
           } else {
             setName(wf.name);
@@ -75,11 +75,11 @@ export function WorkflowEditor() {
             setStages(wf.stages.map((s) => ({ agent: s.agent })));
           }
         } else {
-          // /workflows/new — optionally seeded by ?from=<workflow> for the
+          // /assembly-lines/new — optionally seeded by ?from=<assembly-line> for the
           // "Duplicate" flow from a built-in.
           const seedFrom = new URLSearchParams(location.search).get("from");
           if (seedFrom) {
-            const src = (w.workflows ?? []).find((x) => x.name === seedFrom);
+            const src = (w.assembly_lines ?? []).find((x) => x.name === seedFrom);
             if (src) {
               setDescription(src.description);
               setStages(src.stages.map((s) => ({ agent: s.agent })));
@@ -107,9 +107,9 @@ export function WorkflowEditor() {
 
   const existingNames = useMemo(() => {
     const s = new Set<string>();
-    for (const w of workflows) s.add(w.name);
+    for (const w of assemblyLines) s.add(w.name);
     return s;
-  }, [workflows]);
+  }, [assemblyLines]);
 
   const nameError = useMemo(() => {
     if (mode === "edit") return null;
@@ -118,7 +118,7 @@ export function WorkflowEditor() {
       return "Lowercase letters, digits, and dashes only (must start with a letter).";
     }
     if (existingNames.has(name)) {
-      return `A workflow named "${name}" already exists.`;
+      return `An assembly line named "${name}" already exists.`;
     }
     return null;
   }, [name, mode, existingNames]);
@@ -166,19 +166,19 @@ export function WorkflowEditor() {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      const body: Workflow = {
+      const body: AssemblyLine = {
         name: name.trim(),
         description: description.trim(),
         stages: stages.map((s) => ({ agent: s.agent })),
       };
       const path =
         mode === "edit"
-          ? `/v1/workflows/${encodeURIComponent(body.name)}`
-          : "/v1/workflows";
+          ? `/v1/assembly-lines/${encodeURIComponent(body.name)}`
+          : "/v1/assembly-lines";
       const method = mode === "edit" ? "PUT" : "POST";
-      await apiJson<Workflow>(path, { method, ...jsonBody(body) });
+      await apiJson<AssemblyLine>(path, { method, ...jsonBody(body) });
       cleanRef.current = true;
-      navigate("/workflows", { state: { selected: body.name } });
+      navigate("/assembly-lines", { state: { selected: body.name } });
     } catch (err) {
       setSubmitError(toMessage(err));
     } finally {
@@ -192,34 +192,34 @@ export function WorkflowEditor() {
       return;
     }
     cleanRef.current = true;
-    navigate("/workflows");
+    navigate("/assembly-lines");
   }
 
   function discardAndLeave() {
     cleanRef.current = true;
     setConfirmDiscard(false);
-    navigate("/workflows");
+    navigate("/assembly-lines");
   }
 
   return (
-    <section className="page workflow-editor-page">
+    <section className="page assembly-line-editor-page">
       <div className="page-header">
         <div style={{ flex: 1 }}>
           <button
             type="button"
             className="ghost back-link"
             onClick={cancel}
-            aria-label="Back to workflows"
+            aria-label="Back to assembly lines"
           >
             <span aria-hidden>←</span>
-            <span>Workflows</span>
+            <span>Assembly lines</span>
           </button>
           <h2 style={{ marginTop: 4 }}>
-            {mode === "edit" ? `Edit "${params.name}"` : "New workflow"}
+            {mode === "edit" ? `Edit "${params.name}"` : "New assembly line"}
           </h2>
           <div className="muted" style={{ marginTop: 4 }}>
             Chain role-distinct agents into an ordered pipeline. Each task runs
-            one workflow.
+            one assembly line.
           </div>
         </div>
       </div>
@@ -228,11 +228,11 @@ export function WorkflowEditor() {
 
       {loaded && !loadError && (
         <>
-          <div className="panel workflow-editor-meta">
+          <div className="panel assembly-line-editor-meta">
             <label className="field">
               <span className="field-label">Name</span>
               <span className="field-hint">
-                Lowercase letters, digits, and dashes. Used as the workflow
+                Lowercase letters, digits, and dashes. Used as the assembly line
                 identifier.
               </span>
               <input
@@ -253,7 +253,7 @@ export function WorkflowEditor() {
             <label className="field">
               <span className="field-label">Description</span>
               <span className="field-hint">
-                One-line summary shown alongside the workflow.
+                One-line summary shown alongside the assembly line.
               </span>
               <input
                 type="text"
@@ -267,21 +267,21 @@ export function WorkflowEditor() {
             </label>
           </div>
 
-          <div className="panel workflow-canvas-panel">
-            <div className="workflow-canvas-head">
+          <div className="panel assembly-line-canvas-panel">
+            <div className="assembly-line-canvas-head">
               <div>
                 <div className="section-label">Stages</div>
-                <div className="muted workflow-canvas-hint">
+                <div className="muted assembly-line-canvas-hint">
                   Click <span className="kbd-inline">+</span> to add an agent.
                   Stages run in order, left to right.
                 </div>
               </div>
-              <div className="workflow-canvas-count">
+              <div className="assembly-line-canvas-count">
                 {stages.length} / {MAX_STAGES}
               </div>
             </div>
 
-            <WorkflowCanvas
+            <AssemblyLineCanvas
               stages={stages}
               agents={agentMap}
               picker={picker}
@@ -296,7 +296,7 @@ export function WorkflowEditor() {
 
           {submitError && <div className="error-text">{submitError}</div>}
 
-          <div className="form-actions workflow-editor-actions">
+          <div className="form-actions assembly-line-editor-actions">
             <button type="button" onClick={cancel} disabled={submitting}>
               Cancel
             </button>
@@ -310,7 +310,7 @@ export function WorkflowEditor() {
                 ? "Saving…"
                 : mode === "edit"
                   ? "Save changes"
-                  : "Create workflow"}
+                  : "Create assembly line"}
             </button>
           </div>
         </>
@@ -330,7 +330,7 @@ export function WorkflowEditor() {
 }
 
 interface CanvasProps {
-  stages: WorkflowStageDef[];
+  stages: AssemblyLineStageDef[];
   agents: Record<string, Agent>;
   agentList: Agent[];
   picker: number | null;
@@ -341,7 +341,7 @@ interface CanvasProps {
   maxReached: boolean;
 }
 
-function WorkflowCanvas({
+function AssemblyLineCanvas({
   stages,
   agents,
   agentList,
@@ -364,7 +364,7 @@ function WorkflowCanvas({
     prevLen.current = stages.length;
   }, [stages.length]);
   return (
-    <div className="workflow-canvas" role="list" ref={canvasRef}>
+    <div className="assembly-line-canvas" role="list" ref={canvasRef}>
       {stages.length === 0 ? (
         <AddSlot
           slotIndex={0}
@@ -379,7 +379,7 @@ function WorkflowCanvas({
       ) : (
         <>
           {stages.map((s, idx) => (
-            <div key={`${s.agent}-${idx}`} className="workflow-canvas-row">
+            <div key={`${s.agent}-${idx}`} className="assembly-line-canvas-row">
               <AddSlot
                 slotIndex={idx}
                 active={picker === idx}
@@ -420,7 +420,7 @@ function WorkflowCanvas({
 
 interface StageNodeProps {
   index: number;
-  stage: WorkflowStageDef;
+  stage: AssemblyLineStageDef;
   agent: Agent | undefined;
   onRemove: () => void;
   onMoveLeft?: () => void;
@@ -439,18 +439,18 @@ function StageNode({
   const missing = !agent;
   return (
     <div
-      className={`workflow-node swatch-${colour}${missing ? " missing" : ""}`}
+      className={`assembly-line-node swatch-${colour}${missing ? " missing" : ""}`}
       role="listitem"
     >
-      <div className="workflow-node-head">
-        <span className="workflow-node-num">{index + 1}</span>
+      <div className="assembly-line-node-head">
+        <span className="assembly-line-node-num">{index + 1}</span>
         <span className={`agent-swatch swatch-${colour}`} aria-hidden />
-        <div className="workflow-node-name" title={stage.agent}>
+        <div className="assembly-line-node-name" title={stage.agent}>
           {stage.agent}
         </div>
         <button
           type="button"
-          className="workflow-node-remove ghost"
+          className="assembly-line-node-remove ghost"
           onClick={onRemove}
           aria-label={`Remove ${stage.agent}`}
           title="Remove"
@@ -458,19 +458,19 @@ function StageNode({
           <IconX />
         </button>
       </div>
-      <div className="workflow-node-desc">
+      <div className="assembly-line-node-desc">
         {missing ? (
-          <span className="workflow-node-missing">
+          <span className="assembly-line-node-missing">
             Agent no longer defined.
           </span>
         ) : (
           agent.description
         )}
       </div>
-      <div className="workflow-node-foot">
+      <div className="assembly-line-node-foot">
         <button
           type="button"
-          className="ghost workflow-node-move"
+          className="ghost assembly-line-node-move"
           onClick={onMoveLeft}
           disabled={!onMoveLeft}
           aria-label="Move stage left"
@@ -480,7 +480,7 @@ function StageNode({
         </button>
         <button
           type="button"
-          className="ghost workflow-node-move"
+          className="ghost assembly-line-node-move"
           onClick={onMoveRight}
           disabled={!onMoveRight}
           aria-label="Move stage right"
@@ -518,12 +518,12 @@ function AddSlot({
   const label =
     variant === "between" ? `Insert stage at position ${slotIndex + 1}` : "Add stage";
   return (
-    <div className={`workflow-slot workflow-slot-${variant}${active ? " active" : ""}`}>
-      {variant !== "empty" && <span className="workflow-slot-line" aria-hidden />}
+    <div className={`assembly-line-slot assembly-line-slot-${variant}${active ? " active" : ""}`}>
+      {variant !== "empty" && <span className="assembly-line-slot-line" aria-hidden />}
       <button
         ref={buttonRef}
         type="button"
-        className={`workflow-slot-button${active ? " active" : ""}`}
+        className={`assembly-line-slot-button${active ? " active" : ""}`}
         onClick={() => (active ? onClose() : onOpen())}
         aria-label={label}
         aria-expanded={active}
@@ -532,7 +532,7 @@ function AddSlot({
       >
         <IconPlus />
       </button>
-      {variant !== "empty" && <span className="workflow-slot-line" aria-hidden />}
+      {variant !== "empty" && <span className="assembly-line-slot-line" aria-hidden />}
       {active && (
         <AgentPicker
           agents={agentList}
@@ -658,7 +658,7 @@ function AgentPicker({ agents, onPick, onClose, anchorRef }: AgentPickerProps) {
   const popover = (
     <div
       ref={popoverRef}
-      className="workflow-picker"
+      className="assembly-line-picker"
       role="dialog"
       aria-label="Pick an agent"
       style={{
@@ -670,7 +670,7 @@ function AgentPicker({ agents, onPick, onClose, anchorRef }: AgentPickerProps) {
     >
       <input
         ref={inputRef}
-        className="workflow-picker-search"
+        className="assembly-line-picker-search"
         type="text"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -678,19 +678,19 @@ function AgentPicker({ agents, onPick, onClose, anchorRef }: AgentPickerProps) {
         placeholder="Search agents…"
         spellCheck={false}
       />
-      <div className="workflow-picker-list">
+      <div className="assembly-line-picker-list">
         {agents.length === 0 ? (
-          <div className="workflow-picker-empty muted">
+          <div className="assembly-line-picker-empty muted">
             No agents defined. Add agents under <strong>Agents</strong> first.
           </div>
         ) : filtered.length === 0 ? (
-          <div className="workflow-picker-empty muted">No matches.</div>
+          <div className="assembly-line-picker-empty muted">No matches.</div>
         ) : (
           filtered.map((a, i) => (
             <button
               key={a.name}
               type="button"
-              className={`workflow-picker-item${i === activeIdx ? " active" : ""}`}
+              className={`assembly-line-picker-item${i === activeIdx ? " active" : ""}`}
               onMouseEnter={() => setActiveIdx(i)}
               onClick={() => onPick(a.name)}
             >
@@ -698,9 +698,9 @@ function AgentPicker({ agents, onPick, onClose, anchorRef }: AgentPickerProps) {
                 className={`agent-swatch swatch-${a.colour ?? "slate"}`}
                 aria-hidden
               />
-              <span className="workflow-picker-item-body">
-                <span className="workflow-picker-item-name">{a.name}</span>
-                <span className="workflow-picker-item-desc muted">
+              <span className="assembly-line-picker-item-body">
+                <span className="assembly-line-picker-item-name">{a.name}</span>
+                <span className="assembly-line-picker-item-desc muted">
                   {a.description}
                 </span>
               </span>

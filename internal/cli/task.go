@@ -49,7 +49,7 @@ func taskUsage(env *Env) {
 	fmt.Fprintln(env.Stderr, "")
 	fmt.Fprintln(env.Stderr, "Subcommands:")
 	fmt.Fprintln(env.Stderr, "  ls                                  List tasks.")
-	fmt.Fprintln(env.Stderr, "  create [--workflow N | --agent N]   Create a task from stdin or --issue-file.")
+	fmt.Fprintln(env.Stderr, "  create [--assembly-line N | --agent N]   Create a task from stdin or --issue-file.")
 	fmt.Fprintln(env.Stderr, "         [--repo URL] [--name N]")
 	fmt.Fprintln(env.Stderr, "         [--issue-file P]")
 	fmt.Fprintln(env.Stderr, "  show <id>                           Show task details + messages.")
@@ -90,7 +90,7 @@ func runTaskList(ctx context.Context, env *Env, args []string) int {
 		return ExitOK
 	}
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tWORKFLOW\tCURRENT STAGE")
+	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tASSEMBLY-LINE\tCURRENT STAGE")
 	for _, t := range resp.Tasks {
 		stageLabel := "-"
 		if t.CurrentStageID != "" {
@@ -104,7 +104,7 @@ func runTaskList(ctx context.Context, env *Env, args []string) int {
 				stageLabel = shortID(t.CurrentStageID)
 			}
 		}
-		wf := t.WorkflowName
+		wf := t.AssemblyLineName
 		if wf == "" {
 			wf = "-"
 		}
@@ -117,16 +117,16 @@ func runTaskList(ctx context.Context, env *Env, args []string) int {
 func runTaskCreate(ctx context.Context, env *Env, args []string) int {
 	fs := flag.NewFlagSet("task create", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
-	workflow := fs.String("workflow", "", "workflow name to attach")
-	agent := fs.String("agent", "", "single agent to assign (alternative to --workflow)")
+	assemblyLine := fs.String("assembly-line", "", "assembly line name to attach")
+	agent := fs.String("agent", "", "single agent to assign (alternative to --assembly-line)")
 	repo := fs.String("repo", "", "repository URL")
 	name := fs.String("name", "", "task name")
 	issueFile := fs.String("issue-file", "", "path to issue markdown (defaults to stdin)")
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: agentctl task create [--workflow N | --agent N] [--repo URL] [--name N] [--issue-file PATH]")
+		fmt.Fprintln(env.Stderr, "Usage: agentctl task create [--assembly-line N | --agent N] [--repo URL] [--name N] [--issue-file PATH]")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "If --issue-file is omitted, the issue body is read from stdin.")
-		fmt.Fprintln(env.Stderr, "Use --workflow for a multi-stage chain, or --agent to chat with a single agent.")
+		fmt.Fprintln(env.Stderr, "Use --assembly-line for a multi-stage chain, or --agent to chat with a single agent.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(reorderArgs(args)); err != nil {
@@ -151,17 +151,17 @@ func runTaskCreate(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "task create: issue body is empty (pass --issue-file or pipe via stdin)")
 		return ExitUsage
 	}
-	if *workflow != "" && *agent != "" {
-		fmt.Fprintln(env.Stderr, "task create: pass --workflow or --agent, not both")
+	if *assemblyLine != "" && *agent != "" {
+		fmt.Fprintln(env.Stderr, "task create: pass --assembly-line or --agent, not both")
 		return ExitUsage
 	}
 	req := tm.CreateTaskRequest{
-		Name:         *name,
-		WorkflowName: *workflow,
-		AgentName:    *agent,
-		RepoURL:      *repo,
-		IssueMD:      string(issueMD),
-		SourceKind:   tm.SourceFreeform,
+		Name:             *name,
+		AssemblyLineName: *assemblyLine,
+		AgentName:        *agent,
+		RepoURL:          *repo,
+		IssueMD:          string(issueMD),
+		SourceKind:       tm.SourceFreeform,
 	}
 	payload, _ := json.Marshal(&req)
 	client, code := newWebClient(env)
@@ -226,7 +226,7 @@ func runTaskShow(ctx context.Context, env *Env, args []string) int {
 	fmt.Fprintf(env.Stdout, "ID:        %s\n", t.ID)
 	fmt.Fprintf(env.Stdout, "Name:      %s\n", defaultDash(t.Name))
 	fmt.Fprintf(env.Stdout, "Status:    %s\n", t.Status)
-	fmt.Fprintf(env.Stdout, "Workflow:  %s\n", defaultDash(t.WorkflowName))
+	fmt.Fprintf(env.Stdout, "Assembly line:  %s\n", defaultDash(t.AssemblyLineName))
 	if t.RepoURL != "" {
 		fmt.Fprintf(env.Stdout, "Repo:      %s\n", t.RepoURL)
 	}

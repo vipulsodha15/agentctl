@@ -100,18 +100,18 @@ export function TaskList() {
             <span className="task-stage-line" />
             <span className="task-stage-dot green" />
           </div>
-          <h3>Start a task to spin up a workflow.</h3>
+          <h3>Start a task to spin up an assembly line.</h3>
           <p className="muted">
-            A task glues a workflow (an ordered chain of role-distinct agents)
+            A task glues an assembly line (an ordered chain of role-distinct agents)
             to an issue and a repo. Begin with the built-in <code>bug</code>{" "}
-            workflow or assemble your own.
+            assembly line or assemble your own.
           </p>
           <div className="task-empty-actions">
             <Link to="/tasks/new">
               <button className="primary">+ New task</button>
             </Link>
-            <Link to="/workflows">
-              <button>Browse workflows</button>
+            <Link to="/assembly-lines">
+              <button>Browse assembly lines</button>
             </Link>
           </div>
         </div>
@@ -203,14 +203,14 @@ function TaskCard({ task, onOpen }: { task: Task; onOpen: () => void }) {
       {stages.length > 0 ? (
         <MiniStageRail stages={stages} />
       ) : (
-        <div className="task-card-no-workflow muted">No workflow attached</div>
+        <div className="task-card-no-assembly-line muted">No assembly line attached</div>
       )}
-      {(task.workflow_name || currentAgent) && (
+      {(task.assembly_line_name || currentAgent) && (
         <div className="task-card-foot">
-          {task.workflow_name && (
-            <span className="task-card-workflow">
-              <WorkflowGlyph />
-              {task.workflow_name}
+          {task.assembly_line_name && (
+            <span className="task-card-assembly-line">
+              <AssemblyLineGlyph />
+              {task.assembly_line_name}
             </span>
           )}
           {currentAgent && (
@@ -256,7 +256,7 @@ function MiniStageRail({ stages }: { stages: TaskStage[] }) {
   );
 }
 
-function WorkflowGlyph() {
+function AssemblyLineGlyph() {
   return (
     <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <circle cx="5" cy="12" r="2" />

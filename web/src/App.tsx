@@ -11,8 +11,8 @@ import { TaskDetail } from "./routes/TaskDetail";
 import { NewTask } from "./routes/NewTask";
 import { AgentList } from "./routes/AgentList";
 import { AgentEditor } from "./routes/AgentEditor";
-import { WorkflowList } from "./routes/WorkflowList";
-import { WorkflowEditor } from "./routes/WorkflowEditor";
+import { AssemblyLineList } from "./routes/AssemblyLineList";
+import { AssemblyLineEditor } from "./routes/AssemblyLineEditor";
 
 const SIDEBAR_COLLAPSED_KEY = "agentctl.appSidebar.collapsed";
 
@@ -99,9 +99,9 @@ export function App() {
             <IconAgents />
             {!collapsed && <span>Agents</span>}
           </NavLink>
-          <NavLink to="/workflows" title="Workflows">
-            <IconWorkflows />
-            {!collapsed && <span>Workflows</span>}
+          <NavLink to="/assembly-lines" title="Assembly lines">
+            <IconAssemblyLines />
+            {!collapsed && <span>Assembly lines</span>}
           </NavLink>
         </nav>
         {!collapsed && <div className="section-label">Workspace</div>}
@@ -139,9 +139,9 @@ export function App() {
           <Route path="/agents" element={<AgentList />} />
           <Route path="/agents/new" element={<AgentEditor />} />
           <Route path="/agents/:name/edit" element={<AgentEditor />} />
-          <Route path="/workflows" element={<WorkflowList />} />
-          <Route path="/workflows/new" element={<WorkflowEditor />} />
-          <Route path="/workflows/:name/edit" element={<WorkflowEditor />} />
+          <Route path="/assembly-lines" element={<AssemblyLineList />} />
+          <Route path="/assembly-lines/new" element={<AssemblyLineEditor />} />
+          <Route path="/assembly-lines/:name/edit" element={<AssemblyLineEditor />} />
           <Route path="/sessions" element={<SessionList />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />
           <Route path="/new" element={<NewSession />} />
@@ -250,7 +250,7 @@ function IconAgents() {
   );
 }
 
-function IconWorkflows() {
+function IconAssemblyLines() {
   return (
     <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
