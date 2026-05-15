@@ -250,6 +250,7 @@ func Run(ctx context.Context, opts Options) error {
 		Library: taskLib,
 		Tasks:   taskMgr,
 		TaskHub: taskHub,
+		Secrets: newSecretsAdapter(opts.Layout.SecretsFile),
 		Logger:  webLog,
 	})
 	if err := webSrv.Start(); err != nil {

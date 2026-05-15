@@ -4,8 +4,10 @@ import { ConfirmModal } from "../components/ConfirmModal";
 import type {
   AddMcpRequest,
   AddSkillRequest,
+  GitHubTokenInfo,
   McpEntry,
   SkillEntry,
+  UpdateGitHubTokenRequest,
   UpdateMcpRequest,
 } from "../types";
 
@@ -40,9 +42,145 @@ export function Settings() {
           Changes apply only to future sessions; running sessions are unaffected.
         </span>
       </div>
+      <GitHubTokenSection />
       <McpSection />
       <SkillsSection />
     </section>
+  );
+}
+
+function GitHubTokenSection() {
+  const [info, setInfo] = useState<GitHubTokenInfo | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [token, setToken] = useState("");
+  const [skipValidate, setSkipValidate] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  async function load() {
+    try {
+      const r = await apiJson<GitHubTokenInfo>("/v1/secrets/github");
+      setInfo(r);
+      setLoadErr(null);
+    } catch (err) {
+      setLoadErr(formatErr(err));
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  function startEdit() {
+    setToken("");
+    setSkipValidate(false);
+    setError(null);
+    setEditing(true);
+  }
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = token.trim();
+    if (!trimmed) {
+      setError("token is required");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const req: UpdateGitHubTokenRequest = {
+        token: trimmed,
+        skip_validate: skipValidate,
+      };
+      const updated = await apiJson<GitHubTokenInfo>("/v1/secrets/github", {
+        method: "PUT",
+        ...jsonBody(req),
+      });
+      setInfo(updated);
+      setEditing(false);
+      setToken("");
+      setSavedAt(Date.now());
+    } catch (err) {
+      setError(formatErr(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="settings-section" style={{ marginBottom: 32 }}>
+      <div className="page-header">
+        <h3>GitHub token</h3>
+        {!editing && (
+          <button className="primary" onClick={startEdit} disabled={busy}>
+            {info?.has_token ? "Replace token" : "Set token"}
+          </button>
+        )}
+      </div>
+      {loadErr && <div className="error-text">{loadErr}</div>}
+      {info === null ? (
+        <div className="empty">Loading…</div>
+      ) : info.has_token ? (
+        <div className="muted">
+          Token set ({info.kind || "unknown"}
+          {info.hint ? `, ending in …${info.hint}` : ""}).
+          {savedAt && " Updated just now."}
+        </div>
+      ) : (
+        <div className="empty">
+          No GitHub token configured. Sessions that need GitHub access will fail
+          until one is set.
+        </div>
+      )}
+      {editing && (
+        <form
+          onSubmit={onSubmit}
+          className="form-grid"
+          style={{ marginTop: 16 }}
+        >
+          {error && <div className="error-text">{error}</div>}
+          <div className="field">
+            <label>Personal access token</label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="ghp_… or github_pat_…"
+              spellCheck={false}
+            />
+          </div>
+          <div className="field">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={skipValidate}
+                onChange={(e) => setSkipValidate(e.target.checked)}
+              />
+              <span>Skip validation against api.github.com</span>
+            </label>
+          </div>
+          <div className="toolbar">
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                setToken("");
+                setError(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
   );
 }
 

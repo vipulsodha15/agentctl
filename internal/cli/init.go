@@ -312,13 +312,13 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 
 	if f.githubPAT != "" {
 		if !skipGitHub {
-			if err := validateGitHubPAT(f.githubPAT); err != nil {
+			if err := secrets.ValidateGitHubPAT(context.Background(),f.githubPAT); err != nil {
 				return secrets.Secrets{}, err
 			}
 		}
 		out.GitHubPAT = f.githubPAT
 		if out.GitHubPATKind == "" {
-			out.GitHubPATKind = inferPATKind(f.githubPAT)
+			out.GitHubPATKind = secrets.InferGitHubPATKind(f.githubPAT)
 		}
 	} else if out.GitHubPAT == "" || f.resetToken == "github" {
 		v, err := promptSecret(env, "GITHUB_PAT: ")
@@ -329,12 +329,12 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 			return secrets.Secrets{}, fmt.Errorf("GITHUB_PAT required (use --github-pat)")
 		}
 		if !skipGitHub {
-			if err := validateGitHubPAT(v); err != nil {
+			if err := secrets.ValidateGitHubPAT(context.Background(),v); err != nil {
 				return secrets.Secrets{}, err
 			}
 		}
 		out.GitHubPAT = v
-		out.GitHubPATKind = inferPATKind(v)
+		out.GitHubPATKind = secrets.InferGitHubPATKind(v)
 	}
 	return out, nil
 }
@@ -734,35 +734,3 @@ func validateAnthropic(key string) error {
 	return nil
 }
 
-func validateGitHubPAT(pat string) error {
-	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+pat)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	client := http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("github api: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == 401 {
-		return fmt.Errorf("github PAT rejected (401)")
-	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("github api status %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func inferPATKind(pat string) string {
-	switch {
-	case strings.HasPrefix(pat, "github_pat_"):
-		return "fine-grained"
-	case strings.HasPrefix(pat, "ghp_"), strings.HasPrefix(pat, "gho_"), strings.HasPrefix(pat, "ghs_"):
-		return "classic"
-	default:
-		return "unknown"
-	}
-}

@@ -38,6 +38,7 @@ type Server struct {
 	library  LibraryService
 	tasks    TaskService
 	taskHub  TaskHub
+	secrets  SecretsService
 	token    string
 	addr     string
 	originOK string
@@ -57,6 +58,7 @@ type Options struct {
 	Library LibraryService
 	Tasks   TaskService
 	TaskHub TaskHub
+	Secrets SecretsService
 	Logger  *slog.Logger
 }
 
@@ -74,6 +76,7 @@ func New(opts Options) *Server {
 		library:  opts.Library,
 		tasks:    opts.Tasks,
 		taskHub:  opts.TaskHub,
+		secrets:  opts.Secrets,
 		token:    opts.Token,
 		addr:     opts.Addr,
 		originOK: "http://" + opts.Addr,
@@ -198,6 +201,16 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		methodNotAllowed(w)
+		return
+	case path == "/v1/secrets/github":
+		switch method {
+		case http.MethodGet:
+			s.handleGetGitHubToken(w, r)
+		case http.MethodPut:
+			s.requireOrigin(w, r, s.handleUpdateGitHubToken)
+		default:
+			methodNotAllowed(w)
+		}
 		return
 	case path == "/v1/agents":
 		switch method {
