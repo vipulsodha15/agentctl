@@ -57,7 +57,7 @@ references them for tracing instrumentation.
   too many parameters to template safely; brittle output parsing for
   inspect/info; no way to share an authenticated connection between
   long-lived inspect loops and one-off calls.
-- **`testcontainers-go`.** Rejected: it adds workflow-test machinery on
+- **`testcontainers-go`.** Rejected: it adds assembly-line-test machinery on
   top of the SDK we already need; cm only needs the lower layer.
 
 ## References

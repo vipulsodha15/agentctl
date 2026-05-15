@@ -1,8 +1,8 @@
-# agentctl — Task-Driven Workflows (v0 Requirements)
+# agentctl — Task-Driven Assembly lines (v0 Requirements)
 
-This document specifies the **task-driven, multi-agent workflow** system
+This document specifies the **task-driven, multi-agent assembly line** system
 layered on top of agentctl's v1 session/skill/MCP primitives. It introduces
-three new top-level objects — **Agents**, **Workflows**, and **Tasks** —
+three new top-level objects — **Agents**, **Assembly lines**, and **Tasks** —
 and the chat-thread UI that drives them.
 
 This is the input to a separate technical-architecture pass.
@@ -20,23 +20,23 @@ The gap this document closes:
   implement.
 - Real work needs role-distinct agents, not one prompt doing everything.
 
-**Vision.** A developer creates a task, attaches a workflow to it, and the
-workflow runs an ordered chain of role-distinct agents. Each agent does
+**Vision.** A developer creates a task, attaches a assembly line to it, and the
+assembly line runs an ordered chain of role-distinct agents. Each agent does
 its phase in full process and disk isolation (own container, own volume),
 produces a synthesis when the user clicks Hand off, and that synthesis
 seeds the next agent. The user sees one continuous chat thread per task
 with role shifts at each handoff seam.
 
-**v0 scope.** Build the agent/workflow/task primitives end-to-end against
-one concrete vertical slice — a `bug` workflow with three built-in agents
+**v0 scope.** Build the agent/assembly line/task primitives end-to-end against
+one concrete vertical slice — a `bug` assembly line with three built-in agents
 (`bug-investigator`, `bug-planner`, `bug-executor`). The primitives are
-generic; custom workflows and custom agents are authorable from day one.
+generic; custom assembly lines and custom agents are authorable from day one.
 Manual task creation only.
 
 **Explicitly out of v0:** backtracking, approval gates per stage, shared
 workspace across stages, Timeline tab, audit-log table, per-agent handoff
-templates, per-stage workflow notes, idle timeouts, workspace TTL/janitor,
-DAG / branching / parallel workflows.
+templates, per-stage assembly line notes, idle timeouts, workspace TTL/janitor,
+DAG / branching / parallel assembly lines.
 
 ## 2. Components and glossary
 
@@ -45,8 +45,8 @@ DAG / branching / parallel workflows.
 | **Skill** | existing | A `SKILL.md` — prompt fragment / instructions. | `~/.local/share/agentctl/{builtin,custom}-skills/<name>/SKILL.md` |
 | **MCP server** | existing | External tool server. | `mcp_registry` table |
 | **Agent** | **new** | A reusable session template: prompt, MCP allowlist, skill allowlist, model. | `~/.local/share/agentctl/agents/<name>.yaml` |
-| **Workflow** | **new** | An ordered list of agent names with a name and description. | `~/.local/share/agentctl/workflows/<name>.yaml` |
-| **Task** | **new** | A live run: *this workflow + this issue/task + this repo*. The chat thread is its body. | `tasks` table in sqlite |
+| **Assembly line** | **new** | An ordered list of agent names with a name and description. | `~/.local/share/agentctl/assembly-lines/<name>.yaml` |
+| **Task** | **new** | A live run: *this assembly line + this issue/task + this repo*. The chat thread is its body. | `tasks` table in sqlite |
 | **Stage** | **new** | One agent's run within a task. Status: `pending` / `active` / `done`. Backed by one Session. | `stages` table in sqlite |
 
 **Synthesis** — a single chat message produced by the current agent in
@@ -71,7 +71,7 @@ transition (`─── handed off to Planner ───`).
 5. **Chat-first refinement, no editor in between.** The user shapes a
    stage's output by talking to its agent before clicking Hand off.
 6. **agentd is the sole writer of task and stage state.** Clients emit
-   *intent* (`AttachWorkflow`, `Handoff`, `Complete`, `Abandon`, `Send`);
+   *intent* (`AttachAssembly line`, `Handoff`, `Complete`, `Abandon`, `Send`);
    containers stream output. agentd interprets these into state
    transitions.
 7. **CLI and Web UI parity preserved** (mirrors v1 R4).
@@ -83,7 +83,7 @@ transition (`─── handed off to Planner ───`).
 | Stage transition latency (Hand off click → next stage's first reply streams) | ≤ 15s p50 (incl. fresh clone + container start) |
 | Concurrent tasks on a developer machine | ≥ 5 |
 | Chat thread render | ≤ 100ms for threads ≤ 100 messages |
-| Workflow YAML size | ≤ 16 KB |
+| Assembly line YAML size | ≤ 16 KB |
 | Agent YAML size | ≤ 16 KB |
 
 ## 5. Defaults
@@ -91,7 +91,7 @@ transition (`─── handed off to Planner ───`).
 | Setting | Default |
 |---|---|
 | Built-in agents | `bug-investigator`, `bug-planner`, `bug-executor` |
-| Built-in workflows | `bug` |
+| Built-in assembly lines | `bug` |
 | Default agent model | Inherits from `[session].default_model` |
 | Stage palette | Blue (investigator), Purple (planner), Green (executor); 6-swatch palette for custom agents |
 
@@ -147,7 +147,7 @@ agent prefilled from the built-in.
 | `agentctl agent show <name>` | Print agent YAML. |
 | `agentctl agent add <name> --from <path>` | Add a custom agent from a YAML file. |
 | `agentctl agent edit <name>` | Open the agent YAML in `$EDITOR`. Built-ins refuse. |
-| `agentctl agent remove <name>` | Delete a custom agent. Refuses if any workflow references it. |
+| `agentctl agent remove <name>` | Delete a custom agent. Refuses if any assembly line references it. |
 
 **Web UI — Agents tab** (sibling to Skills and MCPs in the nav). Two-pane
 layout: searchable list on the left, edit form on the right. Form fields:
@@ -159,12 +159,12 @@ picker), skills allowed (multi-select chip picker). Built-in agents show
 **Acceptance.**
 
 - A new custom agent created in the UI is immediately usable in the
-  Workflow composer.
+  Assembly line composer.
 - The same set of agents is visible from `agentctl agent list` and the
   Agents tab.
 - Editing an agent's YAML on disk reflects in the Agents tab within 2s.
-- Removing an agent referenced by a workflow fails with a clear error
-  listing the referencing workflows.
+- Removing an agent referenced by a assembly line fails with a clear error
+  listing the referencing assembly lines.
 
 **Error cases.** Duplicate name on add → reject. Missing `name` or
 `prompt` → reject. References to non-existent MCPs or skills → warn at
@@ -172,16 +172,16 @@ load, skip at session start.
 
 ---
 
-### R2. Workflow as an ordered list of agents
+### R2. Assembly line as an ordered list of agents
 
-A workflow is just a name, a description, and an ordered list of agent
+A assembly line is just a name, a description, and an ordered list of agent
 names. No per-stage configuration in v0.
 
-**Workflow schema** (`~/.local/share/agentctl/workflows/<name>.yaml`):
+**Assembly line schema** (`~/.local/share/agentctl/assembly-lines/<name>.yaml`):
 
 ```yaml
 name: bug
-description: Bug fix workflow.
+description: Bug fix assembly line.
 stages:
   - agent: bug-investigator
   - agent: bug-planner
@@ -191,7 +191,7 @@ stages:
 **Constraint.** Linear chains only. ≥ 1 stage. Each stage is just an agent
 reference; no per-stage approval flag, no per-stage notes.
 
-**Built-in workflows shipped in v0.**
+**Built-in assembly lines shipped in v0.**
 
 | Name | Stages |
 |---|---|
@@ -201,13 +201,13 @@ reference; no per-stage approval flag, no per-stage notes.
 
 | Command | Behavior |
 |---|---|
-| `agentctl workflow list` | List workflows (name, description, stage count, builtin/custom). |
-| `agentctl workflow show <name>` | Print the workflow YAML. |
-| `agentctl workflow add <name> --from <path>` | Add a custom workflow. |
-| `agentctl workflow edit <name>` | Open in `$EDITOR`. Refuses if any task in `working` references it. |
-| `agentctl workflow remove <name>` | Delete. Refuses if any task in `working` references it. |
+| `agentctl assembly-line list` | List assembly lines (name, description, stage count, builtin/custom). |
+| `agentctl assembly-line show <name>` | Print the assembly line YAML. |
+| `agentctl assembly-line add <name> --from <path>` | Add a custom assembly line. |
+| `agentctl assembly-line edit <name>` | Open in `$EDITOR`. Refuses if any task in `working` references it. |
+| `agentctl assembly-line remove <name>` | Delete. Refuses if any task in `working` references it. |
 
-**Web UI — Workflows tab.** Two-pane layout, composer on the right:
+**Web UI — Assembly lines tab.** Two-pane layout, composer on the right:
 
 - Name, description (text inputs).
 - **Stages**: vertically stacked ordered list. Each row contains an
@@ -220,10 +220,10 @@ reference; no per-stage approval flag, no per-stage notes.
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Workflows                                                  │
+│ Assembly lines                                                  │
 ├──────────────┬─────────────────────────────────────────────┤
 │ + New        │ Name:        [ bug                       ]  │
-│              │ Description: [ Bug fix workflow          ]  │
+│              │ Description: [ Bug fix assembly line          ]  │
 │ ▌ bug        │                                             │
 │   builtin    │ Stages                                      │
 │              │ ┌─────────────────────────────────────────┐ │
@@ -243,10 +243,10 @@ reference; no per-stage approval flag, no per-stage notes.
 
 **Acceptance.**
 
-- A new workflow created in the composer is immediately startable as a
+- A new assembly line created in the composer is immediately startable as a
   task.
-- A workflow referencing a non-existent agent fails validation at save.
-- Editing a workflow's YAML on disk is reflected in the UI within 2s.
+- A assembly line referencing a non-existent agent fails validation at save.
+- Editing a assembly line's YAML on disk is reflected in the UI within 2s.
 
 ---
 
@@ -259,17 +259,17 @@ reference; no per-stage approval flag, no per-stage notes.
     task start.
   - Freeform — title + body typed into a form.
 - **Repo URL** — same `--repo` semantics as v1.
-- **Workflow** — optional at create time; can be attached later.
+- **Assembly line** — optional at create time; can be attached later.
 - **Name** (optional) — display label; defaults to the issue title or
   first 60 chars of the freeform task.
 
 **Status lifecycle (4 states).**
 
 ```
-   ┌──────────────┐  user attaches workflow
+   ┌──────────────┐  user attaches assembly line
    │ not-started  │────────────────────────────┐
    └──────┬───────┘                            │
-          │ created with workflow              ▼
+          │ created with assembly line              ▼
           │                             ┌───────────┐
           └────────────────────────────▶│  working  │
                                         └─────┬─────┘
@@ -282,9 +282,9 @@ reference; no per-stage approval flag, no per-stage notes.
    └──────────┘                          └────────────┘
 ```
 
-- `not-started` — task exists but no workflow attached. No stages, no
+- `not-started` — task exists but no assembly line attached. No stages, no
   sessions, no clones.
-- `working` — workflow attached; at least one stage is `active` or
+- `working` — assembly line attached; at least one stage is `active` or
   `pending`.
 - `done` — user clicked "Complete task" on the chat composer (only
   available when the final stage is `active`).
@@ -297,13 +297,13 @@ work, the user reviews the chat, then clicks Complete.
 
 | Task transition | Intent |
 |---|---|
-| `not-started → working` | AttachWorkflow (or task created with workflow) |
+| `not-started → working` | AttachAssembly line (or task created with assembly line) |
 | `working → done` | Complete (only allowed when current stage is the final stage and `active`) |
 | any → `abandoned` | Abandon |
 
-**Base SHA recorded at workflow attach.** When a workflow is attached
-(at task creation if a workflow is provided, otherwise at the later
-`AttachWorkflow`), agentd resolves the repo's default branch HEAD and
+**Base SHA recorded at assembly line attach.** When a assembly line is attached
+(at task creation if a assembly line is provided, otherwise at the later
+`AttachAssembly line`), agentd resolves the repo's default branch HEAD and
 records it as the task's `base_sha`. Every stage clones at this SHA.
 
 **Per-stage isolation.** When a stage transitions to `active`:
@@ -318,12 +318,12 @@ records it as the task's `base_sha`. Every stage clones at this SHA.
    the prior stage's synthesis (stages 2+ only).
 6. agentd seeds the session with its first user-message:
    - **Stage 1**: *"A new task has been opened. The issue is at
-     `.agentctl/task/issue.md`. The next agent in this workflow is
+     `.agentctl/task/issue.md`. The next agent in this assembly line is
      `<next_agent>` (or 'You are the final stage'). Investigate per your
      role; when you are ready to hand off, say so explicitly in chat."*
    - **Stage N > 1**: *"You are receiving handoff from `<prev_agent>`.
      Their synthesis is at `.agentctl/task/handoff-in.md`. The next agent
-     in this workflow is `<next_agent>` (or 'You are the final stage').
+     in this assembly line is `<next_agent>` (or 'You are the final stage').
      Begin per your role; when you are ready to hand off, say so
      explicitly in chat."*
 
@@ -346,9 +346,9 @@ GitHub, not in any local volume.
 
 | Command | Behavior |
 |---|---|
-| `agentctl task create [--workflow <name>] [--repo <url>] [--issue <gh-url> \| --task <title>] [--name <name>]` | Create a task. If no workflow, status is `not-started`. |
-| `agentctl task attach <id> --workflow <name>` | Attach a workflow to a `not-started` task. |
-| `agentctl task ls` | List tasks with status, workflow, current stage, last activity, cost. |
+| `agentctl task create [--assembly line <name>] [--repo <url>] [--issue <gh-url> \| --task <title>] [--name <name>]` | Create a task. If no assembly line, status is `not-started`. |
+| `agentctl task attach <id> --assembly line <name>` | Attach a assembly line to a `not-started` task. |
+| `agentctl task ls` | List tasks with status, assembly line, current stage, last activity, cost. |
 | `agentctl task show <id>` | Detailed status: stage timeline, current synthesis, PR URL if any. |
 | `agentctl task open <id>` | Attach the terminal to the task's chat thread. |
 | `agentctl task handoff <id>` | Trigger handoff on the current stage. |
@@ -357,7 +357,7 @@ GitHub, not in any local volume.
 
 **Acceptance.**
 
-- `agentctl task create` with `--workflow` returns within the stage
+- `agentctl task create` with `--assembly line` returns within the stage
   transition budget with stage 1 `active`.
 - A `not-started` task has no stages; on `attach`, stages are created in
   `pending` and stage 1 transitions to `active`.
@@ -374,7 +374,7 @@ GitHub, not in any local volume.
 - Repo clone fails on stage start → chat thread surfaces the error;
   stage stays `active`; the user can retry by sending a message or
   Abandon.
-- Workflow attached but references a now-removed agent → attach fails
+- Assembly line attached but references a now-removed agent → attach fails
   with a clear error.
 
 ---
@@ -386,7 +386,7 @@ GitHub, not in any local volume.
 
 ```
    ┌─────────┐
-   │ pending │  prior stage done OR workflow just attached & this is stage 1
+   │ pending │  prior stage done OR assembly line just attached & this is stage 1
    └────┬────┘
         │ agentd spawns session, clones repo, seeds workspace
         ▼
@@ -449,11 +449,11 @@ chooses between sending another message (retry the agent) and Abandon.
 4. `done` and `abandoned` are terminal task statuses; no transitions out
    of them.
 
-**Worked example (bug workflow, happy path).**
+**Worked example (bug assembly line, happy path).**
 
 | # | Event | Task | Stage 1 (Inv.) | Stage 2 (Pln.) | Stage 3 (Exc.) |
 |---|---|---|---|---|---|
-| 0 | Task created with `--workflow bug` | `working` | `active` | `pending` | `pending` |
+| 0 | Task created with `--assembly line bug` | `working` | `active` | `pending` | `pending` |
 | 1 | User chats with investigator | `working` | `active` | `pending` | `pending` |
 | 2 | User clicks Hand off → synthesis emitted | `working` | `done` | `active` | `pending` |
 | 3 | User chats with planner | `working` | `done` | `active` | `pending` |
@@ -484,7 +484,7 @@ switcher exposes Diff and Cost views.
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Task #42 · "Cart abandons on Safari iOS 17"   [ Abandon ]    │
-│ workflow: bug · status: working · current stage: Planner     │
+│ assembly line: bug · status: working · current stage: Planner     │
 ├──────────────────────────────────────────────────────────────┤
 │  ✅ Investigator ──── ◔ Planner ──── ○ Executor              │
 ├─────────────────────────────────────────────┬────────────────┤
@@ -519,7 +519,7 @@ switcher exposes Diff and Cost views.
 
 **Layout elements.**
 
-- **Header row**: task name + ID, "Abandon" action, workflow name, task
+- **Header row**: task name + ID, "Abandon" action, assembly line name, task
   status, current stage badge.
 - **Stage rail**: one pill per stage, in order. Each pill shows the
   agent's colour, name, and status dot (`✅` done, `◔` active, `○`
@@ -542,8 +542,8 @@ switcher exposes Diff and Cost views.
   - Buttons: `[Send]` and one of:
     - `[Hand off to <next> ▸]` when current stage is not the final stage.
     - `[Complete task ✓]` when current stage is the final stage.
-  - In `not-started` status, the composer is replaced by a workflow
-    picker affordance: *"Attach a workflow to begin."*
+  - In `not-started` status, the composer is replaced by a assembly line
+    picker affordance: *"Attach a assembly line to begin."*
   - In `done` or `abandoned`, the composer is read-only with a banner.
 
 **UX invariants.**
@@ -551,7 +551,7 @@ switcher exposes Diff and Cost views.
 - One composer, always pointed at the current stage's agent.
 - Vertical scroll history, no horizontal stage columns.
 - Role identity via colour stripe and avatar repeated on every message.
-- Workflow-progression actions only on the composer.
+- Assembly line-progression actions only on the composer.
 
 **Acceptance.**
 
@@ -581,13 +581,13 @@ Every UI operation has a CLI equivalent.
 | Command group | Commands |
 |---|---|
 | `agentctl agent` | `list`, `show`, `add`, `edit`, `remove` |
-| `agentctl workflow` | `list`, `show`, `add`, `edit`, `remove` |
+| `agentctl assembly-line` | `list`, `show`, `add`, `edit`, `remove` |
 | `agentctl task` | `create`, `attach`, `ls`, `show`, `open`, `handoff`, `complete`, `abandon` |
 
 **Stream attach** (`agentctl task open <id>`) connects the terminal to
 the task's chat thread:
 
-- Header line with task name, workflow, current stage.
+- Header line with task name, assembly line, current stage.
 - Streaming messages with simple ANSI colouring keyed to the agent's
   colour field.
 - Seams as full-width horizontal rules.
@@ -599,7 +599,7 @@ the task's chat thread:
 
 **Acceptance.**
 
-- All UI workflow-progression actions have equivalent CLI commands and
+- All UI assembly line-progression actions have equivalent CLI commands and
   slash controls.
 - `agentctl task ls` and the Tasks page list the same set of tasks with
   the same status at any moment.
@@ -618,15 +618,15 @@ the task's chat thread:
 |---|---|---|
 | `task_id` | text, PK | UUID. |
 | `name` | text | Display label. |
-| `workflow_name` | text, nullable | Null while `not-started`. References `workflows/<name>.yaml`. |
+| `assembly line_name` | text, nullable | Null while `not-started`. References `assembly lines/<name>.yaml`. |
 | `repo_url` | text | Source repo. |
-| `base_sha` | text, nullable | Recorded at workflow attach. |
+| `base_sha` | text, nullable | Recorded at assembly line attach. |
 | `source_kind` | text | `github_issue` \| `freeform`. |
 | `source_url` | text, nullable | Issue URL if `source_kind = github_issue`. |
 | `issue_md` | text | Title + body, seeded into each stage's volume. |
 | `current_stage_id` | text, FK → stages.stage_id, nullable | Null while `not-started`, `done`, or `abandoned`. |
 | `status` | text | `not-started` \| `working` \| `done` \| `abandoned`. |
-| `created_at`, `started_at`, `ended_at` | timestamps | `started_at` set on workflow attach; `ended_at` on `done` or `abandoned`. |
+| `created_at`, `started_at`, `ended_at` | timestamps | `started_at` set on assembly line attach; `ended_at` on `done` or `abandoned`. |
 
 `stages`:
 
@@ -634,7 +634,7 @@ the task's chat thread:
 |---|---|---|
 | `stage_id` | text, PK | UUID. |
 | `task_id` | text, FK → tasks | |
-| `position` | int | 1-indexed in workflow's stage list. |
+| `position` | int | 1-indexed in assembly line's stage list. |
 | `agent_name` | text | Referenced agent at stage creation. |
 | `session_id` | text, FK → sessions, nullable | Backing session; null after `done`. |
 | `volume_id` | text, nullable | Per-stage volume; null after teardown. |
@@ -642,7 +642,7 @@ the task's chat thread:
 | `status` | text | `pending` \| `active` \| `done`. |
 | `started_at`, `ended_at` | timestamps, nullable | |
 
-No `stage_events` table. No `workflow_snapshot_json`. State transitions
+No `stage_events` table. No `assembly line_snapshot_json`. State transitions
 are reconstructible from the chat message log + stage status fields.
 
 **On-disk YAML layout.**
@@ -654,7 +654,7 @@ are reconstructible from the chat message log + stage status fields.
 │   ├── bug-planner.yaml               # built-in
 │   ├── bug-executor.yaml              # built-in
 │   └── <custom>.yaml
-└── workflows/
+└── assembly lines/
     ├── bug.yaml                       # built-in
     └── <custom>.yaml
 ```
@@ -702,7 +702,7 @@ deferred.
 **No automatic GitHub write-back.** The task does not post comments back
 to the source issue, does not change labels, does not update assignees.
 The executor stage *does* open a PR (via GitHub MCP) as a side effect of
-its agent behavior, not a workflow-runtime feature.
+its agent behavior, not a assembly line-runtime feature.
 
 **Acceptance.**
 
@@ -727,7 +727,7 @@ task IDs make collisions vanishingly rare but not impossible.
 
 Each stage has its own volume, so the Diff tab shows different content
 depending on which stage is focused. For stages 1 and 2 of the bug
-workflow, the diff is empty (read-only stages). UI defaults to the
+assembly line, the diff is empty (read-only stages). UI defaults to the
 executor's diff when its stage is `active` or `done`.
 
 ### 7.3. Retrying a failed stage
@@ -737,10 +737,10 @@ v0: there is no in-place retry. If a stage fails, the user can either
 task. The synthesis from the prior task can be copied into the new
 task's body if useful.
 
-### 7.4. Workflow edits while tasks are running
+### 7.4. Assembly line edits while tasks are running
 
-`workflow edit` and `workflow remove` refuse when any task in `working`
-references the workflow. Whether to also refuse for `not-started` tasks
+`assembly line edit` and `assembly line remove` refuse when any task in `working`
+references the assembly line. Whether to also refuse for `not-started` tasks
 (which haven't yet snapshotted anything) is an architect call.
 
 ---
@@ -749,10 +749,10 @@ references the workflow. Whether to also refuse for `not-started` tasks
 
 - **Backtracking** (Hand back to a prior stage).
 - **Approval gates per stage** (Hand-off click is the universal gate).
-- **Per-stage workflow notes** or per-workflow agent role overrides.
+- **Per-stage assembly line notes** or per-assembly line agent role overrides.
 - **Shared workspace across stages.** Each stage clones fresh.
 - **Per-agent handoff template.** One default template is used everywhere.
-- **DAG / branching / conditional / parallel workflows.**
+- **DAG / branching / conditional / parallel assembly lines.**
 - **Webhook / label-triggered task creation.**
 - **Auto-syncing task status back to the source GitHub issue.**
 - **Timeline tab, audit-log table** (`stage_events`).
@@ -761,9 +761,9 @@ references the workflow. Whether to also refuse for `not-started` tasks
 - **Cost limits / budgets / alerts per task.**
 - **Multi-step backtrack, cross-agent direct dialogue.**
 - **Structured (JSON) handoff artifacts.**
-- **Sub-workflows** (a stage that runs a workflow).
-- **Workflow snapshot per task** (live-follow is fine because edits to
-  in-use workflows are refused).
+- **Sub-assembly lines** (a stage that runs a assembly line).
+- **Assembly line snapshot per task** (live-follow is fine because edits to
+  in-use assembly lines are refused).
 - **Multi-task batch operations.**
 - **Mobile UI for the task page.**
 - **Exporting the task transcript as a file.**

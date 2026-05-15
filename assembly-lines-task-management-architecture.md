@@ -1,11 +1,11 @@
-# Workflows & Task Management — Architecture
+# Assembly lines & Task Management — Architecture
 
 This document is the technical architecture pass on
-`workflows-task-management.md` (the v0 requirements). It maps the new
-top-level objects — **Agents**, **Workflows**, **Tasks**, **Stages** —
+`assembly-lines-task-management.md` (the v0 requirements). It maps the new
+top-level objects — **Agents**, **Assembly lines**, **Tasks**, **Stages** —
 onto agentctl v1's existing daemon, container, data, and API surfaces.
 
-Read `workflows-task-management.md` first; this doc references its
+Read `assembly-lines-task-management.md` first; this doc references its
 requirement numbers (R1–R8) verbatim. Sibling v1 architecture docs that
 this one extends are listed in §13.
 
@@ -31,7 +31,7 @@ Three layers, top-down:
 
 ```
 ┌─ Task ─────────────────────────────────────────────────────┐
-│  workflow + issue + repo + chat thread                     │
+│  assembly line + issue + repo + chat thread                     │
 │                                                            │
 │  ┌─ Stage 1 ─────────┐  ┌─ Stage 2 ─────────┐  ┌─ Stage 3 ┐│
 │  │ agent A           │  │ agent B           │  │ agent C  ││
@@ -57,7 +57,7 @@ The four invariants the architecture is built around:
    the stage reaches `done`. The only thing that crosses the boundary
    is one chat message (the synthesis).
 4. **agentd is the sole writer of task and stage state.** Clients emit
-   intents (`AttachWorkflow`, `Handoff`, `Complete`, `Abandon`, `Send`);
+   intents (`AttachAssembly line`, `Handoff`, `Complete`, `Abandon`, `Send`);
    the per-task actor interprets them into state transitions and
    spawns / tears down session actors accordingly. This mirrors v1's
    "agentd is the single source of truth" principle (overview.md §5).
@@ -69,7 +69,7 @@ What is **not** introduced by this layer:
   unchanged.
 - No new event-buffer or replay surface. The chat thread is the union
   of every stage's snapshot (per ADR 0015), labelled by stage.
-- No daemon-side workflow-DAG engine. v0 workflows are ordered lists
+- No daemon-side assembly line-DAG engine. v0 assembly lines are ordered lists
   of agent names; the per-task actor walks the list one step at a time.
 
 ## 2. Component diagram (delta from v1)
@@ -86,7 +86,7 @@ graph TB
       sm[Session manager<br/>per-session actor]
       cm[Container manager]
       tm["<b>Task manager</b><br/>per-task actor"]:::new
-      ttl["<b>Task library</b><br/>agents + workflows<br/>YAML index"]:::new
+      ttl["<b>Task library</b><br/>agents + assembly lines<br/>YAML index"]:::new
       api[Logical API handlers]
       fan[Event fan-out]
       sock[CLI socket]
@@ -95,7 +95,7 @@ graph TB
     end
 
     db[(sqlite<br/>agentd.db)]
-    yamls[/"<b>~/.local/share/agentctl/<br/>{agents,workflows}/*.yaml</b>"/]:::new
+    yamls[/"<b>~/.local/share/agentctl/<br/>{agents,assembly lines}/*.yaml</b>"/]:::new
     voldir[/sessions/<id>/<br/>volume + control + log/]
 
     subgraph Docker["Docker engine"]
@@ -127,7 +127,7 @@ What's new in this layer:
 - **Task manager (`tm`)** — a per-task actor mirroring `sm`'s shape.
   Owns the task's status, stage list, and which session is the current
   stage. Lives alongside `sm`, not inside it.
-- **Task library (`ttl`)** — an in-memory index of agent + workflow
+- **Task library (`ttl`)** — an in-memory index of agent + assembly line
   YAML files, kept in sync with disk via fsnotify (R1 acceptance).
   Read-mostly; mutations go through the API and write to disk through
   this module so the index never drifts from the on-disk copy.
@@ -145,9 +145,9 @@ same trust posture as v1 session containers (peer-isolated via
 
 ## 3. Lifecycle sequence diagrams
 
-### 3.1 Task creation with a workflow (happy path)
+### 3.1 Task creation with a assembly line (happy path)
 
-The `CreateTask --workflow bug --issue <gh-url>` path:
+The `CreateTask --assembly line bug --issue <gh-url>` path:
 
 ```mermaid
 sequenceDiagram
@@ -162,9 +162,9 @@ sequenceDiagram
   participant GH as GitHub MCP (in stage 1 ctnr)
   participant DOC as Docker
 
-  Dev->>CLI: agentctl task create --workflow bug --issue ...
-  CLI->>API: CreateTask{workflow, repo, issue_url}
-  API->>TTL: resolve workflow + agent refs
+  Dev->>CLI: agentctl task create --assembly line bug --issue ...
+  CLI->>API: CreateTask{assembly line, repo, issue_url}
+  API->>TTL: resolve assembly line + agent refs
   alt agent missing
     API-->>CLI: error{validation_failed}
   end
@@ -189,7 +189,7 @@ sequenceDiagram
 
 Failure modes that surface synchronously (before any stage spawns):
 
-- Invalid workflow / unknown agent → `validation_failed`.
+- Invalid assembly line / unknown agent → `validation_failed`.
 - Unreachable GitHub issue → `source_unreachable`.
 - Default branch resolve failure → `repo_unreachable`.
 
@@ -309,9 +309,9 @@ columns (§4.2). No changes to `mcp_registry`, `usage`,
 CREATE TABLE tasks (
     task_id           TEXT PRIMARY KEY,                  -- ULID, "task_01JFZ..."
     name              TEXT NOT NULL,                     -- display label
-    workflow_name     TEXT,                              -- NULL while not-started; references workflows/<name>.yaml
+    assembly line_name     TEXT,                              -- NULL while not-started; references assembly lines/<name>.yaml
     repo_url          TEXT NOT NULL,
-    base_sha          TEXT,                              -- recorded at workflow attach; NULL while not-started
+    base_sha          TEXT,                              -- recorded at assembly line attach; NULL while not-started
     source_kind       TEXT NOT NULL                      -- github_issue | freeform
                         CHECK (source_kind IN ('github_issue','freeform')),
     source_url        TEXT,                              -- issue URL if source_kind = github_issue
@@ -321,7 +321,7 @@ CREATE TABLE tasks (
     status            TEXT NOT NULL                      -- not-started | working | done | abandoned
                         CHECK (status IN ('not-started','working','done','abandoned')),
     created_at        TEXT NOT NULL,                     -- RFC3339Nano
-    started_at        TEXT,                              -- set on workflow attach
+    started_at        TEXT,                              -- set on assembly line attach
     ended_at          TEXT                               -- set on done | abandoned
 );
 CREATE INDEX idx_tasks_status_started ON tasks(status, started_at);
@@ -330,7 +330,7 @@ CREATE TABLE stages (
     stage_id     TEXT PRIMARY KEY,                       -- ULID, "stg_01JFZ..."
     task_id      TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
     position     INTEGER NOT NULL,                       -- 1-indexed
-    agent_name   TEXT NOT NULL,                          -- snapshot of workflow's agent at task creation
+    agent_name   TEXT NOT NULL,                          -- snapshot of assembly line's agent at task creation
     session_id   TEXT REFERENCES sessions(id),           -- backing session; NULL after done/abandoned
     volume_name  TEXT,                                   -- agentctl-stage-<stage_id>; NULL after teardown
     synthesis    TEXT,                                   -- locked once status=done
@@ -351,11 +351,11 @@ Rationale notes:
   `agentctl task show`) and own their own lifecycle timestamps and
   synthesis. JSON-on-`tasks` would push that bookkeeping into
   string-munging.
-- **Why no `workflow_snapshot_json` column.** R8 of the requirements
-  explicitly rejects per-task workflow snapshots; we keep `agent_name`
+- **Why no `assembly line_snapshot_json` column.** R8 of the requirements
+  explicitly rejects per-task assembly line snapshots; we keep `agent_name`
   on each stage row at task-creation time, which is enough to survive
-  workflow edits (refused while a task is `working` — R2). The
-  workflow YAML on disk is the live source for *future* tasks; in-flight
+  assembly line edits (refused while a task is `working` — R2). The
+  assembly line YAML on disk is the live source for *future* tasks; in-flight
   tasks freeze their stage list at creation.
 - **Why `current_stage_id` is nullable + `DEFERRABLE`.** A new task in
   `not-started` has no stages yet; the FK only resolves after the
@@ -402,7 +402,7 @@ they're configured per-stage from the resolved agent's YAML (§4.3).
 │   ├── bug-planner.yaml            # built-in
 │   ├── bug-executor.yaml           # built-in
 │   └── <custom>.yaml
-└── workflows/
+└── assembly lines/
     ├── bug.yaml                    # built-in
     └── <custom>.yaml
 ```
@@ -413,10 +413,10 @@ parent dirs, `0600` on files (the `secrets.json` posture, not the
 `web_token` one; YAML may inline an MCP allowlist that names the
 GitHub MCP, but no actual secrets land here).
 
-Built-in agent and workflow YAML files ship inside the agentctl
+Built-in agent and assembly line YAML files ship inside the agentctl
 release tarball at
 `~/.local/share/agentctl/image/builtin-agents/` and
-`~/.local/share/agentctl/image/builtin-workflows/`. `agentctl init`
+`~/.local/share/agentctl/image/builtin-assembly lines/`. `agentctl init`
 copies them into the live directories (idempotent, like the v1
 built-in-skills install). `agentctl update` re-copies built-in files
 **only if the on-disk built-in copy is unchanged from the previous
@@ -459,12 +459,12 @@ Validation rules:
   this).
 - File size ≤ 16 KB (R-NFR).
 
-#### Workflow schema (validated at load)
+#### Assembly line schema (validated at load)
 
 ```yaml
-# ~/.local/share/agentctl/workflows/<name>.yaml
+# ~/.local/share/agentctl/assembly-lines/<name>.yaml
 name: bug                                    # matches filename stem
-description: Bug fix workflow.
+description: Bug fix assembly line.
 stages:                                      # ordered, non-empty, ≤ 16 stages
   - agent: bug-investigator
   - agent: bug-planner
@@ -478,7 +478,7 @@ Validation rules:
   `agent`; v0 carries no per-stage configuration.
 - Every `agent` value resolves to an agent in the live agent index
   (otherwise: validation_failed at load *and* at task-create time, so
-  a workflow that references a now-removed agent fails as the task
+  a assembly line that references a now-removed agent fails as the task
   starts, not silently).
 - File size ≤ 16 KB.
 
@@ -489,8 +489,8 @@ distinct event names. No new table.
 
 | event | when | detail_json |
 |---|---|---|
-| `task_created` | INSERT into tasks | `{ task_id, workflow_name?, source_kind, source_url? }` |
-| `task_workflow_attached` | not-started → working | `{ task_id, workflow_name, base_sha }` |
+| `task_created` | INSERT into tasks | `{ task_id, assembly line_name?, source_kind, source_url? }` |
+| `task_assembly line_attached` | not-started → working | `{ task_id, assembly line_name, base_sha }` |
 | `task_stage_advanced` | stage K → done + stage K+1 → active | `{ task_id, from_stage_id, to_stage_id }` |
 | `task_completed` | working → done | `{ task_id }` |
 | `task_abandoned` | any → abandoned | `{ task_id, abandoned_from_status }` |
@@ -534,8 +534,8 @@ that, and `issue.md` is title + body of a GitHub issue.
 
 ```
    ┌──────────────┐
-   │ not-started  │── AttachWorkflow ──▶ working
-   └──────────────┘── CreateTask{+workflow} ──▶ working (skip not-started)
+   │ not-started  │── AttachAssembly line ──▶ working
+   └──────────────┘── CreateTask{+assembly line} ──▶ working (skip not-started)
    ┌──────────────┐
    │   working    │── Handoff (non-final) ──▶ working (advance stage)
    │              │── Complete (final/active) ──▶ done
@@ -554,8 +554,8 @@ intent):
 
 | From → To | Intent | Precondition | Action |
 |---|---|---|---|
-| `not-started → working` | `AttachWorkflow` | task exists, workflow resolves, no current stage | resolve base_sha; INSERT N stage rows (pending); mark stage 1 active; spawn stage 1 session |
-| `(none) → working` | `CreateTask` with workflow | as above | same as AttachWorkflow at create-time |
+| `not-started → working` | `AttachAssembly line` | task exists, assembly line resolves, no current stage | resolve base_sha; INSERT N stage rows (pending); mark stage 1 active; spawn stage 1 session |
+| `(none) → working` | `CreateTask` with assembly line | as above | same as AttachAssembly line at create-time |
 | `working → working` | `Handoff` | current stage = active, not final, synthesis emitted | lock synthesis; teardown current stage; spawn next stage |
 | `working → done` | `Complete` | current stage = active AND position = N | lock synthesis (§7.3); teardown; mark task done |
 | `* → abandoned` | `Abandon` | task in `not-started`/`working` | mark abandoned; teardown current stage if any |
@@ -571,7 +571,7 @@ mutates them; further messages on the chat composer are rejected with
    ┌─────────┐
    │ pending │  (created with task; never started)
    └────┬────┘
-        │ prior stage done OR (stage 1 AND workflow attached)
+        │ prior stage done OR (stage 1 AND assembly line attached)
         ▼
    ┌─────────┐
    │ active  │  exactly one per working task
@@ -710,14 +710,14 @@ to the new stage's session. Its content is templated from
 **Stage 1:**
 ```
 A new task has been opened. The issue is at .agentctl/task/issue.md.
-The next agent in this workflow is <next_agent> (or "You are the final stage").
+The next agent in this assembly line is <next_agent> (or "You are the final stage").
 Investigate per your role; when you are ready to hand off, say so explicitly in chat.
 ```
 
 **Stage N > 1:**
 ```
 You are receiving handoff from <prev_agent>. Their synthesis is at .agentctl/task/handoff-in.md.
-The next agent in this workflow is <next_agent> (or "You are the final stage").
+The next agent in this assembly line is <next_agent> (or "You are the final stage").
 Begin per your role; when you are ready to hand off, say so explicitly in chat.
 ```
 
@@ -833,16 +833,16 @@ operations. We follow `api.md`'s shape exactly.
 | `GetAgent` | Full agent YAML. | client → server |
 | `AddAgent` | Create a custom agent from YAML body or `source_path`. | client → server |
 | `UpdateAgent` | Replace an existing custom agent. | client → server |
-| `RemoveAgent` | Delete a custom agent. Refuses if any workflow references it. | client → server |
-| `ListWorkflows` | Enumerate workflows. | client → server |
-| `GetWorkflow` | Full workflow YAML. | client → server |
-| `AddWorkflow` | Create a custom workflow. | client → server |
-| `UpdateWorkflow` | Replace a custom workflow. Refuses if any `working` task references it. | client → server |
-| `RemoveWorkflow` | Delete a custom workflow. Refuses if any `working` task references it. | client → server |
+| `RemoveAgent` | Delete a custom agent. Refuses if any assembly line references it. | client → server |
+| `ListAssembly lines` | Enumerate assembly lines. | client → server |
+| `GetAssembly line` | Full assembly line YAML. | client → server |
+| `AddAssembly line` | Create a custom assembly line. | client → server |
+| `UpdateAssembly line` | Replace a custom assembly line. Refuses if any `working` task references it. | client → server |
+| `RemoveAssembly line` | Delete a custom assembly line. Refuses if any `working` task references it. | client → server |
 | `ListTasks` | Enumerate tasks (any status). | client → server |
 | `GetTask` | Full task detail (stages, current stage, synthesis per done stage, PR URL if executor wrote one to chat). | client → server |
-| `CreateTask` | Create a task (workflow optional). | client → server |
-| `AttachWorkflow` | Attach a workflow to a `not-started` task. | client → server |
+| `CreateTask` | Create a task (assembly line optional). | client → server |
+| `AttachAssembly line` | Attach a assembly line to a `not-started` task. | client → server |
 | `Handoff` | Trigger handoff on the active stage. | client → server |
 | `CompleteTask` | Mark a `working` task `done` (final stage active). | client → server |
 | `AbandonTask` | Mark a task `abandoned`. | client → server |
@@ -861,7 +861,7 @@ seam events inserted between them. The architecture implements this
 as:
 
 1. First frame: a synthetic `task.snapshot` event containing task
-   metadata (workflow, status, stage list with statuses, agent
+   metadata (assembly line, status, stage list with statuses, agent
    colours per stage).
 2. For each `done` stage in order: one synthetic
    `task.stage_summary` event carrying that stage's synthesis text
@@ -887,7 +887,7 @@ Additions to the §5 event vocabulary in `api.md`:
 
 | Kind | When | `data` |
 |---|---|---|
-| `task.snapshot` | First frame of `AttachTaskStream`. | `{ task, stages: [...], current_stage_id, workflow }` |
+| `task.snapshot` | First frame of `AttachTaskStream`. | `{ task, stages: [...], current_stage_id, assembly line }` |
 | `task.stage_summary` | One per `done` stage; emitted in the snapshot replay. | `{ stage_id, agent_name, synthesis, started_at, ended_at }` |
 | `task.seam` | Marks a handoff transition. | `{ from_stage_id, to_stage_id, from_agent, to_agent, at }` |
 | `task.stage_active` | Stage advanced to active. | `{ stage_id, agent_name, position }` |
@@ -911,15 +911,15 @@ Following `api.md` §3.2's path conventions:
 | `GET` | `/v1/agents/{name}` | `GetAgent` |
 | `PUT` | `/v1/agents/{name}` | `UpdateAgent` |
 | `DELETE` | `/v1/agents/{name}` | `RemoveAgent` |
-| `GET` | `/v1/workflows` | `ListWorkflows` |
-| `POST` | `/v1/workflows` | `AddWorkflow` |
-| `GET` | `/v1/workflows/{name}` | `GetWorkflow` |
-| `PUT` | `/v1/workflows/{name}` | `UpdateWorkflow` |
-| `DELETE` | `/v1/workflows/{name}` | `RemoveWorkflow` |
+| `GET` | `/v1/assembly-lines` | `ListAssembly lines` |
+| `POST` | `/v1/assembly-lines` | `AddAssembly line` |
+| `GET` | `/v1/assembly-lines/{name}` | `GetAssembly line` |
+| `PUT` | `/v1/assembly-lines/{name}` | `UpdateAssembly line` |
+| `DELETE` | `/v1/assembly-lines/{name}` | `RemoveAssembly line` |
 | `GET` | `/v1/tasks` | `ListTasks` |
 | `POST` | `/v1/tasks` | `CreateTask` |
 | `GET` | `/v1/tasks/{id}` | `GetTask` |
-| `POST` | `/v1/tasks/{id}/attach` | `AttachWorkflow` |
+| `POST` | `/v1/tasks/{id}/attach` | `AttachAssembly line` |
 | `POST` | `/v1/tasks/{id}/handoff` | `Handoff` |
 | `POST` | `/v1/tasks/{id}/complete` | `CompleteTask` |
 | `POST` | `/v1/tasks/{id}/abandon` | `AbandonTask` |
@@ -939,11 +939,11 @@ Additions to `api.md` §2.3:
 | Code | When |
 |---|---|
 | `agent_not_found` | Op references an agent name not in the index. |
-| `agent_referenced` | `RemoveAgent` while a workflow still names it. |
-| `workflow_not_found` | Op references a workflow name not in the index. |
-| `workflow_in_use` | `UpdateWorkflow`/`RemoveWorkflow` while a `working` task references it. |
+| `agent_referenced` | `RemoveAgent` while a assembly line still names it. |
+| `assembly line_not_found` | Op references a assembly line name not in the index. |
+| `assembly line_in_use` | `UpdateAssembly line`/`RemoveAssembly line` while a `working` task references it. |
 | `task_not_found` | Op references a task id not in `tasks`. |
-| `validation_failed` | Agent/workflow YAML failed schema validation. |
+| `validation_failed` | Agent/assembly line YAML failed schema validation. |
 | `source_unreachable` | GitHub issue URL returned non-200 at task creation. |
 | `repo_unreachable` | Repo URL / default branch resolution failed at task creation. |
 | `stage_busy` | `Handoff` while in-flight turn exists. |
@@ -961,7 +961,7 @@ A new top-level module sibling to `sm`. Same actor shape:
 
 ```text
 inputs:
-  - api_in       : CreateTask, AttachWorkflow, Handoff, Complete, Abandon,
+  - api_in       : CreateTask, AttachAssembly line, Handoff, Complete, Abandon,
                    SendMessage (proxied), Interrupt (proxied)
   - sm_events    : turn.end / runtime.error / session.stopped from each
                    stage's session actor (subscribed to its fan-out)
@@ -1033,12 +1033,12 @@ the existing snapshot-walk step (`container-and-image.md` §2.4).
 
 ### 9.4 Task library (`ttl`)
 
-Module that owns the in-memory index of agents + workflows.
+Module that owns the in-memory index of agents + assembly lines.
 
 ```text
 state:
   agents:    map<name, AgentSpec>
-  workflows: map<name, WorkflowSpec>
+  assembly lines: map<name, Assembly lineSpec>
 
 methods:
   reload(kind, name)  — re-read a YAML file from disk
@@ -1049,7 +1049,7 @@ methods:
   remove(kind, name)  — check refs, unlink, reindex
 
 watches:
-  fsnotify on agents/ and workflows/ dirs; debounced 200ms.
+  fsnotify on agents/ and assembly lines/ dirs; debounced 200ms.
 ```
 
 On startup, `ttl` is initialized **before** `tm` so the reconciler can
@@ -1184,7 +1184,7 @@ the task progresses." No paths are silent corruption.
 | Stage transition ≤ 15s p50 (Hand off click → next stage's first reply streams) | Auto-prompt send ≤ 0.5s + agent emits synthesis (depends on agent; not counted) + teardown async (≤ 5s budget but not on critical path) + `docker volume create` ~0.3s + `docker run` 1–3s + entrypoint clone (depends on repo size) + shim ready ~0.5s + seed prompt + first delta. **Repo clone dominates.** | Slow networks blow the budget on repos > ~500 MB. We measure clone separately in `task.error.repo_clone_slow`; budget is shim-ready-to-first-delta, not clone-included. |
 | ≥ 5 concurrent tasks per developer machine | A task in `working` is one running session container at any moment (only the active stage's). 5 tasks = 5 containers, same arithmetic as v1's 10-sessions target. Pending/done stages are zero-cost. | None new vs. v1. |
 | Chat thread render ≤ 100ms for ≤ 100 messages | SPA renders from a single in-memory list; stages are a partition by `stage_id`. No new server cost. | None — same as v1 R6 budget. |
-| Workflow YAML ≤ 16 KB / Agent YAML ≤ 16 KB | Enforced at validate. | None. |
+| Assembly line YAML ≤ 16 KB / Agent YAML ≤ 16 KB | Enforced at validate. | None. |
 
 The clone-dominated stage transition is the headline risk. Mitigations
 in priority order:
@@ -1204,10 +1204,10 @@ in priority order:
 
 | # | Question | Recommended default |
 |---|---|---|
-| O1 | When a workflow's underlying agent changes (e.g., a custom agent is edited), do `pending` stages on `working` tasks pick up the change? | **No.** Stage rows snapshot `agent_name` at task-create; the agent YAML is re-resolved at stage-spawn time. If the user edits the agent's prompt between stage 1 and stage 2, stage 2 uses the *new* prompt. We do not snapshot the prompt itself per-task in v0 — that's the explicit R8 deferred "workflow snapshot per task." |
-| O2 | Should `WorkflowEdit` be allowed on workflows referenced only by `not-started` tasks? | **Yes.** `not-started` tasks have no stages and no base_sha — editing the workflow before they start has no inconsistency surface. R3 §7.4 of the requirements flagged this for architect; we resolve as: refuse only when *any* task in `working` references it. |
+| O1 | When a assembly line's underlying agent changes (e.g., a custom agent is edited), do `pending` stages on `working` tasks pick up the change? | **No.** Stage rows snapshot `agent_name` at task-create; the agent YAML is re-resolved at stage-spawn time. If the user edits the agent's prompt between stage 1 and stage 2, stage 2 uses the *new* prompt. We do not snapshot the prompt itself per-task in v0 — that's the explicit R8 deferred "assembly line snapshot per task." |
+| O2 | Should `Assembly lineEdit` be allowed on assembly lines referenced only by `not-started` tasks? | **Yes.** `not-started` tasks have no stages and no base_sha — editing the assembly line before they start has no inconsistency surface. R3 §7.4 of the requirements flagged this for architect; we resolve as: refuse only when *any* task in `working` references it. |
 | O3 | Final-stage `Complete` emits the synthesis auto-prompt. Is the resulting "summary of a summary" useful, or is it noise after the executor already announced the PR in chat? | **Emit anyway in v0.** Symmetry and durable closing artefact for `task show`. Revisit if user feedback says it's redundant. |
-| O4 | `tasks.base_sha` is one SHA on one default branch. Tasks that span multiple repos are out-of-scope for v0; what's the right error if a user creates a workflow whose `bug-executor` happens to clone *additional* repos via agent action? | **No error.** The agent's tool calls can clone whatever it wants inside its stage volume; the `base_sha` recorded on the task is only for the primary repo. Additional repos clone fresh per stage with no base-SHA pin. The Diff tab is scoped to the primary repo. |
+| O4 | `tasks.base_sha` is one SHA on one default branch. Tasks that span multiple repos are out-of-scope for v0; what's the right error if a user creates a assembly line whose `bug-executor` happens to clone *additional* repos via agent action? | **No error.** The agent's tool calls can clone whatever it wants inside its stage volume; the `base_sha` recorded on the task is only for the primary repo. Additional repos clone fresh per stage with no base-SHA pin. The Diff tab is scoped to the primary repo. |
 | O5 | Long stages (a multi-day bug investigation conversation) bump up against hard-cutoff. Default `max_idle` is 24h — is that right for stage-backed sessions? | **Lift to 72h for stage-backed sessions only**, via a new `[task].stage_max_idle` config key (default `72h`). Idle-stop continues to be opt-out. |
 | O6 | The shim currently emits one `runtime.snapshot` per attach. Task streams attach to multiple stages' snapshots when replaying done stages. Are done-stage snapshots cheap to read (the JSONL is on the volume — but the volume is destroyed)? | **No JSONL replay for done stages.** Done-stage rendering uses only `stages.synthesis` and the chat log up to the seam (which agentd live-tailed and the client already has). Reconnecting clients see done stages summarized as the synthesis + seam; the per-message chat of done stages is **not** replayed in v0. Tracked as a known gap; "Timeline tab" is the v0.x answer. |
 
@@ -1234,16 +1234,16 @@ is 0020):
 | v1 doc | What this layer touches |
 |---|---|
 | `architecture/overview.md` | §2 component diagram extended (§2 here); §6 sequence diagrams gain task-create / handoff / abandon variants (§3 here); §7 reconciler gains a task pass (§10 here). |
-| `architecture/data-model.md` | New tables `tasks`, `stages`; new nullable columns on `sessions`; new on-disk YAML layout for agents + workflows. |
+| `architecture/data-model.md` | New tables `tasks`, `stages`; new nullable columns on `sessions`; new on-disk YAML layout for agents + assembly lines. |
 | `architecture/api.md` | New logical ops (§8.1); new HTTP routes (§8.4); new event kinds (§8.3); new error codes (§8.5). |
 | `architecture/agentd.md` | New modules `tm` (task manager) and `ttl` (task library); `cm` gains a stage-mode branch; sweeper SQL excludes stage-backed sessions from idle-stop. |
 | `architecture/container-and-image.md` | Per-stage volume strategy replaces bind-mount dir for stage-backed sessions; entrypoint reads new `AGENTCTL_TASK_*` env vars. Image itself is unchanged. |
 | `architecture/security.md` | Trust boundaries unchanged. Stage containers inherit v1 session-container posture (peer-isolated, no inbound, unrestricted egress). Per-stage volumes do not weaken any v1 guarantee. |
-| `architecture/install-and-update.md` | `agentctl init` copies built-in agent + workflow YAMLs alongside built-in skills. `agentctl update` re-copies them with the same "unchanged-on-disk" rule as built-in skills. |
+| `architecture/install-and-update.md` | `agentctl init` copies built-in agent + assembly line YAMLs alongside built-in skills. `agentctl update` re-copies them with the same "unchanged-on-disk" rule as built-in skills. |
 | `architecture/observability.md` | `task_*` events in `session_lifecycle`. New metrics: `task_active_total`, `stage_active_total`, `stage_transition_duration_seconds`, `synthesis_lock_duration_seconds`. |
-| `architecture/phasing.md` | This layer is v0 of the *task management feature*, layered on top of v1 GA. Suggested milestone breakdown: TM1 = agent + workflow primitives + YAML index + CLI; TM2 = task lifecycle + stage isolation + handoff happy path; TM3 = Task page UI + recovery + abandon. |
+| `architecture/phasing.md` | This layer is v0 of the *task management feature*, layered on top of v1 GA. Suggested milestone breakdown: TM1 = agent + assembly line primitives + YAML index + CLI; TM2 = task lifecycle + stage isolation + handoff happy path; TM3 = Task page UI + recovery + abandon. |
 | `requirements.md` | This layer assumes all v1 R1–R10 are in place. No v1 requirement changes. |
-| `workflows-task-management.md` | Companion spec; every R-number in this document refers to it. |
+| `assembly-lines-task-management.md` | Companion spec; every R-number in this document refers to it. |
 
 ## 14. What this architecture does **not** decide
 
@@ -1252,12 +1252,12 @@ the wrong call:
 
 - **UI rendering details** (R5 layout, colour swatches, stage rail
   affordances). The architecture only specifies the event shapes the
-  SPA needs; the SPA is free to render as `workflows-task-management.md`
+  SPA needs; the SPA is free to render as `assembly-lines-task-management.md`
   §R5 describes.
 - **CLI table formatting** for `agentctl task ls` / `task show`.
 - **Default model overrides per agent**. We expose the field; we don't
   ship recommended values beyond what the built-in YAMLs carry.
-- **Web-UI agent and workflow composer ergonomics** (the two-pane
+- **Web-UI agent and assembly line composer ergonomics** (the two-pane
   layout, the +Add stage picker). The architecture is composer-
   agnostic; the API supports any composer.
 - **The exact wording of stage-error messages** (clone failed, MCP

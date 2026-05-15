@@ -348,7 +348,7 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 
 // buildStageSeedMessage composes the first user message in the new stage's
 // session. It carries everything the agent needs to take on its role: the
-// agent's own prompt, the multi-stage workflow framing, and either the
+// agent's own prompt, the multi-stage assembly line framing, and either the
 // original task brief (stage 1) or the prior stage's synthesis (stage N>1).
 //
 // We deliberately do NOT set sm.CreateRequest.SystemPrompt: passing a custom
@@ -360,7 +360,7 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 func buildStageSeedMessage(in StartStageInput) string {
 	var b strings.Builder
 	b.WriteString(in.Agent.Prompt)
-	b.WriteString("\n\n---\nYou are part of a multi-stage workflow.")
+	b.WriteString("\n\n---\nYou are part of a multi-stage assembly line.")
 	if in.PrevAgent != "" {
 		b.WriteString("\nThe previous agent was " + in.PrevAgent + ".")
 	}

@@ -19,26 +19,26 @@ type TaskService interface {
 	GetTask(ctx context.Context, id string) (*tm.Task, error)
 	TaskMessages(ctx context.Context, id string) ([]tm.Message, error)
 	CreateTask(ctx context.Context, req tm.CreateTaskRequest) (*tm.Task, error)
-	AttachWorkflow(ctx context.Context, id, workflow string) (*tm.Task, error)
-	Attach(ctx context.Context, id, workflow, agent string) (*tm.Task, error)
+	AttachAssemblyLine(ctx context.Context, id, assemblyLine string) (*tm.Task, error)
+	Attach(ctx context.Context, id, assemblyLine, agent string) (*tm.Task, error)
 	Send(ctx context.Context, req tm.SendMessageRequest) error
 	Handoff(ctx context.Context, id string) error
 	Complete(ctx context.Context, id string) error
 	Abandon(ctx context.Context, id string) error
 }
 
-// LibraryService exposes agent+workflow CRUD to websrv.
+// LibraryService exposes agent+assembly-line CRUD to websrv.
 type LibraryService interface {
 	ListAgents() []ttl.Agent
 	GetAgent(name string) (ttl.Agent, error)
 	PutAgent(ctx context.Context, spec ttl.Agent, body []byte) (ttl.Agent, error)
 	RemoveAgent(ctx context.Context, name string) error
-	ListWorkflows() []ttl.Workflow
-	GetWorkflow(name string) (ttl.Workflow, error)
-	PutWorkflow(ctx context.Context, spec ttl.Workflow, body []byte) (ttl.Workflow, error)
-	RemoveWorkflow(ctx context.Context, name string) error
+	ListAssemblyLines() []ttl.AssemblyLine
+	GetAssemblyLine(name string) (ttl.AssemblyLine, error)
+	PutAssemblyLine(ctx context.Context, spec ttl.AssemblyLine, body []byte) (ttl.AssemblyLine, error)
+	RemoveAssemblyLine(ctx context.Context, name string) error
 	YAMLForAgent(ctx context.Context, name string) ([]byte, error)
-	YAMLForWorkflow(ctx context.Context, name string) ([]byte, error)
+	YAMLForAssemblyLine(ctx context.Context, name string) ([]byte, error)
 }
 
 // ----- handlers -----
@@ -127,20 +127,20 @@ func (s *Server) handleRemoveAgent(w http.ResponseWriter, r *http.Request, name 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListAssemblyLines(w http.ResponseWriter, r *http.Request) {
 	if s.library == nil {
 		writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable, "task library not wired")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": s.library.ListWorkflows()})
+	writeJSON(w, http.StatusOK, map[string]any{"assembly_lines": s.library.ListAssemblyLines()})
 }
 
-func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) handleGetAssemblyLine(w http.ResponseWriter, r *http.Request, name string) {
 	if s.library == nil {
 		writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable, "task library not wired")
 		return
 	}
-	wf, err := s.library.GetWorkflow(name)
+	wf, err := s.library.GetAssemblyLine(name)
 	if err != nil {
 		writeError(w, http.StatusNotFound, proto.ErrNotFound, err.Error())
 		return
@@ -148,11 +148,11 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request, name 
 	writeJSON(w, http.StatusOK, wf)
 }
 
-func (s *Server) handleAddWorkflow(w http.ResponseWriter, r *http.Request) {
-	s.handlePutWorkflow(w, r, "")
+func (s *Server) handleAddAssemblyLine(w http.ResponseWriter, r *http.Request) {
+	s.handlePutAssemblyLine(w, r, "")
 }
 
-func (s *Server) handlePutWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) handlePutAssemblyLine(w http.ResponseWriter, r *http.Request, name string) {
 	if s.library == nil {
 		writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable, "task library not wired")
 		return
@@ -162,7 +162,7 @@ func (s *Server) handlePutWorkflow(w http.ResponseWriter, r *http.Request, name 
 		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
 		return
 	}
-	var spec ttl.Workflow
+	var spec ttl.AssemblyLine
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "application/json") {
 		if err := json.Unmarshal(body, &spec); err != nil {
@@ -174,7 +174,7 @@ func (s *Server) handlePutWorkflow(w http.ResponseWriter, r *http.Request, name 
 	if name != "" {
 		spec.Name = name
 	}
-	saved, err := s.library.PutWorkflow(r.Context(), spec, body)
+	saved, err := s.library.PutAssemblyLine(r.Context(), spec, body)
 	if err != nil {
 		if errors.Is(err, ttl.ErrValidation) {
 			writeError(w, http.StatusBadRequest, "validation_failed", err.Error())
@@ -190,12 +190,12 @@ func (s *Server) handlePutWorkflow(w http.ResponseWriter, r *http.Request, name 
 	writeJSON(w, http.StatusOK, saved)
 }
 
-func (s *Server) handleRemoveWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) handleRemoveAssemblyLine(w http.ResponseWriter, r *http.Request, name string) {
 	if s.library == nil {
 		writeError(w, http.StatusServiceUnavailable, proto.ErrUnavailable, "task library not wired")
 		return
 	}
-	if err := s.library.RemoveWorkflow(r.Context(), name); err != nil {
+	if err := s.library.RemoveAssemblyLine(r.Context(), name); err != nil {
 		switch {
 		case errors.Is(err, ttl.ErrNotFound):
 			writeError(w, http.StatusNotFound, proto.ErrNotFound, err.Error())
@@ -270,7 +270,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, task)
 }
 
-func (s *Server) handleAttachWorkflow(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleAttachAssemblyLine(w http.ResponseWriter, r *http.Request, id string) {
 	if !s.requireTasks(w) {
 		return
 	}
@@ -280,14 +280,14 @@ func (s *Server) handleAttachWorkflow(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	var req struct {
-		Workflow string `json:"workflow"`
-		Agent    string `json:"agent"`
+		AssemblyLine string `json:"assembly_line"`
+		Agent        string `json:"agent"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
 		return
 	}
-	task, err := s.tasks.Attach(r.Context(), id, req.Workflow, req.Agent)
+	task, err := s.tasks.Attach(r.Context(), id, req.AssemblyLine, req.Agent)
 	if err != nil {
 		mapTaskError(w, err)
 		return
@@ -355,8 +355,8 @@ func mapTaskError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, tm.ErrTaskNotFound):
 		writeError(w, http.StatusNotFound, proto.ErrNotFound, err.Error())
-	case errors.Is(err, tm.ErrWorkflowNotFound):
-		writeError(w, http.StatusBadRequest, "workflow_not_found", err.Error())
+	case errors.Is(err, tm.ErrAssemblyLineNotFound):
+		writeError(w, http.StatusBadRequest, "assembly_line_not_found", err.Error())
 	case errors.Is(err, tm.ErrAgentNotFound):
 		writeError(w, http.StatusBadRequest, "agent_not_found", err.Error())
 	case errors.Is(err, tm.ErrValidation):

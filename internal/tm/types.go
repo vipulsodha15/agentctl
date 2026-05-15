@@ -1,4 +1,4 @@
-// Package tm is the task manager — workflows-task-management-architecture.md §9.1.
+// Package tm is the task manager — assembly-lines-task-management-architecture.md §9.1.
 //
 // It owns the task / stage state machine and persists it to sqlite. Each
 // stage is backed by exactly one session created through the existing sm
@@ -33,20 +33,20 @@ const (
 
 // Task is the in-memory view of a task row joined with its stages.
 type Task struct {
-	ID             string    `json:"task_id"`
-	Name           string    `json:"name"`
-	WorkflowName   string    `json:"workflow_name,omitempty"`
-	RepoURL        string    `json:"repo_url,omitempty"`
-	BaseSHA        string    `json:"base_sha,omitempty"`
-	SourceKind     string    `json:"source_kind"`
-	SourceURL      string    `json:"source_url,omitempty"`
-	IssueMD        string    `json:"issue_md"`
-	CurrentStageID string    `json:"current_stage_id,omitempty"`
-	Status         string    `json:"status"`
-	CreatedAt      time.Time `json:"created_at"`
-	StartedAt      time.Time `json:"started_at,omitzero"`
-	EndedAt        time.Time `json:"ended_at,omitzero"`
-	Stages         []Stage   `json:"stages,omitempty"`
+	ID               string    `json:"task_id"`
+	Name             string    `json:"name"`
+	AssemblyLineName string    `json:"assembly_line_name,omitempty"`
+	RepoURL          string    `json:"repo_url,omitempty"`
+	BaseSHA          string    `json:"base_sha,omitempty"`
+	SourceKind       string    `json:"source_kind"`
+	SourceURL        string    `json:"source_url,omitempty"`
+	IssueMD          string    `json:"issue_md"`
+	CurrentStageID   string    `json:"current_stage_id,omitempty"`
+	Status           string    `json:"status"`
+	CreatedAt        time.Time `json:"created_at"`
+	StartedAt        time.Time `json:"started_at,omitzero"`
+	EndedAt          time.Time `json:"ended_at,omitzero"`
+	Stages           []Stage   `json:"stages,omitempty"`
 }
 
 type Stage struct {
@@ -74,17 +74,18 @@ type Message struct {
 	Content   string    `json:"content"`
 }
 
-// CreateTaskRequest is the input to NewTask. Either WorkflowName or
-// AgentName may be set (not both): WorkflowName runs the named multi-stage
-// workflow, AgentName runs a single-stage task with just that agent.
+// CreateTaskRequest is the input to NewTask. Either AssemblyLineName or
+// AgentName may be set (not both): AssemblyLineName runs the named
+// multi-stage assembly line, AgentName runs a single-stage task with just
+// that agent.
 type CreateTaskRequest struct {
-	Name         string `json:"name,omitempty"`
-	WorkflowName string `json:"workflow_name,omitempty"`
-	AgentName    string `json:"agent_name,omitempty"`
-	RepoURL      string `json:"repo_url,omitempty"`
-	SourceKind   string `json:"source_kind,omitempty"`
-	SourceURL    string `json:"source_url,omitempty"`
-	IssueMD      string `json:"issue_md"`
+	Name             string `json:"name,omitempty"`
+	AssemblyLineName string `json:"assembly_line_name,omitempty"`
+	AgentName        string `json:"agent_name,omitempty"`
+	RepoURL          string `json:"repo_url,omitempty"`
+	SourceKind       string `json:"source_kind,omitempty"`
+	SourceURL        string `json:"source_url,omitempty"`
+	IssueMD          string `json:"issue_md"`
 }
 
 type SendMessageRequest struct {
@@ -94,12 +95,12 @@ type SendMessageRequest struct {
 
 // Errors surfaced over the API.
 var (
-	ErrTaskNotFound       = errors.New("tm: task not found")
-	ErrAgentNotFound      = errors.New("tm: agent not found")
-	ErrWorkflowNotFound   = errors.New("tm: workflow not found")
-	ErrPreconditionFailed = errors.New("tm: precondition failed")
-	ErrTerminal           = errors.New("tm: task is terminal")
-	ErrStageBusy          = errors.New("tm: stage is busy")
-	ErrValidation         = errors.New("tm: validation failed")
-	ErrSourceUnreachable  = errors.New("tm: source unreachable")
+	ErrTaskNotFound         = errors.New("tm: task not found")
+	ErrAgentNotFound        = errors.New("tm: agent not found")
+	ErrAssemblyLineNotFound = errors.New("tm: assembly line not found")
+	ErrPreconditionFailed   = errors.New("tm: precondition failed")
+	ErrTerminal             = errors.New("tm: task is terminal")
+	ErrStageBusy            = errors.New("tm: stage is busy")
+	ErrValidation           = errors.New("tm: validation failed")
+	ErrSourceUnreachable    = errors.New("tm: source unreachable")
 )

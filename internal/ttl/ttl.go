@@ -1,11 +1,11 @@
 // Package ttl ("task library") owns the persistence + validation of Agent
-// and Workflow definitions. Storage is sqlite-backed so the daemon stays
+// and AssemblyLine definitions. Storage is sqlite-backed so the daemon stays
 // stateless-container friendly: there are no on-disk YAML files to keep
 // alive across pod restarts.
 //
 // Built-in YAMLs ship embedded in the binary (see embed.go) and are upserted
-// into the agents/workflows tables at boot via Materialize. Custom entries
-// flow in through Put{Agent,Workflow} from the CLI / HTTP API.
+// into the agents/assembly_lines tables at boot via Materialize. Custom entries
+// flow in through Put{Agent,AssemblyLine} from the CLI / HTTP API.
 package ttl
 
 import (
@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	MaxAgentBytes    = 16 * 1024
-	MaxWorkflowBytes = 16 * 1024
-	MaxStages        = 16
+	MaxAgentBytes        = 16 * 1024
+	MaxAssemblyLineBytes = 16 * 1024
+	MaxStages            = 16
 
 	SourceBuiltin = "builtin"
 	SourceCustom  = "custom"
@@ -61,16 +61,16 @@ type Agent struct {
 	LoadedAt time.Time `yaml:"-" json:"loaded_at,omitempty"`
 }
 
-// WorkflowStage is one entry in a workflow's `stages:` list.
-type WorkflowStage struct {
+// AssemblyLineStage is one entry in an assembly line's `stages:` list.
+type AssemblyLineStage struct {
 	Agent string `yaml:"agent" json:"agent"`
 }
 
-// Workflow is the schema for a workflow.
-type Workflow struct {
-	Name        string          `yaml:"name" json:"name"`
-	Description string          `yaml:"description" json:"description"`
-	Stages      []WorkflowStage `yaml:"stages" json:"stages"`
+// AssemblyLine is the schema for an assembly line.
+type AssemblyLine struct {
+	Name        string              `yaml:"name" json:"name"`
+	Description string              `yaml:"description" json:"description"`
+	Stages      []AssemblyLineStage `yaml:"stages" json:"stages"`
 
 	Source   string    `yaml:"-" json:"source,omitempty"`
 	LoadedAt time.Time `yaml:"-" json:"loaded_at,omitempty"`
@@ -84,15 +84,15 @@ type DB interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// Library is the in-memory index of agents + workflows, backed by sqlite.
+// Library is the in-memory index of agents + assembly lines, backed by sqlite.
 // All mutations write the DB row first; the in-memory cache is rebuilt from
 // the DB on every change so the cache cannot drift from canonical state.
 type Library struct {
 	db DB
 
-	mu        sync.RWMutex
-	agents    map[string]*Agent
-	workflows map[string]*Workflow
+	mu            sync.RWMutex
+	agents        map[string]*Agent
+	assemblyLines map[string]*AssemblyLine
 }
 
 type Options struct {
@@ -101,9 +101,9 @@ type Options struct {
 
 func New(opts Options) *Library {
 	return &Library{
-		db:        opts.DB,
-		agents:    map[string]*Agent{},
-		workflows: map[string]*Workflow{},
+		db:            opts.DB,
+		agents:        map[string]*Agent{},
+		assemblyLines: map[string]*AssemblyLine{},
 	}
 }
 
@@ -111,15 +111,15 @@ func New(opts Options) *Library {
 // loading rows from the DB. Bad rows are skipped (not loaded into the cache)
 // so a single malformed entry cannot poison the rest of the library.
 type LoadIssues struct {
-	AgentErrors    map[string]string
-	WorkflowErrors map[string]string
+	AgentErrors        map[string]string
+	AssemblyLineErrors map[string]string
 }
 
-// Load rebuilds the in-memory index from the agents/workflows tables.
+// Load rebuilds the in-memory index from the agents/assembly_lines tables.
 func (l *Library) Load(ctx context.Context) (LoadIssues, error) {
 	issues := LoadIssues{
-		AgentErrors:    map[string]string{},
-		WorkflowErrors: map[string]string{},
+		AgentErrors:        map[string]string{},
+		AssemblyLineErrors: map[string]string{},
 	}
 
 	agentRows, err := l.db.QueryContext(ctx,
@@ -154,52 +154,52 @@ func (l *Library) Load(ctx context.Context) (LoadIssues, error) {
 		return issues, err
 	}
 
-	workflowRows, err := l.db.QueryContext(ctx,
-		`SELECT name, source, yaml_body, updated_at FROM workflows`)
+	assemblyLineRows, err := l.db.QueryContext(ctx,
+		`SELECT name, source, yaml_body, updated_at FROM assembly_lines`)
 	if err != nil {
-		return issues, fmt.Errorf("query workflows: %w", err)
+		return issues, fmt.Errorf("query assembly_lines: %w", err)
 	}
-	defer workflowRows.Close()
+	defer assemblyLineRows.Close()
 
-	workflows := map[string]*Workflow{}
-	for workflowRows.Next() {
+	assemblyLines := map[string]*AssemblyLine{}
+	for assemblyLineRows.Next() {
 		var name, source, body, updatedAt string
-		if err := workflowRows.Scan(&name, &source, &body, &updatedAt); err != nil {
-			return issues, fmt.Errorf("scan workflow: %w", err)
+		if err := assemblyLineRows.Scan(&name, &source, &body, &updatedAt); err != nil {
+			return issues, fmt.Errorf("scan assembly_line: %w", err)
 		}
-		w, perr := ParseWorkflowYAML([]byte(body))
+		w, perr := ParseAssemblyLineYAML([]byte(body))
 		if perr != nil {
-			issues.WorkflowErrors[name] = perr.Error()
+			issues.AssemblyLineErrors[name] = perr.Error()
 			continue
 		}
-		if verr := validateWorkflow(w); verr != nil {
-			issues.WorkflowErrors[name] = verr.Error()
+		if verr := validateAssemblyLine(w); verr != nil {
+			issues.AssemblyLineErrors[name] = verr.Error()
 			continue
 		}
 		w.Source = source
 		if t, err := time.Parse(time.RFC3339Nano, updatedAt); err == nil {
 			w.LoadedAt = t
 		}
-		workflows[w.Name] = w
+		assemblyLines[w.Name] = w
 	}
-	if err := workflowRows.Err(); err != nil {
+	if err := assemblyLineRows.Err(); err != nil {
 		return issues, err
 	}
 
-	// Cross-reference: workflows that name a missing agent are loaded but
-	// flagged so the UI can render the validation error rather than silently
-	// hiding them.
-	for name, w := range workflows {
+	// Cross-reference: assembly lines that name a missing agent are loaded
+	// but flagged so the UI can render the validation error rather than
+	// silently hiding them.
+	for name, w := range assemblyLines {
 		for _, st := range w.Stages {
 			if _, ok := agents[st.Agent]; !ok {
-				issues.WorkflowErrors[name] = fmt.Sprintf("references missing agent %q", st.Agent)
+				issues.AssemblyLineErrors[name] = fmt.Sprintf("references missing agent %q", st.Agent)
 			}
 		}
 	}
 
 	l.mu.Lock()
 	l.agents = agents
-	l.workflows = workflows
+	l.assemblyLines = assemblyLines
 	l.mu.Unlock()
 	return issues, nil
 }
@@ -213,9 +213,9 @@ func ParseAgentYAML(body []byte) (*Agent, error) {
 	return &a, nil
 }
 
-// ParseWorkflowYAML decodes raw YAML bytes into a *Workflow.
-func ParseWorkflowYAML(body []byte) (*Workflow, error) {
-	var w Workflow
+// ParseAssemblyLineYAML decodes raw YAML bytes into an *AssemblyLine.
+func ParseAssemblyLineYAML(body []byte) (*AssemblyLine, error) {
+	var w AssemblyLine
 	if err := yaml.Unmarshal(body, &w); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
 	}
@@ -244,9 +244,9 @@ func validateAgent(a *Agent) error {
 	return nil
 }
 
-func validateWorkflow(w *Workflow) error {
+func validateAssemblyLine(w *AssemblyLine) error {
 	if w.Name == "" {
-		return fmt.Errorf("%w: workflow name is required", ErrValidation)
+		return fmt.Errorf("%w: assembly line name is required", ErrValidation)
 	}
 	if !nameRe.MatchString(w.Name) {
 		return fmt.Errorf("%w: name %q must match [a-z][a-z0-9-]{0,62}", ErrValidation, w.Name)
@@ -255,10 +255,10 @@ func validateWorkflow(w *Workflow) error {
 		return fmt.Errorf("%w: description is required", ErrValidation)
 	}
 	if len(w.Stages) == 0 {
-		return fmt.Errorf("%w: workflow needs at least one stage", ErrValidation)
+		return fmt.Errorf("%w: assembly line needs at least one stage", ErrValidation)
 	}
 	if len(w.Stages) > MaxStages {
-		return fmt.Errorf("%w: workflow has more than %d stages", ErrValidation, MaxStages)
+		return fmt.Errorf("%w: assembly line has more than %d stages", ErrValidation, MaxStages)
 	}
 	for i, s := range w.Stages {
 		if s.Agent == "" {
@@ -290,23 +290,23 @@ func (l *Library) GetAgent(name string) (Agent, error) {
 	return *a, nil
 }
 
-func (l *Library) ListWorkflows() []Workflow {
+func (l *Library) ListAssemblyLines() []AssemblyLine {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]Workflow, 0, len(l.workflows))
-	for _, w := range l.workflows {
+	out := make([]AssemblyLine, 0, len(l.assemblyLines))
+	for _, w := range l.assemblyLines {
 		out = append(out, *w)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-func (l *Library) GetWorkflow(name string) (Workflow, error) {
+func (l *Library) GetAssemblyLine(name string) (AssemblyLine, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	w, ok := l.workflows[name]
+	w, ok := l.assemblyLines[name]
 	if !ok {
-		return Workflow{}, ErrNotFound
+		return AssemblyLine{}, ErrNotFound
 	}
 	return *w, nil
 }
@@ -370,7 +370,7 @@ func (l *Library) PutAgent(ctx context.Context, spec Agent, body []byte) (Agent,
 }
 
 // RemoveAgent deletes a custom agent. Built-ins refuse; agents referenced
-// by any workflow refuse with ErrInUse.
+// by any assembly line refuse with ErrInUse.
 func (l *Library) RemoveAgent(ctx context.Context, name string) error {
 	l.mu.RLock()
 	a, ok := l.agents[name]
@@ -382,11 +382,11 @@ func (l *Library) RemoveAgent(ctx context.Context, name string) error {
 		l.mu.RUnlock()
 		return ErrBuiltinReadOnly
 	}
-	for _, w := range l.workflows {
+	for _, w := range l.assemblyLines {
 		for _, s := range w.Stages {
 			if s.Agent == name {
 				l.mu.RUnlock()
-				return fmt.Errorf("%w: workflow %q references agent %q", ErrInUse, w.Name, name)
+				return fmt.Errorf("%w: assembly line %q references agent %q", ErrInUse, w.Name, name)
 			}
 		}
 	}
@@ -400,64 +400,64 @@ func (l *Library) RemoveAgent(ctx context.Context, name string) error {
 	return nil
 }
 
-// PutWorkflow writes a custom workflow.
-func (l *Library) PutWorkflow(ctx context.Context, spec Workflow, body []byte) (Workflow, error) {
+// PutAssemblyLine writes a custom assembly line.
+func (l *Library) PutAssemblyLine(ctx context.Context, spec AssemblyLine, body []byte) (AssemblyLine, error) {
 	if len(body) > 0 {
-		parsed, err := ParseWorkflowYAML(body)
+		parsed, err := ParseAssemblyLineYAML(body)
 		if err != nil {
-			return Workflow{}, err
+			return AssemblyLine{}, err
 		}
 		if spec.Name != "" && parsed.Name != "" && parsed.Name != spec.Name {
-			return Workflow{}, fmt.Errorf("%w: body name %q != path name %q", ErrValidation, parsed.Name, spec.Name)
+			return AssemblyLine{}, fmt.Errorf("%w: body name %q != path name %q", ErrValidation, parsed.Name, spec.Name)
 		}
 		spec = *parsed
 	}
-	if err := validateWorkflow(&spec); err != nil {
-		return Workflow{}, err
+	if err := validateAssemblyLine(&spec); err != nil {
+		return AssemblyLine{}, err
 	}
 	l.mu.RLock()
 	for _, st := range spec.Stages {
 		if _, ok := l.agents[st.Agent]; !ok {
 			l.mu.RUnlock()
-			return Workflow{}, fmt.Errorf("%w: agent %q is not defined", ErrValidation, st.Agent)
+			return AssemblyLine{}, fmt.Errorf("%w: agent %q is not defined", ErrValidation, st.Agent)
 		}
 	}
-	existing, exists := l.workflows[spec.Name]
+	existing, exists := l.assemblyLines[spec.Name]
 	l.mu.RUnlock()
 	if exists && existing.Source == SourceBuiltin {
-		return Workflow{}, fmt.Errorf("%w: %q is a built-in; copy it under a new name to customize", ErrBuiltinReadOnly, spec.Name)
+		return AssemblyLine{}, fmt.Errorf("%w: %q is a built-in; copy it under a new name to customize", ErrBuiltinReadOnly, spec.Name)
 	}
 	if len(body) == 0 {
 		b, err := yaml.Marshal(&spec)
 		if err != nil {
-			return Workflow{}, fmt.Errorf("yaml marshal: %w", err)
+			return AssemblyLine{}, fmt.Errorf("yaml marshal: %w", err)
 		}
 		body = b
 	}
-	if len(body) > MaxWorkflowBytes {
-		return Workflow{}, fmt.Errorf("%w: yaml exceeds %d bytes", ErrValidation, MaxWorkflowBytes)
+	if len(body) > MaxAssemblyLineBytes {
+		return AssemblyLine{}, fmt.Errorf("%w: yaml exceeds %d bytes", ErrValidation, MaxAssemblyLineBytes)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := l.db.ExecContext(ctx, `INSERT INTO workflows (name, source, yaml_body, created_at, updated_at)
+	if _, err := l.db.ExecContext(ctx, `INSERT INTO assembly_lines (name, source, yaml_body, created_at, updated_at)
         VALUES (?, 'custom', ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET yaml_body=excluded.yaml_body, updated_at=excluded.updated_at`,
 		spec.Name, string(body), now, now); err != nil {
-		return Workflow{}, fmt.Errorf("upsert workflow: %w", err)
+		return AssemblyLine{}, fmt.Errorf("upsert assembly_line: %w", err)
 	}
 
 	spec.Source = SourceCustom
 	spec.LoadedAt = time.Now()
 	l.mu.Lock()
-	l.workflows[spec.Name] = &spec
+	l.assemblyLines[spec.Name] = &spec
 	l.mu.Unlock()
 	return spec, nil
 }
 
-// RemoveWorkflow deletes a custom workflow.
-func (l *Library) RemoveWorkflow(ctx context.Context, name string) error {
+// RemoveAssemblyLine deletes a custom assembly line.
+func (l *Library) RemoveAssemblyLine(ctx context.Context, name string) error {
 	l.mu.RLock()
-	w, ok := l.workflows[name]
+	w, ok := l.assemblyLines[name]
 	if !ok {
 		l.mu.RUnlock()
 		return ErrNotFound
@@ -467,11 +467,11 @@ func (l *Library) RemoveWorkflow(ctx context.Context, name string) error {
 		return ErrBuiltinReadOnly
 	}
 	l.mu.RUnlock()
-	if _, err := l.db.ExecContext(ctx, `DELETE FROM workflows WHERE name=? AND source='custom'`, name); err != nil {
-		return fmt.Errorf("delete workflow: %w", err)
+	if _, err := l.db.ExecContext(ctx, `DELETE FROM assembly_lines WHERE name=? AND source='custom'`, name); err != nil {
+		return fmt.Errorf("delete assembly_line: %w", err)
 	}
 	l.mu.Lock()
-	delete(l.workflows, name)
+	delete(l.assemblyLines, name)
 	l.mu.Unlock()
 	return nil
 }
@@ -491,11 +491,11 @@ func (l *Library) YAMLForAgent(ctx context.Context, name string) ([]byte, error)
 	return []byte(body), nil
 }
 
-// YAMLForWorkflow returns the raw stored YAML body.
-func (l *Library) YAMLForWorkflow(ctx context.Context, name string) ([]byte, error) {
+// YAMLForAssemblyLine returns the raw stored YAML body.
+func (l *Library) YAMLForAssemblyLine(ctx context.Context, name string) ([]byte, error) {
 	var body string
 	err := l.db.QueryRowContext(ctx,
-		`SELECT yaml_body FROM workflows WHERE name=?`, name).Scan(&body)
+		`SELECT yaml_body FROM assembly_lines WHERE name=?`, name).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

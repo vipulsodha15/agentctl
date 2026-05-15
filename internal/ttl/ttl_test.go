@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// newTestLib spins up an in-memory sqlite with the agents + workflows tables
+// newTestLib spins up an in-memory sqlite with the agents + assembly_lines tables
 // and returns a library backed by it.
 func newTestLib(t *testing.T) (*Library, *sql.DB) {
 	t.Helper()
@@ -27,7 +27,7 @@ func newTestLib(t *testing.T) (*Library, *sql.DB) {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )`,
-		`CREATE TABLE workflows (
+		`CREATE TABLE assembly_lines (
             name TEXT PRIMARY KEY,
             source TEXT NOT NULL CHECK (source IN ('builtin','custom')),
             yaml_body TEXT NOT NULL,
@@ -149,9 +149,9 @@ prompt: |
 	}
 }
 
-// TestRemoveAgentReferencedByWorkflow — workflows hold the unique referential
-// integrity we care about; ErrInUse must be returned.
-func TestRemoveAgentReferencedByWorkflow(t *testing.T) {
+// TestRemoveAgentReferencedByAssemblyLine — assembly lines hold the unique
+// referential integrity we care about; ErrInUse must be returned.
+func TestRemoveAgentReferencedByAssemblyLine(t *testing.T) {
 	lib, db := newTestLib(t)
 	ctx := context.Background()
 	if _, err := Materialize(ctx, db); err != nil {
@@ -160,14 +160,14 @@ func TestRemoveAgentReferencedByWorkflow(t *testing.T) {
 	if _, err := lib.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Author a custom agent + a workflow that uses it.
+	// Author a custom agent + an assembly line that uses it.
 	if _, err := lib.PutAgent(ctx, Agent{}, []byte(`name: my-agent
 description: x
 colour: blue
 prompt: hi`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lib.PutWorkflow(ctx, Workflow{}, []byte(`name: my-flow
+	if _, err := lib.PutAssemblyLine(ctx, AssemblyLine{}, []byte(`name: my-flow
 description: x
 stages:
   - agent: my-agent`)); err != nil {
@@ -176,18 +176,18 @@ stages:
 	if err := lib.RemoveAgent(ctx, "my-agent"); !errors.Is(err, ErrInUse) {
 		t.Fatalf("expected ErrInUse, got %v", err)
 	}
-	// Remove the workflow first, then the agent should remove cleanly.
-	if err := lib.RemoveWorkflow(ctx, "my-flow"); err != nil {
+	// Remove the assembly line first, then the agent should remove cleanly.
+	if err := lib.RemoveAssemblyLine(ctx, "my-flow"); err != nil {
 		t.Fatal(err)
 	}
 	if err := lib.RemoveAgent(ctx, "my-agent"); err != nil {
-		t.Fatalf("RemoveAgent after RemoveWorkflow: %v", err)
+		t.Fatalf("RemoveAgent after RemoveAssemblyLine: %v", err)
 	}
 }
 
-// TestPutWorkflowValidatesAgents — workflows that reference an unknown agent
-// are rejected at Put time, not silently loaded with a flag.
-func TestPutWorkflowValidatesAgents(t *testing.T) {
+// TestPutAssemblyLineValidatesAgents — assembly lines that reference an
+// unknown agent are rejected at Put time, not silently loaded with a flag.
+func TestPutAssemblyLineValidatesAgents(t *testing.T) {
 	lib, db := newTestLib(t)
 	ctx := context.Background()
 	if _, err := Materialize(ctx, db); err != nil {
@@ -196,7 +196,7 @@ func TestPutWorkflowValidatesAgents(t *testing.T) {
 	if _, err := lib.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	_, err := lib.PutWorkflow(ctx, Workflow{}, []byte(`name: ghost-flow
+	_, err := lib.PutAssemblyLine(ctx, AssemblyLine{}, []byte(`name: ghost-flow
 description: references nothing
 stages:
   - agent: does-not-exist`))

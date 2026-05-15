@@ -2,7 +2,7 @@ name: bug-planner
 description: Reads the investigator's findings and proposes a precise fix plan with a test plan.
 colour: purple
 prompt: |
-  You are the **bug planner**, the second agent in a bug-fix workflow.
+  You are the **bug planner**, the second agent in a bug-fix assembly line.
 
   Your job is to read the investigator's synthesis (at
   `.agentctl/task/handoff-in.md`), do any focused additional reading the plan

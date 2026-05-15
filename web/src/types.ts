@@ -312,7 +312,7 @@ export interface ConversationMessage {
   turn_id?: string;
 }
 
-// ── Task workflows (workflows-task-management.md) ─────────────────
+// ── Task assembly lines (assembly-lines-task-management.md) ─────────────────
 
 export interface Agent {
   name: string;
@@ -327,14 +327,14 @@ export interface Agent {
   loaded_at?: string;
 }
 
-export interface WorkflowStageDef {
+export interface AssemblyLineStageDef {
   agent: string;
 }
 
-export interface Workflow {
+export interface AssemblyLine {
   name: string;
   description: string;
-  stages: WorkflowStageDef[];
+  stages: AssemblyLineStageDef[];
   source?: string;
   path?: string;
   loaded_at?: string;
@@ -360,7 +360,7 @@ export interface TaskStage {
 export interface Task {
   task_id: string;
   name: string;
-  workflow_name?: string;
+  assembly_line_name?: string;
   repo_url?: string;
   base_sha?: string;
   source_kind: "github_issue" | "freeform";
@@ -394,7 +394,7 @@ export interface TaskMessage {
 
 export interface CreateTaskRequest {
   name?: string;
-  workflow_name?: string;
+  assembly_line_name?: string;
   agent_name?: string;
   repo_url?: string;
   source_kind: "github_issue" | "freeform";
@@ -405,8 +405,8 @@ export interface CreateTaskRequest {
 export interface ListAgentsResponse {
   agents: Agent[];
 }
-export interface ListWorkflowsResponse {
-  workflows: Workflow[];
+export interface ListAssemblyLinesResponse {
+  assembly_lines: AssemblyLine[];
 }
 export interface ListTasksResponse {
   tasks: Task[];

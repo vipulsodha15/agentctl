@@ -167,7 +167,7 @@ func waitFor(t *testing.T, fn func() bool, msg string) {
 }
 
 func TestSessionRuntime_StartStage_SeedCarriesAgentAndFraming(t *testing.T) {
-	// Stage role + workflow framing must travel in the SEED user message,
+	// Stage role + assembly line framing must travel in the SEED user message,
 	// not via SystemPrompt — passing a custom system_prompt to the SDK
 	// switches it out of Claude Code preset mode and breaks the JSONL
 	// mirror that backs refresh history.

@@ -18,13 +18,13 @@ type Command struct {
 }
 
 const (
-	groupSetup       = "Setup"
-	groupSessions    = "Sessions"
-	groupMCPs        = "MCPs"
-	groupSkills      = "Skills"
-	groupWorkflows   = "Workflows"
-	groupDiagnostics = "Diagnostics"
-	groupMisc        = "Misc"
+	groupSetup         = "Setup"
+	groupSessions      = "Sessions"
+	groupMCPs          = "MCPs"
+	groupSkills        = "Skills"
+	groupAssemblyLines = "Assembly Lines"
+	groupDiagnostics   = "Diagnostics"
+	groupMisc          = "Misc"
 )
 
 type Env struct {
@@ -77,9 +77,9 @@ func commands() []Command {
 
 		{Name: "skill", Group: groupSkills, Summary: "Manage skills (list/new/add/edit/remove/validate/show/export/import).", Run: runSkill},
 
-		{Name: "agent", Group: groupWorkflows, Summary: "Manage agent definitions (ls/show/add).", Run: runAgent},
-		{Name: "workflow", Group: groupWorkflows, Summary: "Inspect workflow definitions (ls/show).", Run: runWorkflow},
-		{Name: "task", Group: groupWorkflows, Summary: "Manage tasks (ls/create/show/handoff/complete/abandon).", Run: runTask},
+		{Name: "agent", Group: groupAssemblyLines, Summary: "Manage agent definitions (ls/show/add).", Run: runAgent},
+		{Name: "assembly-line", Group: groupAssemblyLines, Summary: "Inspect assembly line definitions (ls/show).", Run: runAssemblyLine},
+		{Name: "task", Group: groupAssemblyLines, Summary: "Manage tasks (ls/create/show/handoff/complete/abandon).", Run: runTask},
 
 		{Name: "cost", Group: groupDiagnostics, Summary: "Show per-session or aggregate Anthropic API spend.", Run: runCost},
 		{Name: "doctor", Group: groupDiagnostics, Summary: "Run install + connectivity checks (--fix, --repair-db, --json).", Run: runDoctor},
@@ -122,7 +122,7 @@ func runHelp(_ context.Context, env *Env, _ []string) int {
 	fmt.Fprintln(env.Stdout, "")
 	fmt.Fprintln(env.Stdout, "Usage: agentctl <command> [flags]")
 	fmt.Fprintln(env.Stdout, "")
-	groups := []string{groupSetup, groupSessions, groupMCPs, groupSkills, groupWorkflows, groupDiagnostics, groupMisc}
+	groups := []string{groupSetup, groupSessions, groupMCPs, groupSkills, groupAssemblyLines, groupDiagnostics, groupMisc}
 	cmds := commands()
 	for _, g := range groups {
 		fmt.Fprintf(env.Stdout, "%s\n", g)
