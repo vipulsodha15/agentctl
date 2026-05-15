@@ -395,6 +395,7 @@ export interface TaskMessage {
 export interface CreateTaskRequest {
   name?: string;
   workflow_name?: string;
+  agent_name?: string;
   repo_url?: string;
   source_kind: "github_issue" | "freeform";
   source_url?: string;

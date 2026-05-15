@@ -2,18 +2,25 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, apiJson, jsonBody } from "../api";
 import type {
+  Agent,
   CreateTaskRequest,
+  ListAgentsResponse,
   ListWorkflowsResponse,
   Task,
   Workflow,
 } from "../types";
 
+type AssignMode = "workflow" | "agent";
+
 export function NewTask() {
   const navigate = useNavigate();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [name, setName] = useState("");
   const [issueMD, setIssueMD] = useState("");
+  const [assignMode, setAssignMode] = useState<AssignMode>("workflow");
   const [workflowName, setWorkflowName] = useState<string>("");
+  const [agentName, setAgentName] = useState<string>("");
   const [repoURL, setRepoURL] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -21,13 +28,22 @@ export function NewTask() {
   useEffect(() => {
     apiJson<ListWorkflowsResponse>("/v1/workflows")
       .then((r) => {
-        setWorkflows(r.workflows ?? []);
-        if ((r.workflows ?? []).length > 0 && !workflowName) {
-          setWorkflowName(r.workflows[0].name);
+        const list = r.workflows ?? [];
+        setWorkflows(list);
+        if (list.length > 0) {
+          setWorkflowName((prev) => prev || list[0].name);
         }
       })
       .catch((err) => setError(String(err)));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    apiJson<ListAgentsResponse>("/v1/agents")
+      .then((r) => {
+        const list = r.agents ?? [];
+        setAgents(list);
+        if (list.length > 0) {
+          setAgentName((prev) => prev || list[0].name);
+        }
+      })
+      .catch((err) => setError(String(err)));
   }, []);
 
   async function submit() {
@@ -40,7 +56,10 @@ export function NewTask() {
     try {
       const req: CreateTaskRequest = {
         name: name.trim() || undefined,
-        workflow_name: workflowName || undefined,
+        workflow_name:
+          assignMode === "workflow" ? workflowName || undefined : undefined,
+        agent_name:
+          assignMode === "agent" ? agentName || undefined : undefined,
         repo_url: repoURL.trim() || undefined,
         source_kind: "freeform",
         issue_md: issueMD,
@@ -62,6 +81,7 @@ export function NewTask() {
   }
 
   const selectedWorkflow = workflows.find((w) => w.name === workflowName);
+  const selectedAgent = agents.find((a) => a.name === agentName);
 
   return (
     <section className="page">
@@ -69,7 +89,7 @@ export function NewTask() {
         <div style={{ flex: 1 }}>
           <h2>New task</h2>
           <div className="muted" style={{ marginTop: 4 }}>
-            Spin up a multi-stage workflow against a task.
+            Run a multi-stage workflow, or chat with a single agent.
           </div>
         </div>
       </div>
@@ -106,20 +126,64 @@ export function NewTask() {
               placeholder="https://github.com/your-org/your-repo"
             />
           </label>
-          <label className="field">
-            <span className="field-label">Workflow</span>
-            <select
-              value={workflowName}
-              onChange={(e) => setWorkflowName(e.target.value)}
+          <div className="field">
+            <span className="field-label">Assign to</span>
+            <div
+              className="segmented"
+              role="tablist"
+              aria-label="Assign task to a workflow or a single agent"
             >
-              <option value="">(none — attach later)</option>
-              {workflows.map((w) => (
-                <option key={w.name} value={w.name}>
-                  {w.name} — {w.description}
-                </option>
-              ))}
-            </select>
-          </label>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={assignMode === "workflow"}
+                className={`segmented-btn${assignMode === "workflow" ? " active" : ""}`}
+                onClick={() => setAssignMode("workflow")}
+              >
+                Workflow
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={assignMode === "agent"}
+                className={`segmented-btn${assignMode === "agent" ? " active" : ""}`}
+                onClick={() => setAssignMode("agent")}
+              >
+                Single agent
+              </button>
+            </div>
+          </div>
+          {assignMode === "workflow" ? (
+            <label className="field">
+              <span className="field-label">Workflow</span>
+              <select
+                value={workflowName}
+                onChange={(e) => setWorkflowName(e.target.value)}
+              >
+                <option value="">(none — attach later)</option>
+                {workflows.map((w) => (
+                  <option key={w.name} value={w.name}>
+                    {w.name} — {w.description}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <label className="field">
+              <span className="field-label">Agent</span>
+              <select
+                value={agentName}
+                onChange={(e) => setAgentName(e.target.value)}
+              >
+                <option value="">(none — attach later)</option>
+                {agents.map((a) => (
+                  <option key={a.name} value={a.name}>
+                    {a.name} — {a.description}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {error && <div className="error-text">{error}</div>}
           <div className="form-actions">
             <button
@@ -136,14 +200,22 @@ export function NewTask() {
         </div>
         <div className="panel task-create-preview">
           <div className="section-label" style={{ marginBottom: 8 }}>
-            Workflow preview
+            {assignMode === "workflow" ? "Workflow preview" : "Agent preview"}
           </div>
-          {selectedWorkflow ? (
-            <WorkflowPreview workflow={selectedWorkflow} />
+          {assignMode === "workflow" ? (
+            selectedWorkflow ? (
+              <WorkflowPreview workflow={selectedWorkflow} />
+            ) : (
+              <div className="muted">
+                No workflow selected. You can attach one later from the task
+                page.
+              </div>
+            )
+          ) : selectedAgent ? (
+            <AgentPreview agent={selectedAgent} />
           ) : (
             <div className="muted">
-              No workflow selected. You can attach one later from the task
-              page.
+              No agent selected. You can attach one later from the task page.
             </div>
           )}
         </div>
@@ -167,6 +239,30 @@ function WorkflowPreview({ workflow }: { workflow: Workflow }) {
             <span className="task-preview-agent">{s.agent}</span>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function AgentPreview({ agent }: { agent: Agent }) {
+  return (
+    <div>
+      <div className="task-preview-name">
+        <span
+          className={`agent-swatch swatch-${agent.colour ?? "slate"}`}
+          style={{ marginRight: 8, verticalAlign: "middle" }}
+        />
+        {agent.name}
+      </div>
+      <div className="muted" style={{ marginBottom: 16 }}>
+        {agent.description}
+      </div>
+      <div className="task-preview-stages">
+        <div className="task-preview-stage">
+          <span className="task-preview-step">1</span>
+          <span className="task-preview-arrow" aria-hidden>→</span>
+          <span className="task-preview-agent">{agent.name}</span>
+        </div>
       </div>
     </div>
   );

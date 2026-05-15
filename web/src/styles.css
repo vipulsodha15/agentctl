@@ -2333,6 +2333,42 @@ form .checkbox-row {
   background: var(--c-surface);
 }
 
+/* Segmented control reused in forms (e.g. workflow vs single agent). */
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--c-surface-2);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--c-border);
+  width: fit-content;
+}
+.segmented-btn {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--c-fg-mute);
+  border: 1px solid transparent;
+  font-weight: 450;
+  letter-spacing: 0;
+  transition:
+    background var(--transition),
+    color var(--transition);
+}
+.segmented-btn:hover:not(:disabled) {
+  color: var(--c-fg);
+}
+.segmented-btn.active {
+  background: var(--c-surface);
+  color: var(--c-fg);
+  font-weight: 550;
+}
+.segmented-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* ════════════════════════════════════════════════════════════════
  *  Responsive
  * ════════════════════════════════════════════════════════════════ */

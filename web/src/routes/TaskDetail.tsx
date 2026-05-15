@@ -799,6 +799,8 @@ function NoWorkflowComposer({
   onAttached: () => void;
 }) {
   const [workflows, setWorkflows] = useState<string[] | null>(null);
+  const [agents, setAgents] = useState<string[] | null>(null);
+  const [mode, setMode] = useState<"workflow" | "agent">("workflow");
   const [picking, setPicking] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [attaching, setAttaching] = useState(false);
@@ -806,7 +808,14 @@ function NoWorkflowComposer({
     apiJson<{ workflows: { name: string }[] }>("/v1/workflows")
       .then((r) => setWorkflows((r.workflows ?? []).map((w) => w.name)))
       .catch((e) => setErr(String(e)));
+    apiJson<{ agents: { name: string }[] }>("/v1/agents")
+      .then((r) => setAgents((r.agents ?? []).map((a) => a.name)))
+      .catch((e) => setErr(String(e)));
   }, []);
+  // Reset the selection when switching mode so a stale name doesn't carry over.
+  useEffect(() => {
+    setPicking("");
+  }, [mode]);
   async function doAttach() {
     if (!picking) return;
     setAttaching(true);
@@ -814,7 +823,9 @@ function NoWorkflowComposer({
     try {
       await api(`/v1/tasks/${taskId}/attach`, {
         method: "POST",
-        ...jsonBody({ workflow: picking }),
+        ...jsonBody(
+          mode === "workflow" ? { workflow: picking } : { agent: picking },
+        ),
       });
       onAttached();
     } catch (e) {
@@ -827,23 +838,58 @@ function NoWorkflowComposer({
       setAttaching(false);
     }
   }
+  const options = mode === "workflow" ? workflows : agents;
+  const loading = options === null;
   return (
     <div className="composer attach-prompt">
       <div className="composer-bar">
-        <span className="muted">Attach a workflow to begin.</span>
+        <span className="muted">Attach a workflow or a single agent to begin.</span>
+        <span
+          className="segmented"
+          role="tablist"
+          aria-label="Attach mode"
+          style={{ marginLeft: "auto" }}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "workflow"}
+            className={`segmented-btn${mode === "workflow" ? " active" : ""}`}
+            onClick={() => setMode("workflow")}
+            disabled={attaching}
+          >
+            Workflow
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "agent"}
+            className={`segmented-btn${mode === "agent" ? " active" : ""}`}
+            onClick={() => setMode("agent")}
+            disabled={attaching}
+          >
+            Single agent
+          </button>
+        </span>
       </div>
       <div className="composer-actions">
         <select
           value={picking}
           onChange={(e) => setPicking(e.target.value)}
-          disabled={workflows === null || attaching}
+          disabled={loading || attaching}
         >
           <option value="">
-            {workflows === null ? "Loading workflows…" : "— pick a workflow —"}
+            {loading
+              ? mode === "workflow"
+                ? "Loading workflows…"
+                : "Loading agents…"
+              : mode === "workflow"
+                ? "— pick a workflow —"
+                : "— pick an agent —"}
           </option>
-          {(workflows ?? []).map((w) => (
-            <option key={w} value={w}>
-              {w}
+          {(options ?? []).map((n) => (
+            <option key={n} value={n}>
+              {n}
             </option>
           ))}
         </select>

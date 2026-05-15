@@ -155,7 +155,9 @@ func New(opts Options) *Manager {
 func ChannelForTask(taskID string) string { return "task:" + taskID }
 
 // CreateTask inserts a new task row. If req.WorkflowName is set, stages are
-// inserted in pending state and stage 1 transitions to active.
+// inserted in pending state and stage 1 transitions to active. If
+// req.AgentName is set instead, the task is created with a single active
+// stage for that agent. The two are mutually exclusive.
 func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task, error) {
 	if strings.TrimSpace(req.IssueMD) == "" {
 		return nil, fmt.Errorf("%w: issue body is required", ErrValidation)
@@ -166,8 +168,16 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	if req.SourceKind != SourceGithubIssue && req.SourceKind != SourceFreeform {
 		return nil, fmt.Errorf("%w: source_kind must be github_issue or freeform", ErrValidation)
 	}
+	if req.WorkflowName != "" && req.AgentName != "" {
+		return nil, fmt.Errorf("%w: set workflow_name or agent_name, not both", ErrValidation)
+	}
 	if req.Name == "" {
 		req.Name = trimTitle(req.IssueMD)
+	}
+
+	agentNames, err := m.resolveAgentNames(req.WorkflowName, req.AgentName)
+	if err != nil {
+		return nil, err
 	}
 
 	m.mu.Lock()
@@ -177,7 +187,7 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	now := m.now()
 	status := TaskStatusNotStarted
 	var startedAt *string
-	if req.WorkflowName != "" {
+	if len(agentNames) > 0 {
 		status = TaskStatusWorking
 		ts := now.Format(time.RFC3339Nano)
 		startedAt = &ts
@@ -198,25 +208,14 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	}
 
 	var stages []Stage
-	if req.WorkflowName != "" {
-		wf, err := m.opts.Library.GetWorkflow(req.WorkflowName)
-		if err != nil {
-			return nil, fmt.Errorf("%w: workflow %q", ErrWorkflowNotFound, req.WorkflowName)
-		}
-		// Validate every stage's agent exists.
-		for _, st := range wf.Stages {
-			if _, err := m.opts.Library.GetAgent(st.Agent); err != nil {
-				return nil, fmt.Errorf("%w: workflow %q references missing agent %q", ErrValidation, wf.Name, st.Agent)
-			}
-		}
-		var stageIDs []string
-		for i, st := range wf.Stages {
-			id := ulidgen.WithPrefix("stg")
-			stageIDs = append(stageIDs, id)
+	if len(agentNames) > 0 {
+		stageIDs := make([]string, len(agentNames))
+		for i, agentName := range agentNames {
+			stageIDs[i] = ulidgen.WithPrefix("stg")
 			if _, err := tx.ExecContext(ctx, `INSERT INTO stages
                 (stage_id, task_id, position, agent_name, status, started_at)
                 VALUES (?, ?, ?, ?, ?, ?)`,
-				id, taskID, i+1, st.Agent, StageStatusPending, nullableString("")); err != nil {
+				stageIDs[i], taskID, i+1, agentName, StageStatusPending, nullableString("")); err != nil {
 				return nil, fmt.Errorf("insert stage: %w", err)
 			}
 		}
@@ -231,17 +230,17 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 			firstStageID, taskID); err != nil {
 			return nil, fmt.Errorf("set current_stage_id: %w", err)
 		}
-		stages = make([]Stage, 0, len(wf.Stages))
-		for i, st := range wf.Stages {
+		stages = make([]Stage, 0, len(agentNames))
+		for i, agentName := range agentNames {
 			s := Stage{
-				ID: stageIDs[i], TaskID: taskID, Position: i + 1, AgentName: st.Agent,
+				ID: stageIDs[i], TaskID: taskID, Position: i + 1, AgentName: agentName,
 				Status: StageStatusPending,
 			}
 			if i == 0 {
 				s.Status = StageStatusActive
 				s.StartedAt = now
 			}
-			if a, err := m.opts.Library.GetAgent(st.Agent); err == nil {
+			if a, err := m.opts.Library.GetAgent(agentName); err == nil {
 				s.Colour = a.Colour
 			}
 			stages = append(stages, s)
@@ -256,7 +255,7 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 		RepoURL: req.RepoURL, SourceKind: req.SourceKind, SourceURL: req.SourceURL,
 		IssueMD: req.IssueMD, Status: status, CreatedAt: now, Stages: stages,
 	}
-	if req.WorkflowName != "" {
+	if len(stages) > 0 {
 		task.StartedAt = now
 		task.CurrentStageID = stages[0].ID
 		// Seed first stage's chat thread.
@@ -271,8 +270,54 @@ func (m *Manager) CreateTask(ctx context.Context, req CreateTaskRequest) (*Task,
 	return task, nil
 }
 
-// AttachWorkflow flips a not-started task to working with stages.
+// resolveAgentNames turns a workflow name or single agent name into the
+// ordered list of agent names that make up the task's stages. Returns nil
+// when both are empty (a not-started task).
+func (m *Manager) resolveAgentNames(workflowName, agentName string) ([]string, error) {
+	if workflowName != "" {
+		wf, err := m.opts.Library.GetWorkflow(workflowName)
+		if err != nil {
+			return nil, fmt.Errorf("%w: workflow %q", ErrWorkflowNotFound, workflowName)
+		}
+		names := make([]string, 0, len(wf.Stages))
+		for _, st := range wf.Stages {
+			if _, err := m.opts.Library.GetAgent(st.Agent); err != nil {
+				return nil, fmt.Errorf("%w: workflow %q references missing agent %q", ErrValidation, wf.Name, st.Agent)
+			}
+			names = append(names, st.Agent)
+		}
+		return names, nil
+	}
+	if agentName != "" {
+		if _, err := m.opts.Library.GetAgent(agentName); err != nil {
+			return nil, fmt.Errorf("%w: agent %q", ErrAgentNotFound, agentName)
+		}
+		return []string{agentName}, nil
+	}
+	return nil, nil
+}
+
+// AttachWorkflow flips a not-started task to working with stages from a
+// named workflow. Wraps Attach for backward compatibility.
 func (m *Manager) AttachWorkflow(ctx context.Context, taskID, workflow string) (*Task, error) {
+	return m.Attach(ctx, taskID, workflow, "")
+}
+
+// Attach flips a not-started task to working. Either workflow or agent must
+// be set (not both): the workflow path installs its full stage list, the
+// agent path installs a single stage running just that agent.
+func (m *Manager) Attach(ctx context.Context, taskID, workflow, agent string) (*Task, error) {
+	if workflow != "" && agent != "" {
+		return nil, fmt.Errorf("%w: set workflow or agent, not both", ErrValidation)
+	}
+	if workflow == "" && agent == "" {
+		return nil, fmt.Errorf("%w: workflow or agent is required", ErrValidation)
+	}
+	agentNames, err := m.resolveAgentNames(workflow, agent)
+	if err != nil {
+		return nil, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -283,15 +328,6 @@ func (m *Manager) AttachWorkflow(ctx context.Context, taskID, workflow string) (
 	if task.Status != TaskStatusNotStarted {
 		return nil, fmt.Errorf("%w: task is %s", ErrPreconditionFailed, task.Status)
 	}
-	wf, err := m.opts.Library.GetWorkflow(workflow)
-	if err != nil {
-		return nil, fmt.Errorf("%w: workflow %q", ErrWorkflowNotFound, workflow)
-	}
-	for _, st := range wf.Stages {
-		if _, err := m.opts.Library.GetAgent(st.Agent); err != nil {
-			return nil, fmt.Errorf("%w: missing agent %q", ErrValidation, st.Agent)
-		}
-	}
 	now := m.now()
 	tx, err := m.opts.Store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -299,13 +335,13 @@ func (m *Manager) AttachWorkflow(ctx context.Context, taskID, workflow string) (
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stageIDs := make([]string, len(wf.Stages))
-	for i, st := range wf.Stages {
+	stageIDs := make([]string, len(agentNames))
+	for i, agentName := range agentNames {
 		stageIDs[i] = ulidgen.WithPrefix("stg")
 		if _, err := tx.ExecContext(ctx, `INSERT INTO stages
             (stage_id, task_id, position, agent_name, status)
             VALUES (?, ?, ?, ?, 'pending')`,
-			stageIDs[i], taskID, i+1, st.Agent); err != nil {
+			stageIDs[i], taskID, i+1, agentName); err != nil {
 			return nil, fmt.Errorf("insert stage: %w", err)
 		}
 	}
@@ -316,7 +352,7 @@ func (m *Manager) AttachWorkflow(ctx context.Context, taskID, workflow string) (
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE tasks SET workflow_name=?, status='working', started_at=?, current_stage_id=? WHERE task_id=?`,
-		workflow, now.Format(time.RFC3339Nano), stageIDs[0], taskID); err != nil {
+		nullable(workflow), now.Format(time.RFC3339Nano), stageIDs[0], taskID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
