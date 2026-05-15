@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
 import { ConfirmModal } from "../components/ConfirmModal";
+import { Modal } from "../components/Modal";
 import type {
   AddMcpRequest,
   AddSkillRequest,
@@ -209,6 +210,7 @@ const EMPTY_MCP_FORM: McpFormState = {
 function McpSection() {
   const [mcps, setMcps] = useState<McpEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [form, setForm] = useState<McpFormState | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<McpEntry | null>(null);
@@ -228,10 +230,12 @@ function McpSection() {
   }, []);
 
   function startAdd() {
+    setFormError(null);
     setForm({ ...EMPTY_MCP_FORM });
   }
 
   function startEdit(entry: McpEntry) {
+    setFormError(null);
     setForm({
       mode: "edit",
       name: entry.name,
@@ -243,6 +247,11 @@ function McpSection() {
       auth_config_json:
         entry.auth_config != null ? JSON.stringify(entry.auth_config) : "",
     });
+  }
+
+  function closeForm() {
+    setForm(null);
+    setFormError(null);
   }
 
   async function confirmRemove() {
@@ -266,7 +275,7 @@ function McpSection() {
     e.preventDefault();
     if (!form) return;
     setBusy(true);
-    setError(null);
+    setFormError(null);
     try {
       let auth_config: unknown = null;
       if (form.auth_config_json.trim() !== "") {
@@ -303,10 +312,10 @@ function McpSection() {
           ...jsonBody(req),
         });
       }
-      setForm(null);
+      closeForm();
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setFormError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -367,105 +376,107 @@ function McpSection() {
         </table>
       )}
 
-      {form && (
-        <form
-          onSubmit={onSubmitForm}
-          className="form-grid"
-          style={{ marginTop: 16 }}
-        >
-          <h3>{form.mode === "add" ? "Add MCP" : `Edit ${form.name}`}</h3>
-          <div className="field">
-            <label>Name</label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              disabled={form.mode === "edit"}
-            />
-          </div>
-          <div className="field">
-            <label>URL</label>
-            <input
-              type="text"
-              value={form.url}
-              onChange={(e) => setForm({ ...form, url: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label>Transport</label>
-            <input
-              type="text"
-              list="transport-options"
-              value={form.transport}
-              onChange={(e) =>
-                setForm({ ...form, transport: e.target.value })
-              }
-            />
-            <datalist id="transport-options">
-              <option value="http" />
-              <option value="sse" />
-            </datalist>
-          </div>
-          <div className="field">
-            <label>Kind</label>
-            <input
-              type="text"
-              list="kind-options"
-              value={form.kind}
-              onChange={(e) => setForm({ ...form, kind: e.target.value })}
-            />
-            <datalist id="kind-options">
-              <option value="none" />
-              <option value="github_pat" />
-            </datalist>
-          </div>
-          <div className="field">
-            <label>auth_config (JSON, optional)</label>
-            <textarea
-              rows={3}
-              value={form.auth_config_json}
-              onChange={(e) =>
-                setForm({ ...form, auth_config_json: e.target.value })
-              }
-              placeholder="{}"
-            />
-          </div>
-          <div className="field">
-            <label className="checkbox-row">
+      <Modal
+        open={form !== null}
+        title={
+          form?.mode === "add" ? "Add MCP" : `Edit MCP "${form?.name ?? ""}"`
+        }
+        size="md"
+        busy={busy}
+        onClose={closeForm}
+      >
+        {form && (
+          <form onSubmit={onSubmitForm} className="form-grid">
+            {formError && <div className="error-text">{formError}</div>}
+            <div className="field">
+              <label>Name</label>
               <input
-                type="checkbox"
-                checked={form.default_enabled}
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                disabled={form.mode === "edit"}
+              />
+            </div>
+            <div className="field">
+              <label>URL</label>
+              <input
+                type="text"
+                value={form.url}
+                onChange={(e) => setForm({ ...form, url: e.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label>Transport</label>
+              <input
+                type="text"
+                list="transport-options"
+                value={form.transport}
                 onChange={(e) =>
-                  setForm({ ...form, default_enabled: e.target.checked })
+                  setForm({ ...form, transport: e.target.value })
                 }
               />
-              <span>Default enabled</span>
-            </label>
-          </div>
-          <div className="field">
-            <label>Description</label>
-            <input
-              type="text"
-              value={form.description}
-              onChange={(e) =>
-                setForm({ ...form, description: e.target.value })
-              }
-            />
-          </div>
-          <div className="toolbar">
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? "Saving…" : form.mode === "add" ? "Add" : "Save"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm(null)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
+              <datalist id="transport-options">
+                <option value="http" />
+                <option value="sse" />
+              </datalist>
+            </div>
+            <div className="field">
+              <label>Kind</label>
+              <input
+                type="text"
+                list="kind-options"
+                value={form.kind}
+                onChange={(e) => setForm({ ...form, kind: e.target.value })}
+              />
+              <datalist id="kind-options">
+                <option value="none" />
+                <option value="github_pat" />
+              </datalist>
+            </div>
+            <div className="field">
+              <label>auth_config (JSON, optional)</label>
+              <textarea
+                rows={3}
+                value={form.auth_config_json}
+                onChange={(e) =>
+                  setForm({ ...form, auth_config_json: e.target.value })
+                }
+                placeholder="{}"
+              />
+            </div>
+            <div className="field">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.default_enabled}
+                  onChange={(e) =>
+                    setForm({ ...form, default_enabled: e.target.checked })
+                  }
+                />
+                <span>Default enabled</span>
+              </label>
+            </div>
+            <div className="field">
+              <label>Description</label>
+              <input
+                type="text"
+                value={form.description}
+                onChange={(e) =>
+                  setForm({ ...form, description: e.target.value })
+                }
+              />
+            </div>
+            <div className="toolbar">
+              <button type="button" onClick={closeForm} disabled={busy}>
+                Cancel
+              </button>
+              <button type="submit" className="primary" disabled={busy}>
+                {busy ? "Saving…" : form.mode === "add" ? "Add" : "Save"}
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
       <ConfirmModal
         open={pendingRemove !== null}
         title={`Remove MCP "${pendingRemove?.name ?? ""}"?`}
@@ -507,6 +518,7 @@ const EMPTY_SKILL_FORM: SkillFormState = {
 function SkillsSection() {
   const [skills, setSkills] = useState<SkillEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [form, setForm] = useState<SkillFormState | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<SkillEntry | null>(null);
@@ -526,7 +538,13 @@ function SkillsSection() {
   }, []);
 
   function startAdd() {
+    setFormError(null);
     setForm({ ...EMPTY_SKILL_FORM });
+  }
+
+  function closeForm() {
+    setForm(null);
+    setFormError(null);
   }
 
   async function confirmRemove() {
@@ -550,7 +568,7 @@ function SkillsSection() {
     e.preventDefault();
     if (!form) return;
     setBusy(true);
-    setError(null);
+    setFormError(null);
     try {
       const name = form.name.trim();
       if (!name) throw new Error("name is required");
@@ -566,10 +584,10 @@ function SkillsSection() {
         force: form.force,
       };
       await apiJson("/v1/skills", { method: "POST", ...jsonBody(req) });
-      setForm(null);
+      closeForm();
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setFormError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -630,73 +648,73 @@ function SkillsSection() {
         </table>
       )}
 
-      {form && (
-        <form
-          onSubmit={onSubmitForm}
-          className="form-grid"
-          style={{ marginTop: 16 }}
-        >
-          <h3>Add skill</h3>
-          <div className="field">
-            <label>Name</label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="my-skill"
-            />
-          </div>
-          <div className="field">
-            <label>Description (used only if SKILL.md is empty)</label>
-            <input
-              type="text"
-              value={form.description}
-              onChange={(e) =>
-                setForm({ ...form, description: e.target.value })
-              }
-              placeholder="What this skill does and when to use it."
-            />
-          </div>
-          <div className="field">
-            <label>
-              SKILL.md (full file, with <code>---</code> YAML front matter)
-            </label>
-            <textarea
-              rows={16}
-              value={form.skill_md}
-              onChange={(e) =>
-                setForm({ ...form, skill_md: e.target.value })
-              }
-              spellCheck={false}
-              style={{ fontFamily: "monospace" }}
-            />
-          </div>
-          <div className="field">
-            <label className="checkbox-row">
+      <Modal
+        open={form !== null}
+        title="Add skill"
+        size="lg"
+        busy={busy}
+        onClose={closeForm}
+      >
+        {form && (
+          <form onSubmit={onSubmitForm} className="form-grid">
+            {formError && <div className="error-text">{formError}</div>}
+            <div className="field">
+              <label>Name</label>
               <input
-                type="checkbox"
-                checked={form.force}
-                onChange={(e) =>
-                  setForm({ ...form, force: e.target.checked })
-                }
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="my-skill"
               />
-              <span>Overwrite if a skill with this name already exists</span>
-            </label>
-          </div>
-          <div className="toolbar">
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? "Saving…" : "Add"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm(null)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
+            </div>
+            <div className="field">
+              <label>Description (used only if SKILL.md is empty)</label>
+              <input
+                type="text"
+                value={form.description}
+                onChange={(e) =>
+                  setForm({ ...form, description: e.target.value })
+                }
+                placeholder="What this skill does and when to use it."
+              />
+            </div>
+            <div className="field">
+              <label>
+                SKILL.md (full file, with <code>---</code> YAML front matter)
+              </label>
+              <textarea
+                rows={16}
+                value={form.skill_md}
+                onChange={(e) =>
+                  setForm({ ...form, skill_md: e.target.value })
+                }
+                spellCheck={false}
+                style={{ fontFamily: "monospace" }}
+              />
+            </div>
+            <div className="field">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.force}
+                  onChange={(e) =>
+                    setForm({ ...form, force: e.target.checked })
+                  }
+                />
+                <span>Overwrite if a skill with this name already exists</span>
+              </label>
+            </div>
+            <div className="toolbar">
+              <button type="button" onClick={closeForm} disabled={busy}>
+                Cancel
+              </button>
+              <button type="submit" className="primary" disabled={busy}>
+                {busy ? "Saving…" : "Add"}
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
       <ConfirmModal
         open={pendingRemove !== null}
         title={`Remove custom skill "${pendingRemove?.name ?? ""}"?`}
