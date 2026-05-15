@@ -338,6 +338,29 @@ export function TaskDetail() {
             open={issueOpen}
             onToggle={() => setIssueOpen((v) => !v)}
           />
+          {!terminal && activeStage && (
+            isFinalStage ? (
+              <button
+                className="topbar-primary"
+                onClick={() => setConfirmComplete(true)}
+                disabled={sending || convState.inFlight}
+                title={convState.inFlight ? "Waiting for the agent to finish its turn" : "Mark this task complete"}
+              >
+                <span>Complete task</span>
+                <CheckArrow />
+              </button>
+            ) : (
+              <button
+                className="topbar-primary"
+                onClick={handoff}
+                disabled={sending || convState.inFlight}
+                title={convState.inFlight ? "Waiting for the agent to finish its turn" : `Lock the synthesis and start ${nextAgent(stages, activeStage)}`}
+              >
+                <span>Hand off to {nextAgent(stages, activeStage)}</span>
+                <ForwardArrow />
+              </button>
+            )
+          )}
           {!terminal && (
             <button
               onClick={() => setConfirmAbandon(true)}
@@ -407,46 +430,29 @@ export function TaskDetail() {
         <NoWorkflowComposer taskId={task.task_id} onAttached={load} />
       ) : (
         <div className="composer">
-          <textarea
-            ref={composerRef}
-            className="composer-input"
-            placeholder={`Message ${activeStage.agent_name}…`}
-            value={composer}
-            onChange={(e) => setComposer(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={2}
-          />
-          <div className="composer-actions">
-            <span className="composer-hint">
-              <kbd>⌘</kbd>
-              <kbd>↵</kbd>
-              <span>to send</span>
-            </span>
-            <button onClick={send} disabled={!composer.trim() || sending}>
+          <div className="composer-input-wrap">
+            <textarea
+              ref={composerRef}
+              className="composer-input"
+              placeholder={`Message ${activeStage.agent_name}…`}
+              value={composer}
+              onChange={(e) => setComposer(e.target.value)}
+              onKeyDown={onKeyDown}
+              rows={2}
+            />
+            <button
+              className="composer-send-inline"
+              onClick={send}
+              disabled={!composer.trim() || sending}
+            >
               {sending ? "Sending…" : "Send"}
             </button>
-            {isFinalStage ? (
-              <button
-                className="primary"
-                onClick={() => setConfirmComplete(true)}
-                disabled={sending || convState.inFlight}
-                title={convState.inFlight ? "Waiting for the agent to finish its turn" : "Mark this task complete"}
-              >
-                <span>Complete task</span>
-                <CheckArrow />
-              </button>
-            ) : (
-              <button
-                className="primary"
-                onClick={handoff}
-                disabled={sending || convState.inFlight}
-                title={convState.inFlight ? "Waiting for the agent to finish its turn" : `Lock the synthesis and start ${nextAgent(stages, activeStage)}`}
-              >
-                <span>Hand off to {nextAgent(stages, activeStage)}</span>
-                <ForwardArrow />
-              </button>
-            )}
           </div>
+          <span className="composer-hint">
+            <kbd>⌘</kbd>
+            <kbd>↵</kbd>
+            <span>to send</span>
+          </span>
         </div>
       )}
 

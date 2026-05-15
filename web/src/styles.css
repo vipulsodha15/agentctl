@@ -3198,6 +3198,33 @@ form .checkbox-row {
     color var(--transition),
     background var(--transition);
 }
+.topbar-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--c-fg);
+  color: var(--c-canvas);
+  border: 1px solid var(--c-fg);
+  font-size: var(--text-xs);
+  font-weight: 550;
+  padding: 4px 10px 4px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition), opacity var(--transition);
+}
+.topbar-primary:hover:not(:disabled) {
+  background: var(--c-fg-2);
+  border-color: var(--c-fg-2);
+}
+.topbar-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.topbar-primary svg {
+  opacity: 0.85;
+  width: 14px;
+  height: 14px;
+}
 .abandon-btn:hover {
   color: var(--c-err-fg);
   border-color: #ecc6c6;
@@ -3825,10 +3852,10 @@ form .checkbox-row {
  * a generous breathing gap rather than a hard rule. */
 
 .composer {
-  padding: 10px 0 12px;
+  padding: 8px 0 6px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   background: var(--c-canvas);
   border-top: 1px solid var(--c-border-soft);
 }
@@ -3846,25 +3873,53 @@ form .checkbox-row {
   font-size: var(--text-2xs);
   color: var(--c-fg-subtle);
   margin-right: auto;
+  padding-left: 4px;
 }
 .composer-hint kbd {
   padding: 1px 6px;
   font-size: var(--text-2xs);
+}
+.composer-input-wrap {
+  position: relative;
+  display: flex;
 }
 .composer-input {
   font-family: var(--font-sans);
   font-size: var(--text-base);
   line-height: 1.5;
   resize: none;
-  padding: 11px 14px;
+  padding: 11px 88px 11px 14px;
   border: 1px solid var(--c-border);
   border-radius: var(--radius-lg);
   background: var(--c-surface);
   color: var(--c-fg);
   min-height: 56px;
+  width: 100%;
   transition:
     border-color var(--transition),
     box-shadow var(--transition);
+}
+.composer-send-inline {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 6px 14px;
+  font-size: var(--text-sm);
+  font-weight: 550;
+  border-radius: var(--radius-sm);
+  background: var(--c-fg);
+  color: var(--c-canvas);
+  border: 1px solid var(--c-fg);
+  cursor: pointer;
+  transition: background var(--transition), opacity var(--transition);
+}
+.composer-send-inline:hover:not(:disabled) {
+  background: var(--c-fg-2);
+  border-color: var(--c-fg-2);
+}
+.composer-send-inline:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .composer-input:hover {
   border-color: var(--c-border-strong);
