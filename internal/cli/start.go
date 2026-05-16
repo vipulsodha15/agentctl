@@ -69,9 +69,11 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 	// fast with the allowed set rather than rounding-tripping through the
 	// daemon to hit a less-targeted "not configured" error. Empty is OK —
 	// that's the "let the resolver pick" path per ADR 0020 §3.
-	if provider != "" && provider != secrets.ProviderAnthropic && provider != secrets.ProviderOpenAI {
-		fmt.Fprintf(env.Stderr, "start: invalid --provider %q (expected anthropic|openai)\n", provider)
-		return ExitUsage
+	if provider != "" {
+		if err := secrets.ValidateProvider(provider); err != nil {
+			fmt.Fprintf(env.Stderr, "start: %v\n", err)
+			return ExitUsage
+		}
 	}
 
 	cfg, _ := config.Load(env.Layout.ConfigFile)

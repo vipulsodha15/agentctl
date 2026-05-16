@@ -468,5 +468,39 @@ class CodexDriverArgvTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--resume") + 1], "codex-sess-existing")
 
 
+class CodexDriverSetModelTests(unittest.TestCase):
+    """ADR 0020 §4.3 — set_model on the Codex driver is just a config
+    bump because codex respawns per turn. No subprocess interaction; the
+    next _build_argv reflects the new model.
+    """
+
+    def _make_driver(self, model: str = "gpt-5.5") -> codex_driver.CodexDriver:
+        cfg = codex_driver.CodexConfig(model=model, cwd="/work")
+        return codex_driver.CodexDriver(
+            cfg,
+            emit_event=lambda *_a, **_kw: None,
+            emit_session_id=lambda *_a, **_kw: None,
+        )
+
+    def test_set_model_updates_argv_on_next_turn(self) -> None:
+        drv = self._make_driver(model="gpt-5.5")
+        drv.set_model("gpt-5.3-codex")
+        argv = drv._build_argv("hi")
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.3-codex")
+
+    def test_set_model_empty_is_noop(self) -> None:
+        drv = self._make_driver(model="gpt-5.5")
+        drv.set_model("")
+        argv = drv._build_argv("hi")
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.5")
+
+    def test_set_model_unchanged_is_noop(self) -> None:
+        drv = self._make_driver(model="gpt-5.5")
+        # Should not raise / not change anything observable.
+        drv.set_model("gpt-5.5")
+        argv = drv._build_argv("hi")
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.5")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

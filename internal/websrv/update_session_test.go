@@ -92,6 +92,44 @@ func TestPatchSessionRejectsEmptyBody(t *testing.T) {
 	}
 }
 
+// TestPatchSessionRejectsEmptyModelString covers `{"model": ""}` — a
+// present-but-empty value, distinct from absent (`{}` or `{"model":
+// null}`). The catalog also rejects empty model, but the error there
+// reads "model %q for provider %q" with empty quotes; rejecting at the
+// handler gives a cleaner "model field must not be empty" message and
+// avoids a needless trip into the actor.
+func TestPatchSessionRejectsEmptyModelString(t *testing.T) {
+	mgr := &stubManager{}
+	s := startServer(t, "tok", mgr)
+	resp := patchSession(t, s, "sess_1", `{"model":""}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 for empty model", resp.StatusCode)
+	}
+	if mgr.updatedModel != nil {
+		t.Errorf("UpdateModel should not have been called for empty model: %+v", mgr.updatedModel)
+	}
+}
+
+// TestPatchSessionTreatsNullModelAsAbsent confirms `{"model": null}` is
+// equivalent to no body — the JSON decoder gives us req.Model == nil, so
+// the "no mutable fields" branch handles it. Pinning this so a future
+// refactor that switches to plain `string` (zero-value-on-null) catches
+// the change in tests instead of in production with a "model field must
+// not be empty" 400 on what looks like a null.
+func TestPatchSessionTreatsNullModelAsAbsent(t *testing.T) {
+	mgr := &stubManager{}
+	s := startServer(t, "tok", mgr)
+	resp := patchSession(t, s, "sess_1", `{"model":null}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 for null model treated as absent", resp.StatusCode)
+	}
+	if mgr.updatedModel != nil {
+		t.Errorf("UpdateModel should not have been called for null model: %+v", mgr.updatedModel)
+	}
+}
+
 func TestPatchSessionRejectsUnknownField(t *testing.T) {
 	mgr := &stubManager{}
 	s := startServer(t, "tok", mgr)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -797,16 +798,22 @@ func validateOpenAICustom(baseURL, token string) error {
 	req.Header.Set("Authorization", "Bearer "+token)
 	client := http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
+	// Internal gateway hostnames (e.g. internal-gateway.corp.local) can
+	// leak into CI logs / shared error output, so error strings include
+	// host-only redactions; the full URL is the user's input — they can
+	// see what they typed — and the warn line still prints it locally
+	// for diagnostic value.
+	host := redactBaseURL(baseURL)
 	if err != nil {
 		// Network / TLS errors are hard fails — the user supplied an
 		// unreachable host or a cert mismatch and we won't get further.
-		return fmt.Errorf("openai endpoint %s: %w", baseURL, err)
+		return fmt.Errorf("openai endpoint %s: %w", host, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		// Auth-rejection is a hard fail: a real gateway that does
 		// expose /v1/models is telling us the token is wrong.
-		return fmt.Errorf("openai auth token rejected by %s (status %d)", baseURL, resp.StatusCode)
+		return fmt.Errorf("openai auth token rejected by %s (status %d)", host, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		// Other 4xx (404 etc.): treat as "configured but unverified".
@@ -817,9 +824,26 @@ func validateOpenAICustom(baseURL, token string) error {
 		return nil
 	}
 	if resp.StatusCode >= 500 {
-		return fmt.Errorf("openai endpoint %s status %d", baseURL, resp.StatusCode)
+		return fmt.Errorf("openai endpoint %s status %d", host, resp.StatusCode)
 	}
 	return nil
+}
+
+// redactBaseURL returns scheme://host for use in error strings, dropping
+// the path / query / fragment. Internal gateway URLs (e.g.
+// https://internal-gw.corp.local/v2/openai/abc?token=…) often carry
+// path-encoded identifiers that don't belong in CI logs or shared error
+// output. Hostname-only is enough for the user — who typed the URL — to
+// recognize which endpoint failed.
+func redactBaseURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<gateway>"
+	}
+	if u.Scheme == "" {
+		return u.Host
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // validateOpenAI hits GET https://api.openai.com/v1/models with the bearer

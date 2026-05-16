@@ -19,10 +19,20 @@ pinned CLI version against a real turn.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, IO, Optional
+
+_log = logging.getLogger(__name__)
+
+# Cap the stderr ring buffer at ~64 KiB worth of lines so a chatty Codex CLI
+# (e.g. debug logging on a long-running turn) can't grow the process heap
+# unboundedly. The buffer is only surfaced on a non-zero exit, so older
+# lines are the safe ones to drop.
+_STDERR_MAX_LINES = 1000
 
 from .translate import (
     EVENT_ASSISTANT_DELTA,
@@ -97,10 +107,22 @@ class CodexDriver:
         self._emit_session_id = emit_session_id
         self._emit_record = emit_message_record
         self._sdk_session_id: Optional[str] = cfg.resume
+        # _state_lock guards _sdk_session_id (read in _build_argv, written
+        # in _consume_stdout) and _cfg.model (read in _build_argv, written
+        # in set_model). _proc_lock guards the subprocess handle; keeping
+        # them separate avoids hold-while-spawn when the next turn races
+        # with a still-finalizing interrupt.
+        self._state_lock = threading.Lock()
         self._proc_lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
         self._turn_thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
+        # First-encounter flag for the session-id extractor — drops one
+        # warn-log if a turn completes with no recognizable session id, so
+        # silently-broken --resume doesn't go unnoticed. Subsequent turns
+        # stay quiet to avoid log flooding when the upstream JSONL schema
+        # genuinely doesn't expose one.
+        self._sid_warned = False
 
     # -- lifecycle ------------------------------------------------------
 
@@ -156,14 +178,17 @@ class CodexDriver:
 
         Codex re-spawns per turn, so the switch is just a config bump —
         no client tear-down required (contrast with Claude's
-        :meth:`RuntimeDriver.set_model`). Wired here as a stub so the
-        Driver protocol matches both providers; the control frame that
-        actually drives this lands in ADR-0020 phase 4.
+        :meth:`RuntimeDriver.set_model`, which has to reconnect the SDK
+        client to apply a new model). Empty / unchanged is a no-op so a
+        repeated ``/model`` doesn't churn anything. ADR 0020 §4.3.
         """
 
-        raise NotImplementedError(
-            "set_model lands in phase 4 of ADR 0020 (mid-session model switch)"
-        )
+        if not model:
+            return
+        with self._state_lock:
+            if model == self._cfg.model:
+                return
+            self._cfg.model = model
 
     # -- internals ------------------------------------------------------
 
@@ -178,12 +203,18 @@ class CodexDriver:
             pass
 
     def _build_argv(self, prompt: str) -> list[str]:
+        # Snapshot the mutable state once under the lock so the argv is
+        # internally consistent even if set_model() or _consume_stdout()
+        # fires while this turn is being assembled.
+        with self._state_lock:
+            model = self._cfg.model
+            sdk_session_id = self._sdk_session_id
         argv: list[str] = [
             self._cfg.codex_bin,
             "exec",
             "--json",
             "--model",
-            self._cfg.model,
+            model,
             "--sandbox",
             self._cfg.sandbox,
             "--ask-for-approval",
@@ -191,12 +222,12 @@ class CodexDriver:
             "--cd",
             self._cfg.cwd,
         ]
-        if self._sdk_session_id:
+        if sdk_session_id:
             # TODO(verify-codex-jsonl): confirm ``--resume <id>`` is the
             # right flag on the pinned CLI version. The ADR specifies it
             # but the current upstream docs sometimes call it
             # ``--continue`` or ``--session``; pin once verified.
-            argv.extend(["--resume", self._sdk_session_id])
+            argv.extend(["--resume", sdk_session_id])
         if self._cfg.system_prompt:
             # TODO(verify-codex-jsonl): the exact CLI flag for a
             # caller-supplied system prompt — current docs reference
@@ -244,7 +275,11 @@ class CodexDriver:
         with self._proc_lock:
             self._proc = proc
 
-        stderr_buf: list[str] = []
+        # Bounded ring buffer — a noisy Codex CLI can fill stderr fast and
+        # we only surface it on a non-zero exit, so dropping oldest is the
+        # right policy. Cap matches _STDERR_MAX_LINES so the resident set
+        # for stderr stays small even for long-running turns.
+        stderr_buf: deque[str] = deque(maxlen=_STDERR_MAX_LINES)
         stderr_thread = threading.Thread(
             target=_drain,
             args=(proc.stderr, stderr_buf),
@@ -297,6 +332,11 @@ class CodexDriver:
     def _consume_stdout(self, stdout: Optional[IO[str]], *, turn_id: str) -> None:
         if stdout is None:
             return
+        # Track whether we ever saw a session id in this turn so we can
+        # warn once if the JSONL shape doesn't surface one — silent
+        # --resume breakage is the failure mode the warning catches.
+        saw_session_id = False
+        events_processed = 0
         for line in stdout:
             line = line.strip()
             if not line:
@@ -310,10 +350,16 @@ class CodexDriver:
             if not isinstance(event, dict):
                 continue
 
+            events_processed += 1
             sid = _extract_codex_session_id(event)
-            if sid and sid != self._sdk_session_id:
-                self._sdk_session_id = sid
-                self._emit_session_id(sid)
+            if sid:
+                saw_session_id = True
+                with self._state_lock:
+                    changed = sid != self._sdk_session_id
+                    if changed:
+                        self._sdk_session_id = sid
+                if changed:
+                    self._emit_session_id(sid)
 
             for kind, data in translate_codex_event(event, turn_id=turn_id):
                 self._emit(kind, data)
@@ -322,11 +368,33 @@ class CodexDriver:
                 # agentd's history mirror is provider-agnostic: it
                 # stores the raw record verbatim, keyed by whatever the
                 # provider considers unique. For Codex we hand it the
-                # JSON object as-is.
+                # JSON object as-is. Swallowing the exception keeps a
+                # single bad frame from killing the turn, but log it so
+                # repeated failures don't go silent.
                 try:
                     self._emit_record(event)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning(
+                        "codex_driver: emit_record failed (turn_id=%s): %s",
+                        turn_id, exc,
+                    )
+
+        # End-of-turn session-id sanity check: if events flowed but none
+        # carried a session id, _build_argv won't pass --resume on the
+        # next turn and the conversation forks silently. Warn once per
+        # driver instance — the JSONL schema may legitimately omit the
+        # field in some configurations, but the user deserves to know.
+        if events_processed > 0 and not saw_session_id and not self._sid_warned:
+            with self._state_lock:
+                already_have_sid = self._sdk_session_id is not None
+            if not already_have_sid:
+                self._sid_warned = True
+                _log.warning(
+                    "codex_driver: turn %s emitted %d events but no recognizable "
+                    "session id — --resume will not carry over (verify "
+                    "TODO(verify-codex-jsonl) mappings against the pinned CLI)",
+                    turn_id, events_processed,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +622,13 @@ def _codex_usage_dict(usage: dict) -> dict:
     }
 
 
-def _drain(stream: Optional[IO[str]], sink: list) -> None:
+def _drain(stream: Optional[IO[str]], sink: "deque[str]") -> None:
+    """Read lines off ``stream`` into ``sink``. ``sink`` is a bounded
+    deque (maxlen=_STDERR_MAX_LINES) so a long-running noisy turn drops
+    oldest lines instead of growing memory unboundedly. Only surfaced on
+    a non-zero exit, so dropping the head is the right policy.
+    """
+
     if stream is None:
         return
     try:

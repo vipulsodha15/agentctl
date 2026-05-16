@@ -100,7 +100,9 @@ completes one full turn including a tool call against
 
 ### 1.2 Storage migration
 
-- `internal/store/migrations/0002_provider.sql`: `ALTER TABLE sessions
+- `internal/store/migrations/0005_provider.sql` (number chosen at impl
+  time based on the highest existing migration; the plan originally
+  said `0002`): `ALTER TABLE sessions
   ADD COLUMN provider TEXT NOT NULL DEFAULT 'anthropic'`; on a second
   statement, drop the default so future inserts must specify it (sqlite
   needs the table-rebuild trick — copy `migrations/0001_initial.sql`

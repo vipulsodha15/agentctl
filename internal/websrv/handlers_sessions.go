@@ -258,6 +258,14 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	model := *req.Model
+	if model == "" {
+		// Distinguish `{"model": ""}` from `{"model": null}` / absent: empty
+		// is a present-but-invalid value, not a missing field. The catalog
+		// also rejects empty, but the error message there reads "model %q
+		// for provider %q" with an empty quote, which is confusing.
+		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, "model field must not be empty")
+		return
+	}
 	summary, err := s.manager.UpdateModel(r.Context(), id, model)
 	if err != nil {
 		if errors.Is(err, sm.ErrModelInvalid) {

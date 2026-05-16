@@ -43,6 +43,19 @@ const (
 	ProviderOpenAI    = "openai"
 )
 
+// ValidateProvider returns nil if p is one of the canonical provider
+// identifiers, or an error naming the allowed set otherwise. Empty is
+// rejected — callers that want "let the resolver pick" should branch on
+// the empty case before calling.
+func ValidateProvider(p string) error {
+	switch p {
+	case ProviderAnthropic, ProviderOpenAI:
+		return nil
+	default:
+		return fmt.Errorf("invalid provider %q (expected %s|%s)", p, ProviderAnthropic, ProviderOpenAI)
+	}
+}
+
 type Secrets struct {
 	V                  int    `json:"v"`
 	AnthropicAPIKey    string `json:"anthropic_api_key,omitempty"`
