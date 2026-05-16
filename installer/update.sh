@@ -24,6 +24,7 @@ Usage: bash installer/update.sh
     AGENTCTL_DATA_DIR    XDG data dir override (default ~/.local/share/agentctl)
     SKIP_PULL=1          skip 'git pull' (use the current working tree as-is)
     SKIP_RESTART=1       skip the agentd service restart at the end
+    REMOTE               remote to pull from when no upstream is set (default origin)
 EOT
 }
 
@@ -46,8 +47,18 @@ if [[ "$SKIP_PULL" != "1" ]]; then
     echo "update.sh: detached HEAD; refusing to pull. Check out a branch or re-run with SKIP_PULL=1." >&2
     exit 2
   fi
-  echo "Pulling latest changes on '$branch' ..."
-  git pull --ff-only
+  if upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
+    echo "Pulling latest changes on '$branch' (tracking $upstream) ..."
+    git pull --ff-only
+  else
+    remote="${REMOTE:-origin}"
+    if ! git remote get-url "$remote" >/dev/null 2>&1; then
+      echo "update.sh: no upstream for '$branch' and remote '$remote' is missing. Set one with 'git branch --set-upstream-to=<remote>/<branch>' or re-run with SKIP_PULL=1." >&2
+      exit 2
+    fi
+    echo "Pulling latest changes on '$branch' from $remote (no upstream configured) ..."
+    git pull --ff-only "$remote" "$branch"
+  fi
 else
   echo "Skipping git pull (SKIP_PULL=1)."
 fi
