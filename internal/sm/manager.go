@@ -320,6 +320,11 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		_ = logger.Close()
 		return CreateResult{}, err
 	}
+	codexCredsBindSource, err := m.resolveCodexCredsBindSource(req.Provider)
+	if err != nil {
+		_ = logger.Close()
+		return CreateResult{}, err
+	}
 
 	if m.store != nil {
 		// control_sock_path is populated after Listen returns the assigned TCP
@@ -412,6 +417,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		VolumeDir:       filepath.Join(dir, "volume"),
 		SkillsDir:       skillsResult.Path,
 		ClaudeCredsHost: claudeCredsBindSource,
+		CodexCredsHost:  codexCredsBindSource,
 		MemBytes:        mem,
 		CPUs:            cpus,
 		SessionToken:    sessionToken,
@@ -450,6 +456,51 @@ func (m *manager) resolveClaudeCredsBindSource() (string, error) {
 	return m.opts.ClaudeCredsDir, nil
 }
 
+// resolveCodexCredsBindSource is the OpenAI / Codex mirror of
+// resolveClaudeCredsBindSource: returns the host directory to bind-mount
+// as the container's ~/.codex when the user has switched OpenAI to OAuth
+// mode via `agentctl auth login --provider openai`. Empty string means no
+// bind-mount (API-key mode, custom-endpoint mode, no secrets file, or
+// any non-openai session). A non-nil error means OAuth is configured but
+// the credentials file is missing — surfacing the cause early so the
+// container does not silently start without auth.
+//
+// Custom-endpoint mode takes precedence over OAuth per
+// CODEX_PROVIDER_PLAN §5.2: the ChatGPT OAuth flow doesn't route through
+// a third-party gateway, so if both are set the gateway wins and we skip
+// the bind-mount (writeSecretsEnv prefers OPENAI_AUTH_TOKEN in that
+// case). The auth-status table surfaces a warning when both are
+// configured.
+func (m *manager) resolveCodexCredsBindSource(provider string) (string, error) {
+	if provider != secrets.ProviderOpenAI {
+		return "", nil
+	}
+	if m.opts.SecretsPath == "" {
+		return "", nil
+	}
+	sec, err := secrets.Load(m.opts.SecretsPath)
+	if err != nil {
+		return "", nil
+	}
+	if sec.ResolvedOpenAIAuthMode() != secrets.AuthModeOAuth {
+		return "", nil
+	}
+	// Custom-endpoint precedence: if a gateway is configured, OAuth is
+	// silenced and we drop the bind-mount so the container falls through
+	// to OPENAI_BASE_URL + OPENAI_API_KEY (= the gateway token).
+	if sec.OpenAIBaseURL != "" && sec.OpenAIAuthToken != "" {
+		return "", nil
+	}
+	if m.opts.CodexCredsDir == "" {
+		return "", fmt.Errorf("openai auth mode=oauth but CodexCredsDir not configured; check agentd setup")
+	}
+	credFile := filepath.Join(m.opts.CodexCredsDir, "auth.json")
+	if info, err := os.Stat(credFile); err != nil || info.Size() == 0 {
+		return "", fmt.Errorf("openai auth mode=oauth but %s missing or empty; run `agentctl auth login --provider openai`", credFile)
+	}
+	return m.opts.CodexCredsDir, nil
+}
+
 type provisionInputs struct {
 	SessionID       string
 	Name            string
@@ -458,11 +509,18 @@ type provisionInputs struct {
 	VolumeDir       string
 	SkillsDir       string
 	ClaudeCredsHost string
-	MemBytes        int64
-	CPUs            float64
-	SessionToken    string
-	NetworkID       string
-	NetworkName     string
+	// CodexCredsHost is the host directory to bind-mount as the
+	// container's ~/.codex when OpenAI is in OAuth mode (phase 2).
+	// Empty means no Codex creds mount (API-key, custom-endpoint, or
+	// non-openai session). Set by resolveCodexCredsBindSource on both
+	// the Create and Restart paths so OAuth survives a session restart
+	// — symmetric with ClaudeCredsHost.
+	CodexCredsHost string
+	MemBytes       int64
+	CPUs           float64
+	SessionToken   string
+	NetworkID      string
+	NetworkName    string
 }
 
 // provisionContainer runs the Create -> Listen -> Start sequence from
@@ -545,6 +603,21 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 			Target: "/home/agent/.claude",
 		})
 	}
+	// OpenAI OAuth mode (ADR 0020 §8, CODEX_PROVIDER_PLAN §2.3): mount
+	// the host's Codex credentials directory at /home/agent/.codex (the
+	// default $CODEX_HOME). The codex CLI inside the container reads
+	// /home/agent/.codex/auth.json (written by the auth helper) and
+	// refreshes the OAuth access token in place — that write goes to our
+	// host snapshot, not anywhere the user has to manage manually. The
+	// CODEX_HOME env var is set further down (next to the control addr)
+	// because it needs to land in spec.Env, not the secrets env file.
+	if in.CodexCredsHost != "" {
+		mounts = append(mounts, ContainerMount{
+			Type:   MountBind,
+			Source: in.CodexCredsHost,
+			Target: "/home/agent/.codex",
+		})
+	}
 
 	// Listen first so we know the host port to hand to the container. TCP on
 	// 127.0.0.1 is reachable from the container via host.docker.internal,
@@ -582,13 +655,22 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		}
 	}
 
+	containerEnv := []string{"AGENTCTL_CONTROL_ADDR=" + containerAddr}
+	if in.CodexCredsHost != "" {
+		// Point codex at the bind-mounted creds dir explicitly so the
+		// CLI doesn't fall back to "$HOME/.codex" — equivalent of the
+		// CLAUDE_CONFIG_DIR override Claude uses, just propagated via
+		// spec.Env rather than the secrets env-file (which only carries
+		// vendor secrets, not container-shape vars).
+		containerEnv = append(containerEnv, "CODEX_HOME=/home/agent/.codex")
+	}
 	spec := ContainerSpec{
 		SessionID:      in.SessionID,
 		ImageID:        in.ImageID,
 		Name:           "agentctl-" + short,
 		Labels:         labels,
 		EnvFile:        in.EnvFile,
-		Env:            []string{"AGENTCTL_CONTROL_ADDR=" + containerAddr},
+		Env:            containerEnv,
 		Mounts:         mounts,
 		MemBytes:       in.MemBytes,
 		CPUs:           in.CPUs,
@@ -712,22 +794,37 @@ func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
 		if sec, err := secrets.Load(secretsPath); err == nil {
 			switch in.Provider {
 			case secrets.ProviderOpenAI:
-				// OpenAI / Codex branch.
-				//   1. oauth mode -> inject nothing; phase 2 adds the
-				//      ~/.codex bind-mount so `codex` finds auth.json
-				//      on disk.
-				//   2. custom endpoint -> OPENAI_BASE_URL +
+				// OpenAI / Codex branch. Precedence is custom-endpoint >
+				// oauth > api_key (CODEX_PROVIDER_PLAN §5.2 — the
+				// ChatGPT OAuth flow doesn't make sense against a third-
+				// party gateway, so the gateway wins when both are set
+				// and `auth status` surfaces the override as a warning).
+				//   1. custom endpoint -> OPENAI_BASE_URL +
 				//      OPENAI_API_KEY (the bearer token; the codex CLI
 				//      takes a gateway token in the same env slot as the
-				//      OpenAI key — confirm at impl time against the
-				//      pinned codex version, per ADR §Items to verify).
-				//   3. api_key -> OPENAI_API_KEY (phase-1 default).
+				//      OpenAI key for the standard openai-compatible
+				//      profile). TODO(verify-codex-base-url-auth):
+				//      confirm against pinned @openai/codex@0.130.0
+				//      whether OPENAI_BASE_URL is read for the default
+				//      provider or whether users must point at the
+				//      gateway via a $CODEX_HOME/config.toml
+				//      model_providers entry — if the latter, this
+				//      phase ships the env vars unconditionally and the
+				//      shim's codex_driver may need to write a config
+				//      stub. The env-var path is the simplest contract
+				//      to surface today; the wire change (if needed) is
+				//      a shim concern, not an sm concern.
+				//   2. oauth mode -> inject nothing; the ~/.codex
+				//      bind-mount (provisionContainer above) supplies
+				//      auth.json on disk.
+				//   3. api_key -> OPENAI_API_KEY.
 				switch {
-				case sec.ResolvedOpenAIAuthMode() == secrets.AuthModeOAuth:
-					// no OpenAI env var injected; phase 2 mounts ~/.codex
 				case sec.OpenAIBaseURL != "" && sec.OpenAIAuthToken != "":
 					pairs["OPENAI_BASE_URL"] = sec.OpenAIBaseURL
 					pairs["OPENAI_API_KEY"] = sec.OpenAIAuthToken
+				case sec.ResolvedOpenAIAuthMode() == secrets.AuthModeOAuth:
+					// no OpenAI env var injected; resolveCodexCredsBindSource
+					// has mounted ~/.codex with auth.json.
 				case sec.OpenAIAPIKey != "":
 					pairs["OPENAI_API_KEY"] = sec.OpenAIAPIKey
 				}
@@ -1115,6 +1212,10 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 	if err != nil {
 		return RestartResult{}, err
 	}
+	codexCredsBindSource, err := m.resolveCodexCredsBindSource(summary.Provider)
+	if err != nil {
+		return RestartResult{}, err
+	}
 	in := provisionInputs{
 		SessionID:       sessionID,
 		Name:            summary.Name,
@@ -1122,6 +1223,7 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 		EnvFile:         envFile,
 		VolumeDir:       filepath.Join(dir, "volume"),
 		ClaudeCredsHost: claudeCredsBindSource,
+		CodexCredsHost:  codexCredsBindSource,
 		MemBytes:        summary.MemLimitBytes,
 		CPUs:            summary.CPULimitCores,
 		SessionToken:    a.opts.SessionToken,
