@@ -25,9 +25,22 @@ const (
 // bind-mount of the host's Claude credentials directory at /home/agent/.claude
 // so the bundled claude CLI (spawned by the Agent SDK) authenticates with
 // the user's subscription.
+//
+// The same two modes apply symmetrically to OpenAI (Codex). They are stored
+// in distinct fields so a user can run Anthropic in OAuth mode and OpenAI in
+// api_key mode simultaneously — the common case once both providers are
+// configured. See ADR 0020 §5.
 const (
 	AuthModeAPIKey = "api_key"
 	AuthModeOAuth  = "oauth"
+)
+
+// Provider identifiers. These are the values that flow through
+// CreateRequest.Provider, agentd.greet, the resolver, and the `provider`
+// column on sessions. See ADR 0020 §1.
+const (
+	ProviderAnthropic = "anthropic"
+	ProviderOpenAI    = "openai"
 )
 
 type Secrets struct {
@@ -36,15 +49,35 @@ type Secrets struct {
 	AnthropicAuthMode  string `json:"anthropic_auth_mode,omitempty"`
 	AnthropicBaseURL   string `json:"anthropic_base_url,omitempty"`
 	AnthropicAuthToken string `json:"anthropic_auth_token,omitempty"`
-	GitHubPAT          string `json:"github_pat,omitempty"`
-	GitHubPATKind      string `json:"github_pat_kind,omitempty"`
+	// OpenAI (Codex) credentials — mirror of the Anthropic shape per ADR
+	// 0020 §5. OpenAIBaseURL / OpenAIAuthToken are reserved for phase 5
+	// (custom endpoints / gateways); they land in the struct in phase 1 so
+	// the gateway phase doesn't require a secrets-file migration.
+	OpenAIAPIKey    string `json:"openai_api_key,omitempty"`
+	OpenAIAuthMode  string `json:"openai_auth_mode,omitempty"`
+	OpenAIBaseURL   string `json:"openai_base_url,omitempty"`
+	OpenAIAuthToken string `json:"openai_auth_token,omitempty"`
+	GitHubPAT       string `json:"github_pat,omitempty"`
+	GitHubPATKind   string `json:"github_pat_kind,omitempty"`
 }
 
-// ResolvedAuthMode returns the effective mode: explicit AnthropicAuthMode if
-// set, otherwise AuthModeAPIKey for backwards compatibility (any pre-existing
-// secrets.json that just has anthropic_api_key keeps working unchanged).
+// ResolvedAuthMode returns the effective Anthropic mode: explicit
+// AnthropicAuthMode if set, otherwise AuthModeAPIKey for backwards
+// compatibility (any pre-existing secrets.json that just has
+// anthropic_api_key keeps working unchanged).
 func (s Secrets) ResolvedAuthMode() string {
 	if s.AnthropicAuthMode == AuthModeOAuth {
+		return AuthModeOAuth
+	}
+	return AuthModeAPIKey
+}
+
+// ResolvedOpenAIAuthMode returns the effective OpenAI mode. Mirrors
+// ResolvedAuthMode; the two are not unified because the common case is
+// "Anthropic OAuth + OpenAI API key" — different providers, different
+// credential lifecycles (ADR 0020 §5).
+func (s Secrets) ResolvedOpenAIAuthMode() string {
+	if s.OpenAIAuthMode == AuthModeOAuth {
 		return AuthModeOAuth
 	}
 	return AuthModeAPIKey

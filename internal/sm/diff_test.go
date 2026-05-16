@@ -119,7 +119,7 @@ func newDiffManager(t *testing.T) (Manager, *diffFakeConn, string) {
 		DefaultModel:    "claude-sonnet-4-6",
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
-	r, err := mgr.Create(context.Background(), CreateRequest{Name: "d"})
+	r, err := mgr.Create(context.Background(), CreateRequest{Name: "d", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestExportPushBranchRequired(t *testing.T) {
 
 func TestSessionReposReturnsRepos(t *testing.T) {
 	mgr, _ := newTestManager(t)
-	r, _ := mgr.Create(context.Background(), CreateRequest{Repos: []string{"https://x/y.git"}})
+	r, _ := mgr.Create(context.Background(), CreateRequest{Provider: "anthropic", Repos: []string{"https://x/y.git"}})
 	repos, err := mgr.SessionRepos(context.Background(), r.SessionID)
 	if err != nil {
 		t.Fatalf("repos: %v", err)

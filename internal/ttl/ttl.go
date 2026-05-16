@@ -43,15 +43,23 @@ var (
 	ErrBuiltinReadOnly = errors.New("ttl: built-in is read-only")
 	ErrValidation      = errors.New("ttl: validation failed")
 	ErrInUse           = errors.New("ttl: in use")
+	// ErrProviderNotEnabled is returned by PutAgent when the agent pins a
+	// provider that the daemon has no credentials for. See ADR 0020 §9.
+	ErrProviderNotEnabled = errors.New("ttl: provider not enabled")
 )
 
 // Agent is the schema for an agent. The yaml tags are what the on-the-wire
 // YAML body looks like; json tags govern the HTTP API. Source/LoadedAt are
 // not serialized into the YAML body — they are computed from the row.
 type Agent struct {
-	Name          string   `yaml:"name" json:"name"`
-	Description   string   `yaml:"description" json:"description"`
-	Colour        string   `yaml:"colour" json:"colour"`
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description" json:"description"`
+	Colour      string `yaml:"colour" json:"colour"`
+	// Provider, when set, pins the agent to a specific runtime (e.g.
+	// "anthropic" or "openai"). When empty the resolver picks one at
+	// session-create time (ADR 0020 §1, §3) — that's what makes built-in
+	// agents portable across providers without per-provider YAML.
+	Provider      string   `yaml:"provider,omitempty" json:"provider,omitempty"`
 	Model         string   `yaml:"model,omitempty" json:"model,omitempty"`
 	Prompt        string   `yaml:"prompt" json:"prompt"`
 	MCPsAllowed   []string `yaml:"mcps_allowed,omitempty" json:"mcps_allowed,omitempty"`

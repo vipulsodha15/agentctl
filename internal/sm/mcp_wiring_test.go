@@ -62,7 +62,7 @@ func TestProbeFailureBroadcastsOnFirstAttach(t *testing.T) {
 	}).(*manager)
 
 	ctx := context.Background()
-	res, err := mgr.Create(ctx, CreateRequest{Name: "p"})
+	res, err := mgr.Create(ctx, CreateRequest{Name: "p", Provider: "anthropic"})
 	if err != nil {
 		t.Fatal(err)
 	}

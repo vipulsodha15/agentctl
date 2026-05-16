@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,10 +36,25 @@ func newTestManager(t *testing.T) (Manager, *fakeControl) {
 	return mgr, fc
 }
 
+// TestCreateRejectsEmptyProvider locks in the contract from ADR 0020 §3:
+// Provider must be resolved at the entry-point layer (CLI, web, tm) and
+// never default at the sm layer. A caller that forgets to thread the
+// field gets a loud failure instead of silently billing the wrong runtime.
+func TestCreateRejectsEmptyProvider(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	_, err := mgr.Create(context.Background(), CreateRequest{Name: "no-provider"})
+	if err == nil {
+		t.Fatal("expected ErrProviderRequired, got nil")
+	}
+	if !errors.Is(err, ErrProviderRequired) {
+		t.Fatalf("expected ErrProviderRequired, got %v", err)
+	}
+}
+
 func TestCreateSendInOrder(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "t"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "t", Provider: "anthropic"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +89,7 @@ func TestCreateSendInOrder(t *testing.T) {
 func TestSendBeforeRuntimeReady(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "race"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "race", Provider: "anthropic"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +134,7 @@ func TestSendBeforeRuntimeReady(t *testing.T) {
 func TestQueueWhenInFlight(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{Name: "q"})
+	r, _ := mgr.Create(ctx, CreateRequest{Name: "q", Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
@@ -156,7 +172,7 @@ func TestQueueWhenInFlight(t *testing.T) {
 func TestInterruptMidTurn(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{Name: "i"})
+	r, _ := mgr.Create(ctx, CreateRequest{Name: "i", Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
@@ -187,7 +203,7 @@ func TestInterruptMidTurn(t *testing.T) {
 func TestInterruptWithoutInFlight(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{})
+	r, _ := mgr.Create(ctx, CreateRequest{Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
@@ -200,7 +216,7 @@ func TestInterruptWithoutInFlight(t *testing.T) {
 func TestAttachMidTurnSnapshotsFirst(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{Name: "snap"})
+	r, _ := mgr.Create(ctx, CreateRequest{Name: "snap", Provider: "anthropic"})
 	conn := fc.attach(t, r.SessionID, mgr)
 
 	first, _ := mgr.Attach(ctx, r.SessionID)
@@ -226,7 +242,7 @@ func TestAttachMidTurnSnapshotsFirst(t *testing.T) {
 func TestQueueGrowsBeyondOne(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{Name: "many"})
+	r, _ := mgr.Create(ctx, CreateRequest{Name: "many", Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
@@ -251,7 +267,7 @@ func TestQueueGrowsBeyondOne(t *testing.T) {
 func TestIdempotencyDoesNotRequireStore(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{Name: "idem"})
+	r, _ := mgr.Create(ctx, CreateRequest{Name: "idem", Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
@@ -279,7 +295,7 @@ func TestProvisionOrderCreateListenStart(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	res, err := mgr.Create(ctx, CreateRequest{Name: "p"})
+	res, err := mgr.Create(ctx, CreateRequest{Name: "p", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -323,7 +339,7 @@ func TestProvisionTearsDownOnStartFailure(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	if _, err := mgr.Create(ctx, CreateRequest{Name: "p"}); err == nil {
+	if _, err := mgr.Create(ctx, CreateRequest{Name: "p", Provider: "anthropic"}); err == nil {
 		t.Fatal("expected start error to surface")
 	}
 	cm.mu.Lock()
@@ -460,7 +476,7 @@ func TestSkillsSnapshotFrozenAtCreate(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	first, err := mgr.Create(ctx, CreateRequest{Name: "first"})
+	first, err := mgr.Create(ctx, CreateRequest{Name: "first", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create first: %v", err)
 	}
@@ -471,7 +487,7 @@ func TestSkillsSnapshotFrozenAtCreate(t *testing.T) {
 
 	composer.addSkill("gamma", "gamma-v1")
 
-	second, err := mgr.Create(ctx, CreateRequest{Name: "second"})
+	second, err := mgr.Create(ctx, CreateRequest{Name: "second", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
@@ -568,7 +584,7 @@ func TestMessageRecordsMirroredToStore(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "mirror"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "mirror", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -710,7 +726,7 @@ func TestSDKSessionIDPersistedAndForwardedInGreet(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "resume"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "resume", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -775,7 +791,7 @@ func TestSDKSessionIDPersistedAndForwardedInGreet(t *testing.T) {
 func TestCreate_SystemPromptInGreet(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "stage", SystemPrompt: "you are a helpful test agent"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "stage", SystemPrompt: "you are a helpful test agent", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -798,7 +814,7 @@ func TestCreate_SystemPromptInGreet(t *testing.T) {
 func TestCreate_SystemPromptOmittedWhenEmpty(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "no-sp"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "no-sp", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -833,7 +849,7 @@ func waitGreet(t *testing.T, conn *fakeConn) ControlFrame {
 func TestTerminate(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{})
+	r, _ := mgr.Create(ctx, CreateRequest{Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
@@ -1075,7 +1091,7 @@ func TestRestartReusesNetworkAndUsesPinnedID(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	res, err := mgr.Create(ctx, CreateRequest{Name: "p"})
+	res, err := mgr.Create(ctx, CreateRequest{Name: "p", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1115,7 +1131,7 @@ func TestRestartRefusesWhenImageNotPinned(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	_ = fc
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{})
+	r, err := mgr.Create(ctx, CreateRequest{Provider: "anthropic"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1162,7 +1178,7 @@ func TestRestartPreservesOAuthCredsBindMount(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	res, err := mgr.Create(ctx, CreateRequest{Name: "oauth"})
+	res, err := mgr.Create(ctx, CreateRequest{Name: "oauth", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1227,7 +1243,7 @@ func TestSendOnStoppedSessionAutoRestarts(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "auto"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "auto", Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

@@ -59,7 +59,7 @@ func TestSocketDispatchesNewOps(t *testing.T) {
 	}
 
 	var resp proto.CreateSessionResponse
-	if err := c.Call(proto.OpCreateSession, proto.CreateSessionRequest{Name: "s"}, &resp, 5*time.Second); err != nil {
+	if err := c.Call(proto.OpCreateSession, proto.CreateSessionRequest{Name: "s", Provider: "anthropic"}, &resp, 5*time.Second); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if resp.SessionID == "" {

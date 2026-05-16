@@ -34,15 +34,20 @@ type initFlags struct {
 	anthropicKey       string
 	anthropicBaseURL   string
 	anthropicAuthToken string
-	githubPAT          string
-	noImportSkills     bool
-	importSkills       bool
-	claudePath         string
-	foreground         bool
-	resetToken         string
-	resetWebToken      bool
-	repair             bool
-	skipBuild          bool
+	// openaiKey is the phase-1 surface for `agentctl init` to capture an
+	// OPENAI_API_KEY. The matching --openai-base-url / --openai-auth-token
+	// flags are phase 5; the struct field on Secrets exists already so
+	// the gateway phase doesn't need a secrets migration.
+	openaiKey      string
+	githubPAT      string
+	noImportSkills bool
+	importSkills   bool
+	claudePath     string
+	foreground     bool
+	resetToken     string
+	resetWebToken  bool
+	repair         bool
+	skipBuild      bool
 }
 
 func runInit(ctx context.Context, env *Env, args []string) int {
@@ -52,6 +57,7 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	fs.StringVar(&f.anthropicKey, "anthropic-key", "", "use this Anthropic API key (skip prompt)")
 	fs.StringVar(&f.anthropicBaseURL, "anthropic-base-url", "", "use a custom Anthropic-compatible endpoint (e.g. an LLM gateway); requires --anthropic-auth-token")
 	fs.StringVar(&f.anthropicAuthToken, "anthropic-auth-token", "", "bearer token sent as Authorization to --anthropic-base-url (alternative to --anthropic-key)")
+	fs.StringVar(&f.openaiKey, "openai-key", "", "use this OpenAI API key (enables the OpenAI/Codex provider)")
 	fs.StringVar(&f.githubPAT, "github-pat", "", "use this GitHub PAT (skip prompt)")
 	fs.BoolVar(&f.noImportSkills, "no-import-claude-skills", false, "skip the Claude Code skills import step")
 	fs.BoolVar(&f.importSkills, "import-claude-skills", false, "force the Claude Code skills import step")
@@ -305,9 +311,24 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 
 	skipAnthropic := os.Getenv("AGENTCTL_SKIP_ANTHROPIC_VALIDATE") == "1"
 	skipGitHub := os.Getenv("AGENTCTL_SKIP_GITHUB_PAT_CHECK") == "1"
+	skipOpenAI := os.Getenv("AGENTCTL_SKIP_OPENAI_VALIDATE") == "1"
 
 	if err := resolveAnthropicCreds(&out, env, f, skipAnthropic); err != nil {
 		return secrets.Secrets{}, err
+	}
+
+	// Phase 1: --openai-key is opt-in. We don't prompt — a fresh
+	// install that doesn't pass the flag stays Anthropic-only, which
+	// preserves the existing single-provider workflow byte-for-byte
+	// (ADR 0020 §UX principles).
+	if f.openaiKey != "" {
+		if !skipOpenAI {
+			if err := validateOpenAI(f.openaiKey); err != nil {
+				return secrets.Secrets{}, err
+			}
+		}
+		out.OpenAIAPIKey = f.openaiKey
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
 	}
 
 	if f.githubPAT != "" {
@@ -708,6 +729,31 @@ func validateAnthropicCustom(baseURL, token string) error {
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("anthropic endpoint %s status %d", baseURL, resp.StatusCode)
+	}
+	return nil
+}
+
+// validateOpenAI hits GET https://api.openai.com/v1/models with the bearer
+// key. Mirror of validateAnthropic — same shape, different endpoint and
+// auth header. Phase 5 will add the gateway variant once
+// --openai-base-url / --openai-auth-token land.
+func validateOpenAI(key string) error {
+	req, err := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("openai api: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("openai key rejected (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("openai api status %d", resp.StatusCode)
 	}
 	return nil
 }
