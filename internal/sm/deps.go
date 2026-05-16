@@ -128,7 +128,7 @@ const (
 	// model. The daemon validates `model` against the session's provider
 	// catalog before dispatching, so the shim never sees a model id the
 	// runtime would reject.
-	AgentdSetModel          = "agentd.set_model"
+	AgentdSetModel = "agentd.set_model"
 )
 
 // RuntimeEventData mirrors the inner shape the shim emits inside a

@@ -40,9 +40,9 @@ type stubManager struct {
 	// UpdateModel so PATCH tests can assert dispatch. updateModelErr is the
 	// canned error to return; updateModelOut is the SessionSummary the
 	// happy-path PATCH returns.
-	updatedModel    []struct{ ID, Model string }
-	updateModelErr  error
-	updateModelOut  proto.SessionSummary
+	updatedModel   []struct{ ID, Model string }
+	updateModelErr error
+	updateModelOut proto.SessionSummary
 }
 
 func (m *stubManager) Create(_ context.Context, req sm.CreateRequest) (sm.CreateResult, error) {

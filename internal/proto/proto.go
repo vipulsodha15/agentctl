@@ -49,7 +49,7 @@ const (
 	// UpdateSessionRequest; the response carries the post-update
 	// SessionSummary so callers can echo the canonical model id back to
 	// the user.
-	OpUpdateSession       = "UpdateSession"
+	OpUpdateSession = "UpdateSession"
 )
 
 type Frame struct {

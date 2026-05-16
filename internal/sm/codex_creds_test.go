@@ -85,12 +85,12 @@ func TestResolveCodexCredsBindSourceMatrix(t *testing.T) {
 				}
 			}
 			m := New(Options{
-				SessionsDir:    filepath.Join(dir, "sessions"),
-				Hub:            fan.NewHub(),
-				SecretsPath:    secretsPath,
-				CodexCredsDir:  credsDir,
-				DefaultModel:   "gpt-5.5",
-				ImageID:        "sha256:abc",
+				SessionsDir:   filepath.Join(dir, "sessions"),
+				Hub:           fan.NewHub(),
+				SecretsPath:   secretsPath,
+				CodexCredsDir: credsDir,
+				DefaultModel:  "gpt-5.5",
+				ImageID:       "sha256:abc",
 			}).(*manager)
 
 			got, err := m.resolveCodexCredsBindSource(tc.provider)

@@ -122,26 +122,26 @@ var (
 	// id is not in the session's provider catalog (ADR 0020 §2). API layers
 	// map this to bad_request — it's a client-correctable user error, not a
 	// server bug.
-	ErrModelInvalid      = errors.New("model not valid for session provider")
-	ErrSnapshotFailed    = errors.New("snapshot failed")
+	ErrModelInvalid   = errors.New("model not valid for session provider")
+	ErrSnapshotFailed = errors.New("snapshot failed")
 )
 
 type Options struct {
-	Store           *store.Store
-	SessionsDir     string
-	Hub             fan.Hub
-	Containers      ContainerManager
-	Control         ControlServer
-	MCPs            mcp.Registry
-	Skills          SkillsComposer
-	Usage           UsageRecorder
-	Logger          *slog.Logger
-	Now             func() time.Time
-	DefaultModel    string
-	ImageID         string
-	PinnedImageID   func() string
-	SecretsPath     string
-	ClaudeCredsDir  string
+	Store          *store.Store
+	SessionsDir    string
+	Hub            fan.Hub
+	Containers     ContainerManager
+	Control        ControlServer
+	MCPs           mcp.Registry
+	Skills         SkillsComposer
+	Usage          UsageRecorder
+	Logger         *slog.Logger
+	Now            func() time.Time
+	DefaultModel   string
+	ImageID        string
+	PinnedImageID  func() string
+	SecretsPath    string
+	ClaudeCredsDir string
 	// CodexCredsDir is the host directory bind-mounted into the container
 	// at /home/agent/.codex when OpenAI is in OAuth mode (phase 2). Wired
 	// in phase 1 so the Options shape is stable; phase 1 only reads the

@@ -40,7 +40,7 @@ const (
 	KindAgentdError     = "agentd.error"
 	// KindSetModel is the control frame the daemon sends to swap the runtime's
 	// model id mid-session (ADR 0020 §2). Body: {"model": "<id>"}.
-	KindSetModel        = "agentd.set_model"
+	KindSetModel = "agentd.set_model"
 )
 
 // EventKindAssistantDelta is the only event-kind dropped on overflow.
