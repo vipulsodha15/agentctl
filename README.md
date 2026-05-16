@@ -1,60 +1,119 @@
 # agentctl
 
-Local AI coding-agent sessions on your machine.
+Run AI coding-agent sessions on your own machine. Each session lives in its
+own Docker container with the Claude Agent SDK, your MCP servers, your
+skills, and (optionally) a clone of your repo. The CLI and Web UI both
+talk to a single local daemon (`agentd`) that owns the database and
+container lifecycle, so you can detach from a session and reattach
+later without losing state.
 
-## Quick start
+---
+
+## Install
+
+Requires Docker (Desktop or Engine) and a Linux/macOS host. Then:
 
     bash installer/install.sh
     agentctl init
+
+`init` does the first-time setup end-to-end: Docker reachability check,
+session base image build, prompts for credentials, MCP registry seed,
+and `systemd --user` / `launchd` service install. It is idempotent —
+re-run it any time to repair drift.
+
+## Authenticate with Claude
+
+agentctl supports **two ways** to authenticate sessions. Pick whichever
+matches how you already use Claude:
+
+### Option A — Claude subscription (recommended if you have Pro/Max)
+
+    agentctl auth login
+
+This builds a one-shot helper container, runs `claude auth login` inside
+it, and stores the OAuth credentials under
+`~/.config/agentctl/claude/.credentials.json`. The browser flow opens on
+your host; paste the code back into the terminal. From then on, every
+session bind-mounts those credentials and authenticates as you — no API
+key billing, no `ANTHROPIC_API_KEY` env var.
+
+Check what's configured at any time:
+
+    agentctl auth status
+
+### Option B — Anthropic API key
+
+If `init` doesn't find OAuth credentials, it prompts for
+`ANTHROPIC_API_KEY` and validates it with a minimal authenticated
+request. The key lives in `~/.config/agentctl/secrets.json` (`0600`) and
+is injected into each session container at start.
+
+You can pre-supply it non-interactively:
+
+    agentctl init --anthropic-key sk-ant-…
+
+### Option C — Custom Anthropic-compatible gateway
+
+For self-hosted LLM gateways:
+
+    agentctl init --anthropic-base-url https://gw.example/v1 \
+                  --anthropic-auth-token <bearer>
+
+### Switching auth methods later
+
+- API key → subscription: run `agentctl auth login`.
+- Subscription → API key: run `agentctl init --reset-token anthropic`.
+
+## Start your first session
+
     agentctl start --repo https://github.com/me/myrepo.git
-    # an interactive session opens; type messages, watch the agent work
 
-`agentctl init` walks through the first-time setup: a Docker check, a
-local image build, prompts for `ANTHROPIC_API_KEY` and `GITHUB_PAT`,
-seeds the MCP registry, installs a `systemd --user` service (or
-`launchd` on macOS), and waits for the daemon to come up. Re-running
-`init` is idempotent and acts as a repair.
+An interactive console opens. Type messages, watch the agent work, hit
+Ctrl-D to detach (the session keeps running). Reattach any time:
 
-## What it does
+    agentctl ls
+    agentctl attach <session-id>
 
-agentctl runs each AI coding session inside its own Docker container
-with its own working volume and bridge network. The session has the
-Claude Agent SDK, MCP servers you've registered, your Skills, and (if
-you passed `--repo`) a clone of one or more git repos. Sessions are
-durable: stopping `agentctl` does not stop the daemon, and the daemon
-restarts cleanly across reboots, picking up running containers it
-recognises by label.
+Prefer a UI?
 
-The Web UI at `http://127.0.0.1:7777` (open it via `agentctl ui`)
-mirrors the CLI: list sessions, open a console, view diffs against
-the recorded base SHA, push branches, browse cost. The CLI and the
-UI talk to the same `agentd` daemon over the same internal API.
+    agentctl ui
 
-MCP servers are stored in a registry (`agentctl mcp ...`) and
-attached to sessions explicitly. Skills are bind-mounted into each
-session's container at `/skills/`; built-in skills come from
-`~/.local/share/agentctl/builtin-skills/`, custom skills from
-`~/.local/share/agentctl/custom-skills/`. Skill changes do not
-require an image rebuild — they take effect at the next session
-start (or `agentctl restart <session>` to pick them up on a running
-session).
+…opens `http://127.0.0.1:7777` in your browser. The Web UI mirrors the
+CLI: list sessions, open a console, view diffs against the recorded
+base SHA, push branches, browse cost.
 
-## Architecture
+## Skills and MCP servers
 
-agentctl is a single Go binary that runs as either the CLI or, when
-launched by systemd / launchd, the `agentd` daemon. agentd owns
-sqlite (`~/.local/share/agentctl/agentd.db`), the Docker SDK, and a
-per-session actor that orchestrates the container lifecycle and a
-control-channel socket bind-mounted into each container. See
-`architecture/overview.md` for the full picture.
+**Skills** are bind-mounted into every session container at `/skills/`.
+Two sources are combined:
+
+- `~/.local/share/agentctl/builtin-skills/` — curated baseline shipped
+  with installs.
+- `~/.local/share/agentctl/custom-skills/` — your own.
+
+Skill edits do **not** require an image rebuild — they take effect at
+the next session start, or use `agentctl restart <session>` to pick
+them up on a running session.
+
+**MCP servers** are kept in a registry and attached to sessions
+explicitly:
+
+    agentctl mcp add ...
+    agentctl mcp ls
+    agentctl start --repo … --mcp my-server
+
+See `agentctl mcp --help` and `agentctl skill --help` for the full set
+of subcommands.
 
 ## Commands at a glance
 
 | Command          | Purpose                                                   |
 |------------------|-----------------------------------------------------------|
-| `init`           | Set up agentctl on this machine.                          |
+| `init`           | First-time setup; idempotent repair.                      |
+| `auth login`     | Authenticate with your Claude subscription (OAuth).       |
+| `auth status`    | Show whether sessions use an API key or OAuth.            |
 | `update`         | Rebuild the session base image and repin its id.          |
-| `config`         | Read or write a config.toml key.                          |
+| `config`         | Read or write a `config.toml` key.                        |
 | `ui`             | Open the local Web UI in a browser.                       |
 | `start`          | Create a session and attach to its event stream.          |
 | `attach`         | Attach to a running session's event stream.               |
@@ -69,18 +128,31 @@ control-channel socket bind-mounted into each container. See
 | `doctor`         | Run install + connectivity checks (`--fix`, `--repair-db`).|
 | `version`        | Print version info.                                       |
 
-Run `agentctl <command> --help` for command-specific flags and
-examples.
+Run `agentctl <command> --help` for command-specific flags.
 
 ## Troubleshooting
 
-See `TROUBLESHOOTING.md` for common failure modes, or run
+First stop:
 
     agentctl doctor
 
-which prints the state of every install + connectivity check. Add
-`--fix` to apply known repairs idempotently, `--repair-db` to vacuum
-the sqlite database, and `--json` for machine-readable output.
+…prints the state of every install + connectivity check. Useful flags:
+
+- `--fix` — apply known repairs idempotently.
+- `--repair-db` — vacuum the sqlite database.
+- `--json` — machine-readable output for scripting.
+
+See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for known failure modes
+and recipes.
+
+## Architecture (one-paragraph version)
+
+agentctl is a single Go binary that runs as either the CLI or, when
+launched by systemd/launchd, the `agentd` daemon. agentd owns sqlite
+(`~/.local/share/agentctl/agentd.db`), the Docker SDK, and a
+per-session actor that orchestrates the container lifecycle plus a
+control-channel socket bind-mounted into each container. Full details:
+[`architecture/overview.md`](architecture/overview.md).
 
 ## Developing
 
@@ -90,15 +162,15 @@ the sqlite database, and `--json` for machine-readable output.
     go test ./...
     cd web && npm ci && npm run build   # rebuild the SPA bundle
 
-The repository layout:
+Repository layout:
 
-- `cmd/agentctl/`  - the single-binary entry point (CLI + agentd).
-- `internal/`      - Go packages.
-- `image/`         - Docker build context for the session base image.
-- `builtin-skills/` - the curated baseline skills shipped with installs.
-- `web/`           - the React + Vite SPA served by agentd.
-- `architecture/`  - design docs and ADRs.
-- `installer/`     - `install.sh` and signature payload.
+- `cmd/agentctl/`   — single-binary entry point (CLI + agentd).
+- `internal/`       — Go packages.
+- `image/`          — Docker build context for the session base image.
+- `builtin-skills/` — curated baseline skills shipped with installs.
+- `web/`            — React + Vite SPA served by agentd.
+- `architecture/`   — design docs and ADRs.
+- `installer/`      — `install.sh` and signature payload.
 
 ## License
 
