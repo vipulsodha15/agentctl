@@ -1,6 +1,13 @@
 # ADR 0003 — Default model and per-session model selection (§15.3)
 
-- **Status:** Accepted.
+- **Status:** Accepted. **Superseded in part by ADR 0020 §2 (2026-05-16):**
+  the "frozen for the session's lifetime" rule on the model is reversed —
+  `sessions.model` is now mutable mid-session. The set-once / immutable-
+  per-session role passes to `sessions.provider`, which is what 0003 was
+  really trying to protect (immutable runtime identity for the duration
+  of a conversation). The rest of this ADR — per-session selection at
+  start, default = `claude-sonnet-4-6`, runtime-tagged `usage` rows — is
+  unchanged.
 - **Date:** 2026-05-09.
 - **Deciders:** Architect.
 
@@ -40,10 +47,15 @@ Per-session selection at start, frozen for the session's lifetime:
   insert time from the runtime's reported model id (which may differ
   from `sessions.model` if the runtime negotiated something else; we
   trust the runtime's `usage` event).
-- Live model-switching mid-session is **not** supported; that would
+- ~~Live model-switching mid-session is **not** supported; that would
   require either a runtime-level operation we don't control or
   re-creating the container, which would lose in-memory tool state.
-  Defer.
+  Defer.~~ **Reversed by ADR 0020 §2:** the Claude driver re-instantiates
+  `ClaudeSDKClient` with the new model while preserving
+  `resume=<sdk_session_id>`, so the JSONL transcript carries forward and
+  no container spawn is required. `sessions.provider` (set at create,
+  immutable) now carries the runtime-identity guarantee this clause was
+  protecting.
 - Choosing Sonnet by default keeps everyday spend predictable; users
   who want Opus opt in.
 

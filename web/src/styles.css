@@ -729,6 +729,44 @@ input[type="checkbox"] {
 .session-detail .session-header .responding-pill .label {
   margin-left: 4px;
 }
+/* Model picker — primary surface for ADR 0020 §2's mid-session swap.
+   Styled to match the existing pill row in the header without competing
+   for attention with status / queue. */
+.session-detail .session-header .model-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-sm);
+}
+.session-detail .session-header .model-select {
+  background: var(--c-surface-2);
+  color: var(--c-fg);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-full);
+  padding: 3px 22px 3px 10px;
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--c-fg-mute) 50%),
+    linear-gradient(135deg, var(--c-fg-mute) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+.session-detail .session-header .model-select:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.session-detail .session-header .model-display {
+  font-size: var(--text-sm);
+  color: var(--c-fg-mute);
+  background: var(--c-surface-2);
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--c-border);
+}
 
 .conv-card {
   grid-column: 1;

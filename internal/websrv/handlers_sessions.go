@@ -1,6 +1,7 @@
 package websrv
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,6 +203,72 @@ func (s *Server) handleInterrupt(w http.ResponseWriter, r *http.Request, id stri
 		Interrupted:       res.Interrupted,
 		ClearedQueueDepth: res.ClearedQueueDepth,
 	})
+}
+
+// handleUpdateSession applies a PATCH body to an existing session.
+//
+// In v1 the only mutable field this surface exposes is `model` — provider
+// is immutable per ADR 0020 §1, and the other session fields are either
+// immutable (id, image_id, created_at) or owned by the actor (status,
+// queue depth, last activity). Mid-session model switch is documented in
+// architecture/api.md §3.2 and ADR 0020 §2 / §4.
+//
+// The handler is conservative about unknown fields: DisallowUnknownFields
+// catches typos that would otherwise be silent (`{"Model": "..."}` would
+// otherwise look like a successful no-op). The explicit `provider` rejection
+// runs before the decoder so the error message points at the policy, not at
+// the JSON shape.
+func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request, id string) {
+	if !s.requireManager(w) {
+		return
+	}
+	// Read once so we can probe for the policy-rejected field before
+	// strict-decoding into the typed shape.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
+		return
+	}
+	// Provider is immutable per ADR 0020 §1; reject before anything else
+	// touches storage so the error reads as a policy decision rather than a
+	// schema typo.
+	var probe map[string]json.RawMessage
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &probe); err == nil {
+			if _, ok := probe["provider"]; ok {
+				writeError(w, http.StatusBadRequest, proto.ErrBadRequest,
+					"provider is immutable; create a new session to change provider (ADR 0020 §1)")
+				return
+			}
+		}
+	}
+	var req struct {
+		Model *string `json:"model,omitempty"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if len(body) > 0 {
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
+			return
+		}
+	}
+	if req.Model == nil {
+		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, "no mutable fields in PATCH body (supported: model)")
+		return
+	}
+	model := *req.Model
+	summary, err := s.manager.UpdateModel(r.Context(), id, model)
+	if err != nil {
+		if errors.Is(err, sm.ErrModelInvalid) {
+			writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
+			return
+		}
+		status, code := mapManagerErr(err)
+		writeError(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, 0, proto.GetSessionResponse{Session: proto.SessionDetail{SessionSummary: summary}})
 }
 
 func decodeJSON(r *http.Request, v any) error {

@@ -164,6 +164,25 @@ func Run(ctx context.Context, opts Options) error {
 		MCPs:           mcpReg,
 		Skills:         newSkillsComposerAdapter(skillMgr),
 		Usage:          newUsageRecorderAdapter(usageSvc),
+		// Mid-session model switch (ADR 0020 §2 / Phase 4) validates the
+		// requested model against this catalog before dispatching the
+		// agentd.set_model frame. The closure re-reads config.toml on each
+		// call so users editing [pricing.tables.models] don't have to
+		// restart agentd. The flat-union shape matches sm.ProviderCatalog;
+		// per-provider scoping (cross-provider rejection) is tracked in the
+		// TODO at internal/sm/provider_catalog.go and will tighten once the
+		// catalog is plumbed with the session's provider.
+		ProviderCatalog: func() sm.ProviderCatalog {
+			c, err := config.Load(configPath)
+			if err != nil {
+				return sm.ProviderCatalog{}
+			}
+			names := make([]string, 0, len(c.Pricing.Tables.Models))
+			for name := range c.Pricing.Tables.Models {
+				names = append(names, name)
+			}
+			return sm.ProviderCatalog{Models: names}
+		},
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt

@@ -66,3 +66,4 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeRawJSON(w, http.StatusOK, resp)
 }
+

@@ -36,6 +36,31 @@ export interface ListSessionsResponse {
   next_cursor?: string | null;
 }
 
+// Provider catalog returned by GET /v1/providers. The session header's
+// model dropdown filters to the entry keyed by the session's provider —
+// today that's always "anthropic" since the Codex split (ADR 0020
+// Phase 1) hasn't landed in this build. Shape is the JSON the daemon's
+// websrv.ProviderEntry marshals; SPA tolerates the map being empty (no
+// dropdown rendered) so installs without a pricing-table model list
+// keep the pre-Phase-4 behavior.
+export interface ProviderEntry {
+  enabled: boolean;
+  default_model?: string;
+  models: string[];
+}
+
+export type ProvidersResponse = Record<string, ProviderEntry>;
+
+// PATCH /v1/sessions/<id> response shape. Mirrors GetSessionResponse so
+// the post-update summary can be threaded through the same reducer
+// path the snapshot uses.
+export interface UpdateSessionResponse {
+  session: {
+    session_id: string;
+    model?: string;
+  };
+}
+
 export interface CreateSessionRequest {
   name: string;
   mcps?: string[] | null;

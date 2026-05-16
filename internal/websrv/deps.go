@@ -29,6 +29,11 @@ type Manager interface {
 	// termination because the rows are keyed by session_id, not by a live
 	// actor. Returns nil when no records exist.
 	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
+	// UpdateModel swaps the runtime's model id mid-session (ADR 0020 §2).
+	// Implemented by sm.Manager; see that interface for the validation
+	// contract (ErrModelInvalid for cross-provider / unknown models,
+	// ErrSessionNotFound for unknown ids).
+	UpdateModel(ctx context.Context, sessionID, model string) (proto.SessionSummary, error)
 }
 
 // MCPRegistry is M3-B's territory; websrv only dispatches to it. Methods
@@ -98,3 +103,9 @@ type SecretsService interface {
 	GetGitHub(ctx context.Context) (GitHubTokenInfo, error)
 	UpdateGitHub(ctx context.Context, token string, validate bool) (GitHubTokenInfo, error)
 }
+
+// Provider catalog types live in server.go alongside the resolver
+// (ADR 0020 §3, §9, §UX principles). The ProviderInfo / ProvidersResponse /
+// ProviderCatalog trio fully covers the per-provider model lookup; the
+// earlier ProviderEntry / ProviderService pair was a parallel name for the
+// same surface and has been retired.

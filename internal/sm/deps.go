@@ -122,6 +122,13 @@ const (
 	AgentdDiffRequest       = "agentd.diff_request"
 	AgentdExportPatchReq    = "agentd.export_patch_request"
 	AgentdExportPushReq     = "agentd.export_push_request"
+	// AgentdSetModel carries a mid-session model switch over the control
+	// channel (ADR 0020 §2). The frame body is {"model": "<id>"}; the shim's
+	// driver swaps its underlying client and the next turn runs on the new
+	// model. The daemon validates `model` against the session's provider
+	// catalog before dispatching, so the shim never sees a model id the
+	// runtime would reject.
+	AgentdSetModel          = "agentd.set_model"
 )
 
 // RuntimeEventData mirrors the inner shape the shim emits inside a

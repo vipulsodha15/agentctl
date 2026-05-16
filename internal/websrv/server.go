@@ -279,6 +279,13 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w)
 		}
 		return
+	case path == "/v1/providers":
+		if method == http.MethodGet {
+			s.handleListProviders(w, r)
+			return
+		}
+		methodNotAllowed(w)
+		return
 	}
 
 	if name, ok := matchPrefix(path, "/v1/agents/"); ok && !strings.Contains(name, "/") {
@@ -389,6 +396,11 @@ func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest s
 		switch method {
 		case http.MethodGet:
 			s.handleGetSession(w, r, id)
+		case http.MethodPatch:
+			// ADR 0020 §2 / §4 — mid-session model switch lives here.
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleUpdateSession(w, r, id)
+			})
 		case http.MethodDelete:
 			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
 				s.handleTerminateSession(w, r, id)

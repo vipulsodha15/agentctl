@@ -44,6 +44,12 @@ const (
 	OpExportPatch         = "ExportPatch"
 	OpExportPush          = "ExportPush"
 	OpListSessionRepos    = "ListSessionRepos"
+	// OpUpdateSession applies mid-session mutations (ADR 0020 §2 / §4 —
+	// today: model swap only). The request body shape lives in
+	// UpdateSessionRequest; the response carries the post-update
+	// SessionSummary so callers can echo the canonical model id back to
+	// the user.
+	OpUpdateSession       = "UpdateSession"
 )
 
 type Frame struct {
@@ -160,6 +166,23 @@ type GetSessionRequest struct {
 
 type GetSessionResponse struct {
 	Session SessionDetail `json:"session"`
+}
+
+// UpdateSessionRequest is the CLI/RPC mirror of the web's
+// PATCH /v1/sessions/<id> body. The only field today is `model` — the
+// mid-session model switch added in ADR 0020 §2 — but the struct is named
+// generically so future mutable fields (e.g. caller-supplied display name)
+// land here without proliferating ops.
+type UpdateSessionRequest struct {
+	SessionID string  `json:"session_id"`
+	Model     *string `json:"model,omitempty"`
+}
+
+// UpdateSessionResponse returns the post-update summary so the CLI can
+// echo the canonical model id (in case the resolver normalized it, e.g.
+// a future fuzzy-match step) back to the user.
+type UpdateSessionResponse struct {
+	Session SessionSummary `json:"session"`
 }
 
 type TerminateSessionRequest struct {
