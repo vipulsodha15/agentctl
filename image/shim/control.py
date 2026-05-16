@@ -47,6 +47,12 @@ KIND_AGENTD_ERROR = "agentd.error"
 KIND_DIFF_REQUEST = "agentd.diff_request"
 KIND_EXPORT_PATCH_REQUEST = "agentd.export_patch_request"
 KIND_EXPORT_PUSH_REQUEST = "agentd.export_push_request"
+# Daemon → shim: swap the runtime's model id mid-session (ADR 0020 §2).
+# Body: {"model": "<id>"}. The driver re-instantiates its underlying
+# client with the new model, preserving conversation history via the
+# Claude SDK's resume=<sdk_session_id> hook or — for Codex — the next
+# `codex exec --json --model <new>` invocation.
+KIND_SET_MODEL = "agentd.set_model"
 
 
 class FrameTooLarge(Exception):

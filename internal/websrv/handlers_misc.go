@@ -51,3 +51,25 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeRawJSON(w, http.StatusOK, resp)
 }
+
+// handleListProviders returns the per-provider catalog the session-header
+// model-switch dropdown reads (ADR 0020 §9 / §UX principles — "one source
+// for the model catalog"). When no ProviderService is wired, we fall back
+// to an empty map rather than 404'ing: the SPA treats "no catalog" as
+// "model is display-only," which preserves the pre-Phase-4 UX in
+// minimally-configured installs.
+func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	if s.providers == nil {
+		writeJSON(w, http.StatusOK, map[string]ProviderEntry{})
+		return
+	}
+	out, err := s.providers.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
+		return
+	}
+	if out == nil {
+		out = map[string]ProviderEntry{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}

@@ -29,6 +29,11 @@ type Manager interface {
 	// termination because the rows are keyed by session_id, not by a live
 	// actor. Returns nil when no records exist.
 	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
+	// UpdateModel swaps the runtime's model id mid-session (ADR 0020 §2).
+	// Implemented by sm.Manager; see that interface for the validation
+	// contract (ErrModelInvalid for cross-provider / unknown models,
+	// ErrSessionNotFound for unknown ids).
+	UpdateModel(ctx context.Context, sessionID, model string) (proto.SessionSummary, error)
 }
 
 // MCPRegistry is M3-B's territory; websrv only dispatches to it. Methods
@@ -97,4 +102,23 @@ type GitHubTokenInfo struct {
 type SecretsService interface {
 	GetGitHub(ctx context.Context) (GitHubTokenInfo, error)
 	UpdateGitHub(ctx context.Context, token string, validate bool) (GitHubTokenInfo, error)
+}
+
+// ProviderEntry is the per-provider catalog the web UI uses to populate
+// the model-switch dropdown in the session header (ADR 0020 §9 / §UX
+// principles — "one source for the model catalog"). Shape mirrors the
+// JSON the SPA reads at GET /v1/providers.
+type ProviderEntry struct {
+	Enabled      bool     `json:"enabled"`
+	DefaultModel string   `json:"default_model,omitempty"`
+	Models       []string `json:"models"`
+}
+
+// ProviderService returns the daemon's resolved provider catalog. Today
+// the only entry is `anthropic` (the historical default); Phase 1 of
+// ADR 0020 will add `openai`. The catalog is built fresh on each request
+// because [pricing.tables.models] in config.toml is hot-editable and the
+// shape is tiny (<10 model rows in practice), so the work is negligible.
+type ProviderService interface {
+	List(ctx context.Context) (map[string]ProviderEntry, error)
 }

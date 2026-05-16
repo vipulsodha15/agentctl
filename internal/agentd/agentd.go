@@ -142,6 +142,7 @@ func Run(ctx context.Context, opts Options) error {
 	})
 
 	configPath := opts.Layout.ConfigFile
+	provAdapter := newProvidersAdapter(configPath)
 	managerOpts := sm.Options{
 		Store:        st,
 		SessionsDir:  opts.Layout.SessionsDir,
@@ -161,6 +162,12 @@ func Run(ctx context.Context, opts Options) error {
 		MCPs:           mcpReg,
 		Skills:         newSkillsComposerAdapter(skillMgr),
 		Usage:          newUsageRecorderAdapter(usageSvc),
+		// Mid-session model switch (ADR 0020 §2 / Phase 4) validates the
+		// requested model against this catalog before dispatching the
+		// agentd.set_model frame. The closure shape lets us re-read
+		// config.toml on each call so users editing [pricing.tables.models]
+		// don't have to restart agentd to see new ids.
+		ProviderCatalog: provAdapter.Catalog,
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt
@@ -239,19 +246,20 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	webLog := log.New(log.Options{Component: log.ComponentWeb})
 	webSrv := websrv.New(websrv.Options{
-		Addr:    cfg.Agentd.WebAddr,
-		Token:   tok,
-		API:     apiSrv,
-		Manager: manager,
-		MCPs:    newMcpAdapter(mcpReg),
-		Skills:  newSkillsAdapter(skillMgr),
-		Usage:   newUsageWebAdapter(usageSvc),
-		Logs:    logStream,
-		Library: taskLib,
-		Tasks:   taskMgr,
-		TaskHub: taskHub,
-		Secrets: newSecretsAdapter(opts.Layout.SecretsFile),
-		Logger:  webLog,
+		Addr:      cfg.Agentd.WebAddr,
+		Token:     tok,
+		API:       apiSrv,
+		Manager:   manager,
+		MCPs:      newMcpAdapter(mcpReg),
+		Skills:    newSkillsAdapter(skillMgr),
+		Usage:     newUsageWebAdapter(usageSvc),
+		Logs:      logStream,
+		Library:   taskLib,
+		Tasks:     taskMgr,
+		TaskHub:   taskHub,
+		Secrets:   newSecretsAdapter(opts.Layout.SecretsFile),
+		Providers: provAdapter,
+		Logger:    webLog,
 	})
 	if err := webSrv.Start(); err != nil {
 		return fmt.Errorf("web server: %w", err)

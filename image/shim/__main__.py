@@ -180,6 +180,8 @@ class Shim:
                 self._handle_diff_request(data, fmt="unified", patch=True)
             elif kind == control.KIND_EXPORT_PUSH_REQUEST:
                 self._handle_export_push_request(data)
+            elif kind == control.KIND_SET_MODEL:
+                self._handle_set_model(data)
             elif kind == control.KIND_SHUTDOWN:
                 self._stopping.set()
                 break
@@ -206,6 +208,29 @@ class Shim:
         if self._driver is None:
             return
         self._driver.interrupt()
+
+    def _handle_set_model(self, data: dict) -> None:
+        """Dispatch agentd.set_model to the active driver (ADR 0020 §2).
+
+        The daemon has already validated the model id against the session's
+        provider catalog by the time this frame arrives, so we don't
+        re-check here — just forward. If the driver is somehow gone we drop
+        the frame silently; the next greet on container start will repick
+        the current model from the session.json the daemon writes.
+        """
+        if self._driver is None:
+            return
+        new_model = (data or {}).get("model") or ""
+        if not isinstance(new_model, str) or not new_model:
+            return
+        try:
+            self._driver.set_model(new_model)
+        except Exception as exc:  # noqa: BLE001
+            self._safe_send(control.KIND_ERROR, {
+                "code": "set_model_failed",
+                "message": str(exc),
+                "fatal": False,
+            })
 
     def _handle_snapshot_request(self, data: dict) -> None:
         request_id = data.get("request_id", "")

@@ -1,0 +1,183 @@
+package sm
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/agentctl/agentctl/internal/fan"
+	"github.com/agentctl/agentctl/internal/proto"
+)
+
+// newCatalogManager builds a manager wired with a fixed provider catalog
+// so UpdateModel's validation step has something to reject against. Mirrors
+// newTestManager but with the catalog closure set.
+func newCatalogManager(t *testing.T, models []string) (Manager, *fakeControl) {
+	t.Helper()
+	dir := t.TempDir()
+	fc := newFakeControl()
+	cat := ProviderCatalog{Models: append([]string(nil), models...)}
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		SnapshotTimeout: 100_000_000, // 100ms
+		ProviderCatalog: func() ProviderCatalog { return cat },
+	})
+	return mgr, fc
+}
+
+// TestUpdateModelValidatesAgainstCatalog covers the happy path and the
+// model-not-in-catalog rejection. The session is created without a
+// catalog-known model on purpose: UpdateModel must rely on the catalog's
+// allowlist (the create-side validation is separate per ADR 0003).
+func TestUpdateModelValidatesAgainstCatalog(t *testing.T) {
+	mgr, fc := newCatalogManager(t, []string{
+		"claude-sonnet-4-6",
+		"claude-opus-4-7",
+	})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "m"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Need the actor to have a control conn so the agentd.set_model frame
+	// has somewhere to land. We don't assert on dispatch here — that's the
+	// next test — but the manager mustn't park forever waiting on it.
+	conn := fc.attach(t, r.SessionID, mgr)
+	_ = conn
+
+	// Happy path: a model in the catalog swaps the summary.
+	sum, err := mgr.UpdateModel(ctx, r.SessionID, "claude-opus-4-7")
+	if err != nil {
+		t.Fatalf("update happy: %v", err)
+	}
+	if sum.Model != "claude-opus-4-7" {
+		t.Errorf("summary.Model = %q, want claude-opus-4-7", sum.Model)
+	}
+
+	// Rejection: an unknown model returns ErrModelInvalid (which the
+	// websrv handler maps to bad_request and the socksrv handler also
+	// maps to bad_request).
+	if _, err := mgr.UpdateModel(ctx, r.SessionID, "some-other-provider-model"); !errors.Is(err, ErrModelInvalid) {
+		t.Fatalf("expected ErrModelInvalid for cross-provider model, got %v", err)
+	}
+
+	// Unknown session id is still the canonical 404.
+	if _, err := mgr.UpdateModel(ctx, "sess_does_not_exist", "claude-opus-4-7"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+// TestUpdateModelSendsControlFrame asserts that a successful UpdateModel
+// dispatches agentd.set_model on the control channel carrying the new
+// model id — the shim relies on that frame to swap its driver client.
+func TestUpdateModelSendsControlFrame(t *testing.T) {
+	mgr, fc := newCatalogManager(t, []string{"claude-sonnet-4-6", "claude-opus-4-7"})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "ctrl"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	if _, err := mgr.UpdateModel(ctx, r.SessionID, "claude-opus-4-7"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got := conn.expect(t, AgentdSetModel)
+	if got == "" {
+		t.Fatal("expected agentd.set_model on the control conn")
+	}
+}
+
+// TestUpdateModelNoOpWhenUnchanged confirms a no-op swap doesn't churn the
+// control channel — repeatedly setting the same model is a UX-level idempotent
+// (the /model command echoes "already on …" rather than burning a frame).
+func TestUpdateModelNoOpWhenUnchanged(t *testing.T) {
+	mgr, fc := newCatalogManager(t, []string{"claude-sonnet-4-6", "claude-opus-4-7"})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "noop"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	conn := fc.attach(t, r.SessionID, mgr)
+	// Drain any frames the attach handshake produced so the assertion
+	// below is unambiguous.
+	drainFiltered(conn)
+
+	sum, err := mgr.UpdateModel(ctx, r.SessionID, "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("noop update: %v", err)
+	}
+	if sum.Model != "claude-sonnet-4-6" {
+		t.Errorf("summary.Model after noop = %q", sum.Model)
+	}
+	// Wait a small window — if a frame leaks through it'll arrive promptly.
+	// We don't want to use expect() (which blocks 2s); poll once.
+	select {
+	case fr := <-conn.filtered:
+		if fr.Kind == AgentdSetModel {
+			t.Errorf("no-op UpdateModel sent an agentd.set_model frame")
+		}
+	default:
+		// Good — no frame queued.
+	}
+}
+
+// TestUpdateModelRejectsEmptyWithNoCatalog covers the minimal-setup path.
+// When no catalog is wired we still reject empty model id so "send the body
+// but leave model unset" produces a clear error instead of clobbering the
+// session's current value.
+func TestUpdateModelRejectsEmptyWithNoCatalog(t *testing.T) {
+	dir := t.TempDir()
+	fc := newFakeControl()
+	mgr := New(Options{
+		SessionsDir:     dir,
+		Hub:             fan.NewHub(),
+		Control:         fc,
+		DefaultModel:    "claude-sonnet-4-6",
+		SnapshotTimeout: 100_000_000,
+	})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "empty"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_ = fc.attach(t, r.SessionID, mgr)
+	if _, err := mgr.UpdateModel(ctx, r.SessionID, ""); !errors.Is(err, ErrModelInvalid) {
+		t.Errorf("expected ErrModelInvalid for empty model, got %v", err)
+	}
+}
+
+// drainFiltered drops any pending frames from the test-conn channel without
+// blocking. Used after attach() because the snapshot handshake's RuntimeReady
+// can produce intermediate frames we don't care about.
+func drainFiltered(c *fakeConn) {
+	for {
+		select {
+		case <-c.filtered:
+		default:
+			return
+		}
+	}
+}
+
+// TestProviderCatalogHasModel doubles as a sanity check on the catalog's
+// empty-string handling so the validation contract is explicit.
+func TestProviderCatalogHasModel(t *testing.T) {
+	cat := ProviderCatalog{Models: []string{"claude-sonnet-4-6"}}
+	if !cat.HasModel("claude-sonnet-4-6") {
+		t.Error("expected catalog to recognize claude-sonnet-4-6")
+	}
+	if cat.HasModel("") {
+		t.Error("empty model id must never validate")
+	}
+	if cat.HasModel("claude-opus-4-7") {
+		t.Error("unknown model id must not validate")
+	}
+}
+
+// quiet compile-checks against types referenced in the closures so the
+// test file fails fast if proto.SessionSummary's signature drifts.
+var _ proto.SessionSummary = proto.SessionSummary{}

@@ -176,6 +176,51 @@ class RuntimeDriver:
             except Exception:  # noqa: BLE001
                 continue
 
+    def set_model(self, new_model: str) -> None:
+        """Swap the SDK client's model id mid-session (ADR 0020 §2).
+
+        The Claude Agent SDK doesn't expose a runtime ``set_model`` knob, so
+        we tear down the live ``ClaudeSDKClient`` and re-create it with the
+        new model. ``ClaudeAgentOptions.resume=<sdk_session_id>`` is reapplied
+        from the stored session id so the SDK picks up the same JSONL
+        transcript on the new connection — i.e. the same path idle-resume
+        already exercises every container restart.
+
+        Empty / unchanged model is a no-op so a repeated ``/model`` doesn't
+        churn the connection. Errors during teardown are logged but never
+        raised: the next ``submit_turn`` will hit ``_ensure_client`` and
+        attempt a fresh connect with the new model.
+
+        TODO(verify-resume-after-model-swap): per ADR 0020 §Consequences
+        ("Items to verify"), confirm the SDK reliably re-picks up the same
+        JSONL when resume=<sid> is passed with a *different* model than the
+        one that created the conversation. The idle-resume path already
+        does this with the same model; cross-model resume is the new case
+        introduced by Phase 4. Smoke test deferred to integration.
+        """
+
+        if not new_model:
+            return
+        if new_model == self._cfg.model:
+            return
+        self._cfg.model = new_model
+        if self._loop is None:
+            # No event loop yet — config-only update is enough; the first
+            # turn will build the client with the new model.
+            return
+        # Schedule the swap on the runtime loop so we don't race the
+        # in-flight turn's read of self._client. _swap_client closes the
+        # old client cleanly; the next submit_turn rebuilds.
+        try:
+            asyncio.run_coroutine_threadsafe(self._swap_client(), self._loop)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _swap_client(self) -> None:
+        await self._close_client()
+        # _ensure_client picks up self._cfg.model on next call; nothing
+        # else to do here.
+
     def shutdown(self, grace_seconds: float = 30.0) -> None:
         with self._in_flight_lock:
             fut = self._in_flight

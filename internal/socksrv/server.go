@@ -229,6 +229,8 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		s.handleExportPush(cw, frame)
 	case proto.OpListSessionRepos:
 		s.handleListSessionRepos(cw, frame)
+	case proto.OpUpdateSession:
+		s.handleUpdateSession(cw, frame)
 	default:
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
 	}
@@ -391,6 +393,35 @@ func (s *Server) handleRestart(cw *connWriter, frame proto.Frame) {
 	})
 }
 
+// handleUpdateSession is the unix-socket twin of the web's PATCH
+// /v1/sessions/<id>. v1 only honors `model` (mid-session swap per
+// ADR 0020 §2); the field is a pointer so omitting it produces a
+// "no mutable fields" error instead of silently overwriting with "".
+func (s *Server) handleUpdateSession(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.UpdateSessionRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	if req.SessionID == "" {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "session_id required")
+		return
+	}
+	if req.Model == nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "no mutable fields in request (supported: model)")
+		return
+	}
+	summary, err := s.manager.UpdateModel(context.Background(), req.SessionID, *req.Model)
+	if err != nil {
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.UpdateSessionResponse{Session: summary})
+}
+
 func (s *Server) handleTerminate(cw *connWriter, frame proto.Frame) {
 	if !s.requireManager(cw, frame.ID) {
 		return
@@ -520,6 +551,12 @@ func mapSMError(err error) string {
 		return proto.ErrPreconditionFailed
 	case errors.Is(err, sm.ErrSnapshotFailed):
 		return proto.ErrSnapshotFailed
+	case errors.Is(err, sm.ErrModelInvalid):
+		// Client-correctable: the user passed a model id the daemon's
+		// resolver doesn't know about (ADR 0020 §2). Surfacing this as
+		// bad_request lets the CLI exit 64 and the web SPA show the
+		// inline form error instead of an opaque 500.
+		return proto.ErrBadRequest
 	default:
 		return proto.ErrInternal
 	}

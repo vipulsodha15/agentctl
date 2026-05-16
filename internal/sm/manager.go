@@ -42,6 +42,14 @@ type Manager interface {
 	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
 	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
 	Rehydrate(ctx context.Context) error
+	// UpdateModel swaps the runtime's model id mid-session (ADR 0020 §2).
+	// Validates the new id against the session's provider catalog, writes
+	// sessions.model in storage, and forwards agentd.set_model to the shim.
+	// Returns ErrSessionNotFound if the session is unknown, ErrModelInvalid
+	// if the model doesn't belong to the session's provider. The new
+	// SessionSummary (with the swapped model) is returned so callers can
+	// echo the canonical value back to the user.
+	UpdateModel(ctx context.Context, sessionID, model string) (proto.SessionSummary, error)
 }
 
 type Stream = fan.Stream
@@ -98,6 +106,11 @@ var (
 	ErrSessionNotFound   = errors.New("session not found")
 	ErrAlreadyTerminated = errors.New("session already terminated")
 	ErrNoInFlight        = errors.New("no in-flight turn")
+	// ErrModelInvalid is returned from UpdateModel when the requested model
+	// id is not in the session's provider catalog (ADR 0020 §2). API layers
+	// map this to bad_request — it's a client-correctable user error, not a
+	// server bug.
+	ErrModelInvalid      = errors.New("model not valid for session provider")
 	ErrSnapshotFailed    = errors.New("snapshot failed")
 )
 
@@ -122,6 +135,14 @@ type Options struct {
 	IdempotencyTTL  time.Duration
 	SnapshotTimeout time.Duration
 	ShutdownGrace   time.Duration
+	// ProviderCatalogs returns the list of model ids that UpdateModel
+	// accepts for a mid-session switch (ADR 0020 §2 / §UX principles —
+	// "one source for the model catalog"). The closure shape lets the
+	// daemon refresh the catalog when [pricing.tables] changes without
+	// recreating the manager. When nil, UpdateModel accepts any non-empty
+	// model id — appropriate for tests; production wires it up against
+	// config.Pricing.Tables.Models.
+	ProviderCatalog func() ProviderCatalog
 }
 
 type manager struct {
@@ -764,6 +785,45 @@ func (m *manager) Interrupt(ctx context.Context, sessionID string, clearQueue bo
 	case <-ctx.Done():
 		return InterruptResult{}, ctx.Err()
 	}
+}
+
+// UpdateModel swaps the model id on an existing session (ADR 0020 §2).
+// Validation order matters: we first confirm the session exists, then that
+// the model is in the catalog. A no-op (model unchanged) still succeeds —
+// the surface is idempotent from the caller's perspective so /model
+// repeated entries don't surprise the user with errors. The control frame
+// is dispatched only when the value actually changes, so the shim does not
+// tear down its client for a no-op.
+func (m *manager) UpdateModel(ctx context.Context, sessionID, model string) (proto.SessionSummary, error) {
+	a := m.actorFor(sessionID)
+	if a == nil {
+		return proto.SessionSummary{}, ErrSessionNotFound
+	}
+	if m.opts.ProviderCatalog != nil {
+		cat := m.opts.ProviderCatalog()
+		if !cat.HasModel(model) {
+			return proto.SessionSummary{}, fmt.Errorf("%w: %q", ErrModelInvalid, model)
+		}
+	} else if model == "" {
+		// No catalog wired (tests / minimal setups) — still reject empty.
+		return proto.SessionSummary{}, fmt.Errorf("%w: empty model id", ErrModelInvalid)
+	}
+	current := a.snapshotSummary()
+	if current.Model == model {
+		// No-op: surface unchanged summary so the caller can echo without
+		// triggering a control-channel roundtrip the shim can't ack.
+		return current, nil
+	}
+	if m.store != nil {
+		if _, err := m.store.DB().ExecContext(ctx,
+			`UPDATE sessions SET model=?, last_activity_at=? WHERE id=?`,
+			model, m.now().Format(time.RFC3339Nano), sessionID,
+		); err != nil {
+			return proto.SessionSummary{}, fmt.Errorf("persist model: %w", err)
+		}
+	}
+	out := a.setModel(model)
+	return out, nil
 }
 
 func (m *manager) Attach(ctx context.Context, sessionID string) (Stream, error) {

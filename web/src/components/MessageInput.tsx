@@ -7,9 +7,24 @@ interface Props {
   sessionId: string;
   inFlight: boolean;
   queueDepth: number;
+  // ADR 0020 §2 / §UX principles — `/model <name>` is the keyboard-driven
+  // secondary surface for mid-session model switch. Owner of the actual
+  // PATCH lives one component up (SessionDetail) so the dropdown and the
+  // slash command share the same code path; this component only handles
+  // detection + fuzzy resolution.
+  providerModels?: string[];
+  currentModel?: string;
+  onModelSwitch?: (next: string) => Promise<void> | void;
 }
 
-export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
+export function MessageInput({
+  sessionId,
+  inFlight,
+  queueDepth,
+  providerModels,
+  currentModel,
+  onModelSwitch,
+}: Props) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -23,6 +38,44 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
     const content = value.trim();
     if (!content) return;
     if (sending) return;
+    // `/model <name>` interceptor (ADR 0020 §2 secondary UX). Resolved
+    // via fuzzy match against the provider's catalog: `/model opus`
+    // → `claude-opus-4-7` if exactly one model contains "opus". On
+    // ambiguity or no match we fall through to sending the literal
+    // text so the user gets a chat reply explaining what happened
+    // — better than silently swallowing the command.
+    const modelArg = parseSlashModel(content);
+    if (modelArg !== null && onModelSwitch) {
+      const resolved = resolveModelName(modelArg, providerModels || []);
+      if (resolved === MODEL_AMBIGUOUS) {
+        setError(`/model: "${modelArg}" matches multiple models — be more specific`);
+        return;
+      }
+      if (resolved === MODEL_UNKNOWN) {
+        setError(`/model: no model matches "${modelArg}"`);
+        return;
+      }
+      if (resolved === currentModel) {
+        setError(`/model: already on ${resolved}`);
+        return;
+      }
+      setSending(true);
+      setError(null);
+      try {
+        await onModelSwitch(resolved);
+        setValue("");
+      } catch (err) {
+        setError(
+          err instanceof ApiError
+            ? `${err.code ?? err.status}: ${err.message}`
+            : String(err),
+        );
+      } finally {
+        setSending(false);
+        queueMicrotask(() => taRef.current?.focus());
+      }
+      return;
+    }
     setSending(true);
     setError(null);
     try {
@@ -154,4 +207,43 @@ function cryptoRandomId(): string {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
+}
+
+// Sentinel returns from resolveModelName — distinguishable from any valid
+// model id (those never start with a dot per Anthropic / OpenAI naming).
+export const MODEL_AMBIGUOUS = ".ambiguous";
+export const MODEL_UNKNOWN = ".unknown";
+
+// parseSlashModel returns the argument to a `/model <name>` command, or
+// null if the message isn't that command. Quoting / extra whitespace is
+// tolerated; trailing extra args are ignored (a `/model opus please`
+// resolves on the first token, matching how skill commands behave).
+export function parseSlashModel(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("/model")) return null;
+  const rest = trimmed.slice("/model".length);
+  // Must be followed by whitespace or end-of-input to avoid matching
+  // "/modelfoo" as if it were "/model foo".
+  if (rest.length > 0 && !/^\s/.test(rest)) return null;
+  const arg = rest.trim().split(/\s+/)[0] || "";
+  return arg;
+}
+
+// resolveModelName takes the user's argument and the provider's catalog
+// and returns either an exact catalog id or one of the sentinel
+// constants. Priority: exact match → unique substring match. We treat
+// case-insensitive substrings as "fuzzy enough" — the catalog is small
+// (≤10 entries in practice) so we don't need a real Levenshtein.
+export function resolveModelName(arg: string, models: string[]): string {
+  if (!arg) return MODEL_UNKNOWN;
+  if (models.includes(arg)) return arg;
+  const lower = arg.toLowerCase();
+  const matches = models.filter((m) => m.toLowerCase().includes(lower));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) return MODEL_UNKNOWN;
+  // Multiple matches: if one is an exact case-insensitive match, prefer
+  // it. Otherwise the user has to disambiguate.
+  const exactCI = matches.find((m) => m.toLowerCase() === lower);
+  if (exactCI) return exactCI;
+  return MODEL_AMBIGUOUS;
 }

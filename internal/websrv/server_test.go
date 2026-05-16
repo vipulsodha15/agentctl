@@ -36,6 +36,13 @@ type stubManager struct {
 	createOut  sm.CreateResult
 	createErr  error
 	sentMsg    *sm.SendRequest
+	// updatedModel records the (sessionID, model) tuples passed to
+	// UpdateModel so PATCH tests can assert dispatch. updateModelErr is the
+	// canned error to return; updateModelOut is the SessionSummary the
+	// happy-path PATCH returns.
+	updatedModel    []struct{ ID, Model string }
+	updateModelErr  error
+	updateModelOut  proto.SessionSummary
 }
 
 func (m *stubManager) Create(_ context.Context, req sm.CreateRequest) (sm.CreateResult, error) {
@@ -102,6 +109,21 @@ func (m *stubManager) StoredConversation(_ context.Context, id string) ([]byte, 
 		return nil, nil
 	}
 	return []byte(`[{"type":"user","message":{"role":"user","content":"hi"}}]`), nil
+}
+
+func (m *stubManager) UpdateModel(_ context.Context, id, model string) (proto.SessionSummary, error) {
+	m.updatedModel = append(m.updatedModel, struct{ ID, Model string }{ID: id, Model: model})
+	if m.updateModelErr != nil {
+		return proto.SessionSummary{}, m.updateModelErr
+	}
+	out := m.updateModelOut
+	if out.ID == "" {
+		out.ID = id
+	}
+	if out.Model == "" {
+		out.Model = model
+	}
+	return out, nil
 }
 
 type cannedDiff struct {

@@ -24,62 +24,65 @@ const (
 )
 
 type Server struct {
-	httpSrv  *http.Server
-	listener net.Listener
-	logger   *slog.Logger
-	apiSrv   *api.Server
-	manager  Manager
-	mcps     MCPRegistry
-	skills   SkillsService
-	usage    UsageService
-	logs     LogStreamer
-	doctor   Doctor
-	updater  Updater
-	library  LibraryService
-	tasks    TaskService
-	taskHub  TaskHub
-	secrets  SecretsService
-	token    string
-	addr     string
-	originOK string
+	httpSrv   *http.Server
+	listener  net.Listener
+	logger    *slog.Logger
+	apiSrv    *api.Server
+	manager   Manager
+	mcps      MCPRegistry
+	skills    SkillsService
+	usage     UsageService
+	logs      LogStreamer
+	doctor    Doctor
+	updater   Updater
+	library   LibraryService
+	tasks     TaskService
+	taskHub   TaskHub
+	secrets   SecretsService
+	providers ProviderService
+	token     string
+	addr      string
+	originOK  string
 }
 
 type Options struct {
-	Addr    string
-	Token   string
-	API     *api.Server
-	Manager Manager
-	MCPs    MCPRegistry
-	Skills  SkillsService
-	Usage   UsageService
-	Logs    LogStreamer
-	Doctor  Doctor
-	Updater Updater
-	Library LibraryService
-	Tasks   TaskService
-	TaskHub TaskHub
-	Secrets SecretsService
-	Logger  *slog.Logger
+	Addr      string
+	Token     string
+	API       *api.Server
+	Manager   Manager
+	MCPs      MCPRegistry
+	Skills    SkillsService
+	Usage     UsageService
+	Logs      LogStreamer
+	Doctor    Doctor
+	Updater   Updater
+	Library   LibraryService
+	Tasks     TaskService
+	TaskHub   TaskHub
+	Secrets   SecretsService
+	Providers ProviderService
+	Logger    *slog.Logger
 }
 
 func New(opts Options) *Server {
 	s := &Server{
-		logger:   opts.Logger,
-		apiSrv:   opts.API,
-		manager:  opts.Manager,
-		mcps:     opts.MCPs,
-		skills:   opts.Skills,
-		usage:    opts.Usage,
-		logs:     opts.Logs,
-		doctor:   opts.Doctor,
-		updater:  opts.Updater,
-		library:  opts.Library,
-		tasks:    opts.Tasks,
-		taskHub:  opts.TaskHub,
-		secrets:  opts.Secrets,
-		token:    opts.Token,
-		addr:     opts.Addr,
-		originOK: "http://" + opts.Addr,
+		logger:    opts.Logger,
+		apiSrv:    opts.API,
+		manager:   opts.Manager,
+		mcps:      opts.MCPs,
+		skills:    opts.Skills,
+		usage:     opts.Usage,
+		logs:      opts.Logs,
+		doctor:    opts.Doctor,
+		updater:   opts.Updater,
+		library:   opts.Library,
+		tasks:     opts.Tasks,
+		taskHub:   opts.TaskHub,
+		secrets:   opts.Secrets,
+		providers: opts.Providers,
+		token:     opts.Token,
+		addr:      opts.Addr,
+		originOK:  "http://" + opts.Addr,
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
@@ -242,6 +245,13 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w)
 		}
 		return
+	case path == "/v1/providers":
+		if method == http.MethodGet {
+			s.handleListProviders(w, r)
+			return
+		}
+		methodNotAllowed(w)
+		return
 	}
 
 	if name, ok := matchPrefix(path, "/v1/agents/"); ok && !strings.Contains(name, "/") {
@@ -352,6 +362,11 @@ func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest s
 		switch method {
 		case http.MethodGet:
 			s.handleGetSession(w, r, id)
+		case http.MethodPatch:
+			// ADR 0020 §2 / §4 — mid-session model switch lives here.
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleUpdateSession(w, r, id)
+			})
 		case http.MethodDelete:
 			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
 				s.handleTerminateSession(w, r, id)
