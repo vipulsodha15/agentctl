@@ -15,7 +15,7 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-const SchemaMaxVersion = 4
+const SchemaMaxVersion = 5
 
 type Store struct {
 	db   *sql.DB
@@ -197,6 +197,22 @@ func (s *Store) CountMCPs() (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// WorkspaceState returns the value for `key` in the workspace_state kv
+// table, or empty string if the key is missing. The table is a per-daemon
+// behavioural-state bag, not configuration; see ADR 0020 §3 (sticky
+// last-used-provider lives here, not in config.toml).
+func (s *Store) WorkspaceState(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM workspace_state WHERE key = ?`, key).Scan(&v)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return v, nil
 }
 
 func (s *Store) IntegrityCheck() (string, error) {

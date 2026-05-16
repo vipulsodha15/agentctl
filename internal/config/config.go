@@ -44,7 +44,15 @@ type ImageSection struct {
 }
 
 type ModelSection struct {
-	Default string `toml:"default"`
+	// Default is the legacy single-provider default. Kept for one release
+	// so existing config.toml files don't break; on load, if
+	// AnthropicDefault is empty and Default is set, the latter is copied
+	// into the former. New configs written by `agentctl init` populate
+	// AnthropicDefault / OpenAIDefault directly. See ADR 0020 §4 and
+	// CODEX_PROVIDER_PLAN cross-cutting prerequisite 3.
+	Default          string `toml:"default,omitempty"`
+	AnthropicDefault string `toml:"anthropic_default,omitempty"`
+	OpenAIDefault    string `toml:"openai_default,omitempty"`
 }
 
 type PricingSection struct {
@@ -82,6 +90,17 @@ func Default() Config {
 		},
 		Model: ModelSection{
 			Default: "claude-sonnet-4-6",
+			// AnthropicDefault is intentionally left empty in Default():
+			// applyDefaults() copies Default into it so a legacy config.toml
+			// with only `default = "..."` keeps working. A new config that
+			// sets `anthropic_default = "..."` explicitly overrides this
+			// path. See applyDefaults() and the legacy-fallback test.
+			AnthropicDefault: "",
+			// TODO(verify-at-impl): confirm the exact OpenAI Codex model id
+			// shipped at the time phase 1 lands — OpenAI dev docs currently
+			// reference gpt-5.4 / gpt-5.3-codex; the ADR targets gpt-5.5
+			// (ADR 0020 §Items to verify).
+			OpenAIDefault: "gpt-5.5",
 		},
 		Pricing: PricingSection{
 			Tables: PricingTables{
@@ -90,6 +109,12 @@ func Default() Config {
 					"claude-opus-4-7":   {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
 					"claude-sonnet-4-6": {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
 					"claude-haiku-4-5":  {Input: 0.80, Output: 4.00, CacheRead: 0.08, CacheWrite: 1.00},
+					// TODO(verify-at-impl): gpt-5.5 list pricing — these
+					// numbers are placeholders pending confirmation
+					// (ADR 0020 §Items to verify, CODEX_PROVIDER_PLAN
+					// risks #1). The structure is what matters in phase 1;
+					// numbers are easy to update once OpenAI publishes them.
+					"gpt-5.5": {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
 				},
 			},
 		},
@@ -147,6 +172,16 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Model.Default == "" {
 		c.Model.Default = d.Model.Default
+	}
+	// Legacy fallback: a pre-ADR-0020 config.toml has only `default = "..."`.
+	// Copy it into AnthropicDefault so the resolver finds a value when it
+	// looks up `[model].anthropic_default`. Kept for one release; new
+	// configs should populate AnthropicDefault explicitly.
+	if c.Model.AnthropicDefault == "" {
+		c.Model.AnthropicDefault = c.Model.Default
+	}
+	if c.Model.OpenAIDefault == "" {
+		c.Model.OpenAIDefault = d.Model.OpenAIDefault
 	}
 	if c.Pricing.Tables.Version == 0 {
 		c.Pricing.Tables = d.Pricing.Tables
@@ -246,6 +281,10 @@ func Get(cfg Config, key string) (string, bool) {
 		return cfg.Image.PreviousID, true
 	case "model.default":
 		return cfg.Model.Default, true
+	case "model.anthropic_default":
+		return cfg.Model.AnthropicDefault, true
+	case "model.openai_default":
+		return cfg.Model.OpenAIDefault, true
 	}
 	return "", false
 }
@@ -280,6 +319,10 @@ func Set(cfg *Config, key, value string) error {
 		cfg.Image.PreviousID = value
 	case "model.default":
 		cfg.Model.Default = value
+	case "model.anthropic_default":
+		cfg.Model.AnthropicDefault = value
+	case "model.openai_default":
+		cfg.Model.OpenAIDefault = value
 	default:
 		return fmt.Errorf("unknown config key %q", key)
 	}

@@ -94,13 +94,18 @@ type DockerHealth struct {
 }
 
 type CreateSessionRequest struct {
-	Name          string   `json:"name,omitempty"`
-	MCPs          []string `json:"mcps,omitempty"`
-	ExcludeMCPs   []string `json:"exclude_mcps,omitempty"`
-	Repos         []string `json:"repos,omitempty"`
-	Model         string   `json:"model,omitempty"`
-	MemLimitBytes int64    `json:"mem_limit_bytes,omitempty"`
-	CPULimitCores float64  `json:"cpu_limit_cores,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	MCPs        []string `json:"mcps,omitempty"`
+	ExcludeMCPs []string `json:"exclude_mcps,omitempty"`
+	Repos       []string `json:"repos,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	// Provider is the agent runtime the session runs on (`anthropic` or
+	// `openai`). When empty the daemon's resolver picks one — see
+	// secrets.ResolveProvider and ADR 0020 §3. Set-once at create; never
+	// mutated afterward.
+	Provider      string  `json:"provider,omitempty"`
+	MemLimitBytes int64   `json:"mem_limit_bytes,omitempty"`
+	CPULimitCores float64 `json:"cpu_limit_cores,omitempty"`
 }
 
 type CreateSessionResponse struct {
@@ -196,13 +201,18 @@ type SessionSummary struct {
 	LastActivityAt time.Time `json:"last_activity_at"`
 	ImageID        string    `json:"image_id"`
 	Model          string    `json:"model"`
-	MCPs           []string  `json:"mcps"`
-	Repos          []string  `json:"repos"`
-	InFlight       bool      `json:"in_flight"`
-	QueueDepth     int       `json:"queue_depth"`
-	MemLimitBytes  int64     `json:"mem_limit_bytes"`
-	CPULimitCores  float64   `json:"cpu_limit_cores"`
-	CostUSD        *float64  `json:"cost_usd,omitempty"`
+	// Provider is the agent runtime backing this session — `anthropic` or
+	// `openai`. Set-once at create per ADR 0020 §1. Older clients that
+	// don't know about provider get the empty string back; the web SPA and
+	// CLI renderer both treat "" as `anthropic` for one release.
+	Provider      string   `json:"provider,omitempty"`
+	MCPs          []string `json:"mcps"`
+	Repos         []string `json:"repos"`
+	InFlight      bool     `json:"in_flight"`
+	QueueDepth    int      `json:"queue_depth"`
+	MemLimitBytes int64    `json:"mem_limit_bytes"`
+	CPULimitCores float64  `json:"cpu_limit_cores"`
+	CostUSD       *float64 `json:"cost_usd,omitempty"`
 }
 
 type SessionDetail struct {
