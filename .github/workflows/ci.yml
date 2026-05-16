@@ -81,3 +81,13 @@ jobs:
 
       - name: Build SPA
         run: npm run build
+
+      - name: Flag stale web/dist on PRs
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --quiet -- dist; then
+            echo "web/dist matches web/src — no action needed."
+            exit 0
+          fi
+          echo "::warning::web/dist is out of sync with web/src. The post-merge job on main will rebuild and commit it automatically, but you can rebuild locally (npm --prefix web run build) and amend the PR to skip the bot follow-up commit."
+          git --no-pager diff --stat -- dist
