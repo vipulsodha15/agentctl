@@ -56,6 +56,11 @@ session base image build, prompts for credentials, MCP registry seed,
 and `systemd --user` / `launchd` service install. It is idempotent —
 re-run it any time to repair drift.
 
+To upgrade an existing checkout — pull the latest changes, rebuild,
+and restart the daemon in one step:
+
+    bash installer/update.sh
+
 ## Authenticate with Claude
 
 agentctl supports **two ways** to authenticate sessions. Pick whichever
