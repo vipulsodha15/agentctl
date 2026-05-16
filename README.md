@@ -35,6 +35,12 @@ later without losing state.
   advance the task to the next agent, carrying the prior stage's
   output forward as context. You stay in the loop at every seam
   instead of letting one agent drift end-to-end.
+- **CLI and Web UI, same daemon.** Drive everything from your
+  terminal (`agentctl start`, `attach`, `ls`, `task handoff`, …) or
+  from the local Web UI at `http://127.0.0.1:7777` (`agentctl ui`).
+  Both clients talk to the same `agentd` over the same internal API,
+  so a session you started on the CLI shows up in the UI and vice
+  versa — pick whichever fits the moment.
 
 ---
 
