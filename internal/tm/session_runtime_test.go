@@ -245,6 +245,67 @@ func TestSessionRuntime_StartStage_FinalStageFramingAndSeed(t *testing.T) {
 	}
 }
 
+// TestSessionRuntime_StartStage_StagePinsOverrideAgent — per-stage
+// provider/model pins from the assembly-line YAML must take precedence
+// over the agent's own Provider/Model. This is what lets a single
+// `bug-investigator` agent run on Anthropic in `bug-multi-provider` and
+// on OpenAI in some hypothetical openai-only line without forking the
+// agent YAML (ADR 0020 §3).
+func TestSessionRuntime_StartStage_StagePinsOverrideAgent(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{
+			Name:     "bug-investigator",
+			Prompt:   "You are a bug investigator.",
+			Provider: "anthropic", // would lose
+			Model:    "claude-sonnet-4-6",
+		},
+		StageProvider: "openai", // wins
+		StageModel:    "gpt-5.5",
+		IssueMD:       "Fix the 429.",
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	req := api.lastCreate()
+	if req.Provider != "openai" {
+		t.Errorf("stage provider override lost: got %q want openai", req.Provider)
+	}
+	if req.Model != "gpt-5.5" {
+		t.Errorf("stage model override lost: got %q want gpt-5.5", req.Model)
+	}
+}
+
+// TestSessionRuntime_StartStage_AgentFallback — when the stage entry
+// carries no pins (the common case for portable built-in lines), the
+// agent's Provider/Model still flow through.
+func TestSessionRuntime_StartStage_AgentFallback(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{
+			Name:     "bug-investigator",
+			Prompt:   "You are a bug investigator.",
+			Provider: "anthropic",
+			Model:    "claude-sonnet-4-6",
+		},
+		IssueMD: "Fix the 429.",
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	req := api.lastCreate()
+	if req.Provider != "anthropic" {
+		t.Errorf("agent provider not forwarded: %q", req.Provider)
+	}
+	if req.Model != "claude-sonnet-4-6" {
+		t.Errorf("agent model not forwarded: %q", req.Model)
+	}
+}
+
 func TestSessionRuntime_AssistantMessage_FansToCallback(t *testing.T) {
 	api := newFakeSessionAPI()
 	r := NewSessionRuntime(api, nil)

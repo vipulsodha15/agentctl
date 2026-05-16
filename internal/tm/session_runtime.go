@@ -106,16 +106,26 @@ func (r *SessionRuntime) WithResolver(resolve ProviderResolver) *SessionRuntime 
 func (r *SessionRuntime) HasCredential() bool { return true }
 
 func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (StartStageResult, error) {
-	provider := in.Agent.Provider
-	model := in.Agent.Model
+	// Per-stage assembly-line pins take precedence over agent-level pins
+	// (ADR 0020 §3 — mixed-provider lines). The same agent YAML can run on
+	// different providers in different lines without forking, because the
+	// line's stage entry overrides what the agent itself says.
+	provider := in.StageProvider
+	if provider == "" {
+		provider = in.Agent.Provider
+	}
+	model := in.StageModel
+	if model == "" {
+		model = in.Agent.Model
+	}
 	if r.resolve != nil {
 		// Funnel the agent's hints through the resolver so workspace-
 		// sticky last-used-provider and per-provider default models
-		// apply (ADR 0020 §3). When the agent doesn't pin either field,
-		// the resolver picks the workspace's currently active provider
-		// + its configured default model — the portability property
-		// that lets built-in agent YAMLs run on whichever provider the
-		// user has configured.
+		// apply (ADR 0020 §3). When neither the stage nor the agent
+		// pins either field, the resolver picks the workspace's
+		// currently active provider + its configured default model —
+		// the portability property that lets built-in agent YAMLs run
+		// on whichever provider the user has configured.
 		p, m, rerr := r.resolve(provider, model)
 		if rerr != nil {
 			return StartStageResult{}, fmt.Errorf("session runtime: resolve: %w", rerr)

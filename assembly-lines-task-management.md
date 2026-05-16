@@ -196,6 +196,35 @@ reference; no per-stage approval flag, no per-stage notes.
 | Name | Stages |
 |---|---|
 | `bug` | bug-investigator → bug-planner → bug-executor |
+| `bug-multi-provider` | bug-investigator (anthropic) → bug-planner → bug-executor (openai) |
+
+**Per-stage provider pins.** Stages may carry an optional `provider:` and
+`model:` to pin which agent runtime spawns the stage (ADR 0020 §3 —
+orchestration as the headline). When unset, the resolver picks one at
+session-create time from the workspace defaults, so the same agent YAML
+runs unchanged on whichever provider the user has configured. The
+`bug-multi-provider` built-in is the reference example: it ships a
+mixed-provider line whose `investigator` pins Anthropic (depth-of-
+exploration argument) and whose `executor` pins OpenAI (edit-and-test
+loop). The `planner` stage stays unpinned so it runs on the workspace
+default.
+
+```yaml
+# Excerpt from internal/ttl/builtins/assembly-lines/bug-multi-provider.yaml
+stages:
+  - agent: bug-investigator
+    provider: anthropic
+  - agent: bug-planner
+  - agent: bug-executor
+    provider: openai
+```
+
+agentctl frames itself as an **orchestrator across providers**, not as a
+client of any one of them. The mixed-provider built-in is the destination
+the rest of the codex-provider work earns; surfaces (CLI run view, web
+StageStrip chip) show each stage's provider+model as a first-class visual
+whenever a line actually mixes runtimes, and stay invisible when it
+doesn't.
 
 **CLI surface.**
 

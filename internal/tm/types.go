@@ -50,17 +50,25 @@ type Task struct {
 }
 
 type Stage struct {
-	ID         string    `json:"stage_id"`
-	TaskID     string    `json:"task_id"`
-	Position   int       `json:"position"`
-	AgentName  string    `json:"agent_name"`
-	Colour     string    `json:"colour,omitempty"`
-	SessionID  string    `json:"session_id,omitempty"`
-	VolumeName string    `json:"volume_name,omitempty"`
-	Synthesis  string    `json:"synthesis,omitempty"`
-	Status     string    `json:"status"`
-	StartedAt  time.Time `json:"started_at,omitzero"`
-	EndedAt    time.Time `json:"ended_at,omitzero"`
+	ID         string `json:"stage_id"`
+	TaskID     string `json:"task_id"`
+	Position   int    `json:"position"`
+	AgentName  string `json:"agent_name"`
+	Colour     string `json:"colour,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	VolumeName string `json:"volume_name,omitempty"`
+	Synthesis  string `json:"synthesis,omitempty"`
+	Status     string `json:"status"`
+	// Provider and Model surface the runtime identity the stage's session
+	// is running on (or did run on, for done stages). Joined from the
+	// sessions table in loadStages — the run-view UI uses these to
+	// render the per-stage provider/model chip introduced in ADR 0020 §3
+	// (orchestration as the headline). Empty when the stage hasn't been
+	// spawned yet or the session row has been GC'd.
+	Provider  string    `json:"provider,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	EndedAt   time.Time `json:"ended_at,omitzero"`
 }
 
 // Message is the row form for an entry in task_messages.

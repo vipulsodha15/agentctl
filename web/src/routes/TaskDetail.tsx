@@ -547,12 +547,19 @@ function StageStrip({
 }) {
   if (stages.length === 0) return null;
   const activeIdx = stages.findIndex((s) => s.status === "active");
+  // Per ADR 0020 §UX principles (provider invisibility), the per-stage
+  // runtime chip only appears when the line actually exercises more than
+  // one provider across its spawned stages. A single-provider line keeps
+  // the pre-ADR 0020 chrome unchanged.
+  const showRuntime = stagesMixProviders(stages);
   return (
     <div className="stage-strip" role="list" aria-label="Assembly line stages">
       {stages.map((s, idx) => {
         const isDone = s.status === "done" || taskStatus === "done";
         const isActive = s.status === "active";
-        const label = `Stage ${idx + 1} of ${stages.length}: ${s.agent_name} — ${s.status}`;
+        const runtime = stageRuntimeLabel(s);
+        const baseLabel = `Stage ${idx + 1} of ${stages.length}: ${s.agent_name} — ${s.status}`;
+        const label = runtime ? `${baseLabel} on ${runtime}` : baseLabel;
         return (
           <span key={s.stage_id} className="stage-strip-item">
             <span
@@ -567,6 +574,15 @@ function StageStrip({
                 {isDone ? <CheckIcon /> : idx + 1}
               </span>
               <span className="stage-pill-name">{s.agent_name}</span>
+              {showRuntime && runtime && (
+                <span
+                  className="stage-pill-runtime"
+                  title={`Runtime: ${runtime}`}
+                  data-testid="stage-pill-runtime"
+                >
+                  {runtime}
+                </span>
+              )}
             </span>
             {idx < stages.length - 1 && (
               <span
@@ -581,6 +597,34 @@ function StageStrip({
       })}
     </div>
   );
+}
+
+// stagesMixProviders mirrors the Go-side gate in internal/cli/task.go: the
+// runtime chip earns its place by showing a difference, so we only enable
+// it once two distinct non-empty providers have been spawned. Pending
+// stages (no session yet) carry an empty provider and don't trigger
+// visibility on their own.
+function stagesMixProviders(stages: TaskStage[]): boolean {
+  let seen = "";
+  for (const s of stages) {
+    if (!s.provider) continue;
+    if (!seen) {
+      seen = s.provider;
+      continue;
+    }
+    if (s.provider !== seen) return true;
+  }
+  return false;
+}
+
+// stageRuntimeLabel renders a stage's provider/model into the short pill
+// text. Provider alone -> "anthropic"; provider+model -> "anthropic/opus-4".
+// Returns empty when neither field is known yet.
+function stageRuntimeLabel(s: TaskStage): string {
+  if (s.provider && s.model) return `${s.provider}/${s.model}`;
+  if (s.provider) return s.provider;
+  if (s.model) return s.model;
+  return "";
 }
 
 function TaskDetailSkeleton() {
