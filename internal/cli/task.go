@@ -127,6 +127,8 @@ func runTaskCreate(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "If --issue-file is omitted, the issue body is read from stdin.")
 		fmt.Fprintln(env.Stderr, "Use --assembly-line for a multi-stage chain, or --agent to chat with a single agent.")
+		fmt.Fprintln(env.Stderr, "Stages in an assembly line may run on different providers (see")
+		fmt.Fprintln(env.Stderr, "`agentctl assembly-line ls` — `bug-multi-provider` mixes Anthropic and OpenAI).")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(reorderArgs(args)); err != nil {
@@ -240,13 +242,30 @@ func runTaskShow(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stdout, "")
 		fmt.Fprintln(env.Stdout, "Stages:")
 		tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "  POS\tAGENT\tSTATUS\tSESSION")
+		// Per ADR 0020 §UX principles (provider invisibility), the RUNTIME
+		// column only appears when the line actually exercises more than
+		// one provider across its stages. Single-provider lines render
+		// identically to pre-ADR 0020 so nothing changes for the
+		// Anthropic-only user.
+		showRuntime := stagesMixProviders(t.Stages)
+		if showRuntime {
+			fmt.Fprintln(tw, "  POS\tAGENT\tSTATUS\tRUNTIME\tSESSION")
+		} else {
+			fmt.Fprintln(tw, "  POS\tAGENT\tSTATUS\tSESSION")
+		}
 		for _, s := range t.Stages {
 			marker := "  "
 			if s.ID == t.CurrentStageID {
 				marker = "* "
 			}
-			fmt.Fprintf(tw, "%s%d\t%s\t%s\t%s\n", marker, s.Position, s.AgentName, s.Status, defaultDash(s.SessionID))
+			if showRuntime {
+				fmt.Fprintf(tw, "%s%d\t%s\t%s\t%s\t%s\n",
+					marker, s.Position, s.AgentName, s.Status,
+					formatStageRuntime(s.Provider, s.Model), defaultDash(s.SessionID))
+			} else {
+				fmt.Fprintf(tw, "%s%d\t%s\t%s\t%s\n",
+					marker, s.Position, s.AgentName, s.Status, defaultDash(s.SessionID))
+			}
 		}
 		_ = tw.Flush()
 	}
@@ -303,4 +322,48 @@ func defaultDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// stagesMixProviders reports whether the assembly line actually exercises
+// more than one provider across its spawned stages. The run view uses this
+// as the visibility gate for the per-stage RUNTIME column / chip — ADR
+// 0020 §UX principles say single-provider lines render with zero new chrome,
+// so a Claude-only setup is byte-for-byte unchanged after upgrade.
+//
+// Pending stages (no session row yet) carry an empty Provider, so we only
+// count distinct non-empty values. A line with one spawned stage will look
+// single-provider until at least one more stage spawns on a different
+// runtime; that's the right read — the chip earns its place by showing a
+// difference, not by anticipating one.
+func stagesMixProviders(stages []tm.Stage) bool {
+	seen := ""
+	for _, s := range stages {
+		if s.Provider == "" {
+			continue
+		}
+		if seen == "" {
+			seen = s.Provider
+			continue
+		}
+		if s.Provider != seen {
+			return true
+		}
+	}
+	return false
+}
+
+// formatStageRuntime is the short string the run view uses for a stage's
+// [provider/model] chip. Empty when neither field is set (e.g. stage hasn't
+// spawned yet). Provider alone renders as "[provider]"; model alone is
+// uncommon but renders as "[model]".
+func formatStageRuntime(provider, model string) string {
+	switch {
+	case provider != "" && model != "":
+		return provider + "/" + model
+	case provider != "":
+		return provider
+	case model != "":
+		return model
+	}
+	return "-"
 }

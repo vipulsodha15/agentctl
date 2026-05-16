@@ -353,6 +353,12 @@ export interface TaskStage {
   volume_name?: string;
   synthesis?: string;
   status: StageStatus;
+  // provider/model surface the runtime identity the stage's session ran on
+  // (ADR 0020 §3 — orchestration as the headline). Populated from the
+  // sessions row via a LEFT JOIN on the server; empty for stages that
+  // haven't spawned a session yet.
+  provider?: string;
+  model?: string;
   started_at?: string;
   ended_at?: string;
 }

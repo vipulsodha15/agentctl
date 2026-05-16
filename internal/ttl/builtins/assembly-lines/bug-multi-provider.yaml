@@ -1,0 +1,13 @@
+name: bug-multi-provider
+description: |
+  Mixed-provider bug-fix assembly line — investigate on Anthropic, plan on
+  the workspace default, execute on OpenAI. Showcases ADR 0020's
+  orchestration-across-providers UX: each stage picks its own runtime so
+  you get Claude's exploration depth on the front of the line and Codex's
+  edit-and-test loop on the back without leaving the workflow.
+stages:
+  - agent: bug-investigator
+    provider: anthropic
+  - agent: bug-planner
+  - agent: bug-executor
+    provider: openai

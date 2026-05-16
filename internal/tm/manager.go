@@ -64,16 +64,23 @@ type StageRuntime interface {
 }
 
 type StartStageInput struct {
-	TaskID      string
-	StageID     string
-	Position    int
-	Agent       ttl.Agent
-	PrevAgent   string
-	NextAgent   string
-	IssueMD     string
-	HandoffInMD string
-	RepoURL     string
-	BaseSHA     string
+	TaskID    string
+	StageID   string
+	Position  int
+	Agent     ttl.Agent
+	PrevAgent string
+	NextAgent string
+	// StageProvider and StageModel are per-stage overrides drawn from the
+	// assembly-line YAML (ADR 0020 §3). They take precedence over the
+	// agent's own Provider/Model when set, which is what lets one built-in
+	// agent (e.g. bug-investigator) run on Anthropic in one assembly line
+	// and on OpenAI in another without forking the agent YAML.
+	StageProvider string
+	StageModel    string
+	IssueMD       string
+	HandoffInMD   string
+	RepoURL       string
+	BaseSHA       string
 	// OnAssistantMessage is invoked with each assistant message the agent
 	// emits while the stage is active. The manager uses these to populate
 	// the task chat thread and to lock the synthesis on handoff.
@@ -606,9 +613,20 @@ func (m *Manager) loadTaskTx(ctx context.Context, tx *sql.Tx, taskID string) (*T
 }
 
 func (m *Manager) loadStages(ctx context.Context, taskID string) ([]Stage, error) {
+	// LEFT JOIN sessions so the per-stage Provider/Model are surfaced to
+	// the run view without a second round trip (ADR 0020 §3). Pending
+	// stages don't have a session row yet — the LEFT JOIN leaves those
+	// columns NULL, which scans into empty strings here. Done stages
+	// keep their session_id pointer alive (lockSynthesisAndAdvance only
+	// nulls volume_name), so the chip stays visible after handoff.
 	rows, err := m.opts.Store.DB().QueryContext(ctx,
-		`SELECT stage_id, task_id, position, agent_name, session_id, volume_name, synthesis, status, started_at, ended_at
-         FROM stages WHERE task_id=? ORDER BY position ASC`, taskID)
+		`SELECT s.stage_id, s.task_id, s.position, s.agent_name,
+                s.session_id, s.volume_name, s.synthesis, s.status,
+                s.started_at, s.ended_at,
+                sess.provider, sess.model
+         FROM stages s
+         LEFT JOIN sessions sess ON sess.id = s.session_id
+         WHERE s.task_id=? ORDER BY s.position ASC`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -616,13 +634,17 @@ func (m *Manager) loadStages(ctx context.Context, taskID string) ([]Stage, error
 	var stages []Stage
 	for rows.Next() {
 		var s Stage
-		var sid, vol, syn, startedAt, endedAt sql.NullString
-		if err := rows.Scan(&s.ID, &s.TaskID, &s.Position, &s.AgentName, &sid, &vol, &syn, &s.Status, &startedAt, &endedAt); err != nil {
+		var sid, vol, syn, startedAt, endedAt, provider, model sql.NullString
+		if err := rows.Scan(&s.ID, &s.TaskID, &s.Position, &s.AgentName,
+			&sid, &vol, &syn, &s.Status, &startedAt, &endedAt,
+			&provider, &model); err != nil {
 			return nil, err
 		}
 		s.SessionID = sid.String
 		s.VolumeName = vol.String
 		s.Synthesis = syn.String
+		s.Provider = provider.String
+		s.Model = model.String
 		if t, err := time.Parse(time.RFC3339Nano, startedAt.String); err == nil {
 			s.StartedAt = t
 		}
@@ -897,16 +919,33 @@ func (m *Manager) spawnStage(ctx context.Context, task *Task, stage *Stage, prev
 		return err
 	}
 	stageRef := *stage
+	// Per-stage provider/model overrides come from the assembly-line YAML
+	// (ADR 0020 §3 — mixed-provider lines). When an assembly line is
+	// attached, look up this stage's entry by position to pull any
+	// `provider:` / `model:` pins. Single-agent tasks (no AssemblyLineName)
+	// skip the lookup; their stage carries no overrides.
+	var stageProvider, stageModel string
+	if task.AssemblyLineName != "" {
+		if wf, err := m.opts.Library.GetAssemblyLine(task.AssemblyLineName); err == nil {
+			idx := stage.Position - 1
+			if idx >= 0 && idx < len(wf.Stages) {
+				stageProvider = wf.Stages[idx].Provider
+				stageModel = wf.Stages[idx].Model
+			}
+		}
+	}
 	in := StartStageInput{
-		TaskID:      task.ID,
-		StageID:     stage.ID,
-		Position:    stage.Position,
-		Agent:       agent,
-		PrevAgent:   prevAgent,
-		IssueMD:     task.IssueMD,
-		HandoffInMD: handoffIn,
-		RepoURL:     task.RepoURL,
-		BaseSHA:     task.BaseSHA,
+		TaskID:        task.ID,
+		StageID:       stage.ID,
+		Position:      stage.Position,
+		Agent:         agent,
+		PrevAgent:     prevAgent,
+		StageProvider: stageProvider,
+		StageModel:    stageModel,
+		IssueMD:       task.IssueMD,
+		HandoffInMD:   handoffIn,
+		RepoURL:       task.RepoURL,
+		BaseSHA:       task.BaseSHA,
 		OnAssistantMessage: func(content string) {
 			m.handleAssistantMessage(stageRef.ID, content)
 		},

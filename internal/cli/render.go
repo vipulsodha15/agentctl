@@ -16,10 +16,54 @@ type streamRenderer struct {
 	stderr    io.Writer
 	open      bool
 	deltaSeen bool
+
+	// provider/model are captured from the first session.snapshot event so
+	// later status lines (session.starting / session.running / stage
+	// transitions) can be prefixed with [provider/model] when more than
+	// one provider is in play (ADR 0020 §3 — orchestration as the
+	// headline). Empty when the daemon hasn't broadcast a snapshot yet
+	// or when the session predates the provider field (legacy rows).
+	provider string
+	model    string
+	// showRuntime gates the [provider/model] prefix per ADR 0020 §UX
+	// principles (provider invisibility). True when the runtime caller
+	// has signalled that at least two providers are in play — either
+	// configured on the daemon or surfaced across mixed-provider stages
+	// of an assembly line. Single-provider setups see the legacy output.
+	showRuntime bool
 }
 
 func newRenderer(stdout, stderr io.Writer) *streamRenderer {
 	return &streamRenderer{stdout: stdout, stderr: stderr}
+}
+
+// withRuntimeVisible turns on the [provider/model] prefix on status lines.
+// Callers compute the gate at the call site (e.g. by inspecting
+// secrets.EnabledProviders or the resolved per-stage provider set across an
+// assembly line). The renderer itself stays dumb about the gate so tests
+// can flip it explicitly.
+func (r *streamRenderer) withRuntimeVisible(show bool) *streamRenderer {
+	r.showRuntime = show
+	return r
+}
+
+// runtimePrefix builds the short "[provider/model] " prefix used on session
+// status lines and stage transitions. Returns the empty string when the
+// gate is off or when neither field is known yet, so callers can prepend it
+// unconditionally without printing an empty bracket.
+func (r *streamRenderer) runtimePrefix() string {
+	if !r.showRuntime {
+		return ""
+	}
+	switch {
+	case r.provider != "" && r.model != "":
+		return "[" + r.provider + "/" + r.model + "] "
+	case r.provider != "":
+		return "[" + r.provider + "] "
+	case r.model != "":
+		return "[" + r.model + "] "
+	}
+	return ""
 }
 
 func (r *streamRenderer) closeAssistantLine() {
@@ -34,24 +78,31 @@ func (r *streamRenderer) handle(ev proto.Event) {
 	case proto.EventSessionSnapshot:
 		var d proto.SessionSnapshotData
 		_ = json.Unmarshal(ev.Data, &d)
-		fmt.Fprintf(r.stderr, "[session %s status=%s queue=%d in_flight=%t]\n",
-			d.Session.ID, d.Session.Status, d.QueueDepth, d.InFlight != "")
+		// Capture provider/model so subsequent session.* status lines and
+		// any task.stage_advanced events can be prefixed with
+		// [provider/model] when multi-provider visibility is on (ADR
+		// 0020 §3, §UX principles). The snapshot is broadcast on attach,
+		// so this fires before any status transitions in practice.
+		r.provider = d.Session.Provider
+		r.model = d.Session.Model
+		fmt.Fprintf(r.stderr, "%s[session %s status=%s queue=%d in_flight=%t]\n",
+			r.runtimePrefix(), d.Session.ID, d.Session.Status, d.QueueDepth, d.InFlight != "")
 	case proto.EventSessionStarting:
 		var d struct {
 			Phase string `json:"phase"`
 		}
 		_ = json.Unmarshal(ev.Data, &d)
-		fmt.Fprintf(r.stderr, "[starting: %s]\n", d.Phase)
+		fmt.Fprintf(r.stderr, "%s[starting: %s]\n", r.runtimePrefix(), d.Phase)
 	case proto.EventSessionRunning:
-		fmt.Fprintln(r.stderr, "[running]")
+		fmt.Fprintf(r.stderr, "%s[running]\n", r.runtimePrefix())
 	case proto.EventSessionStopping:
-		fmt.Fprintln(r.stderr, "[stopping]")
+		fmt.Fprintf(r.stderr, "%s[stopping]\n", r.runtimePrefix())
 	case proto.EventSessionStopped:
-		fmt.Fprintln(r.stderr, "[stopped]")
+		fmt.Fprintf(r.stderr, "%s[stopped]\n", r.runtimePrefix())
 	case proto.EventSessionTerminated:
-		fmt.Fprintln(r.stderr, "[terminated]")
+		fmt.Fprintf(r.stderr, "%s[terminated]\n", r.runtimePrefix())
 	case proto.EventSessionError:
-		fmt.Fprintf(r.stderr, "[error] %s\n", string(ev.Data))
+		fmt.Fprintf(r.stderr, "%s[error] %s\n", r.runtimePrefix(), string(ev.Data))
 	case proto.EventUserMessage:
 		var d proto.UserMessageData
 		_ = json.Unmarshal(ev.Data, &d)
@@ -109,6 +160,19 @@ func (r *streamRenderer) handle(ev proto.Event) {
 			d.InputTokens, d.OutputTokens, d.CacheReadTokens, d.CacheWriteTokens)
 	case proto.EventMCPUnreachable:
 		fmt.Fprintf(r.stderr, "[mcp unreachable] %s\n", string(ev.Data))
+	case "task.stage_advanced":
+		// Stage transitions surface on the task channel (not the session
+		// channel attached here), but render them anyway so a future
+		// task-tail mode reuses the same renderer without extra wiring.
+		// The [provider/model] prefix is gated the same way the session
+		// status lines are — see ADR 0020 §3, §UX principles.
+		var d struct {
+			FromStageID string `json:"from_stage_id"`
+			ToStageID   string `json:"to_stage_id"`
+		}
+		_ = json.Unmarshal(ev.Data, &d)
+		fmt.Fprintf(r.stderr, "%s[stage advanced: %s -> %s]\n",
+			r.runtimePrefix(), d.FromStageID, d.ToStageID)
 	default:
 	}
 }
@@ -131,7 +195,8 @@ func attachAndRender(ctx context.Context, c *cliclient.Client, sessionID string,
 		case <-stopWatch:
 		}
 	}()
-	r := newRenderer(env.Stdout, env.Stderr)
+	r := newRenderer(env.Stdout, env.Stderr).
+		withRuntimeVisible(multiProviderEnabled(env))
 	for {
 		fr := stream.Recv()
 		if fr.Err != nil {
@@ -153,6 +218,16 @@ func attachAndRender(ctx context.Context, c *cliclient.Client, sessionID string,
 		}
 		r.handle(ev)
 	}
+}
+
+// multiProviderEnabled reports whether the user has at least two providers
+// configured locally. The stream renderer uses this as the gate for the
+// per-session [provider/model] prefix on status lines (ADR 0020 §UX
+// principles — provider invisibility for single-provider setups). The
+// gate intentionally errs toward hidden: when secrets.json is unreadable
+// or only one provider resolves, the legacy unprefixed output wins.
+func multiProviderEnabled(env *Env) bool {
+	return localEnabledProviderCount(env) >= 2
 }
 
 // attachAndRunTUI runs the fullscreen Bubble Tea TUI. It owns its own RPC

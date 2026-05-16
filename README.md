@@ -26,10 +26,19 @@ later without losing state.
   allow-lists, and skill sets. Narrow agents stay on task and are
   cheaper to reason about.
 - **Assembly-line workflows for tasks.** Chain those narrow agents
-  into a workflow (see `internal/ttl/builtins/workflows/bug.yaml`
-  for a worked example). A task moves through stages — investigate
-  → plan → execute → review — with each stage owned by the right
-  agent and the right tools.
+  into a workflow (see
+  `internal/ttl/builtins/assembly-lines/bug.yaml` for a worked
+  example). A task moves through stages — investigate → plan →
+  execute → review — with each stage owned by the right agent and
+  the right tools.
+- **Mix providers across the line.** Each stage can pin its own
+  provider (`anthropic`, `openai`), so one assembly line can
+  investigate on Claude and execute on OpenAI Codex without forking
+  agent YAMLs. The shipped `bug-multi-provider` built-in
+  (`internal/ttl/builtins/assembly-lines/bug-multi-provider.yaml`)
+  is the reference example; the run view shows each stage's
+  provider/model as a first-class chip when stages differ, and
+  stays invisible when they don't.
 - **Explicit handoff between stages.** When one stage finishes, run
   `agentctl task handoff <id>` (or click Handoff in the UI) to
   advance the task to the next agent, carrying the prior stage's

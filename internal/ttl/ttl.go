@@ -70,8 +70,18 @@ type Agent struct {
 }
 
 // AssemblyLineStage is one entry in an assembly line's `stages:` list.
+//
+// Provider/Model are optional per-stage pins introduced with ADR 0020 §3
+// (orchestration as the headline). They let a single assembly line mix
+// providers explicitly — e.g. an `investigator` stage on Anthropic and an
+// `executor` stage on OpenAI — without forking the underlying agent YAMLs
+// (which stay provider-portable). When unset, the stage inherits whatever
+// the agent or the workspace resolver picks; setting them on the stage
+// overrides both.
 type AssemblyLineStage struct {
-	Agent string `yaml:"agent" json:"agent"`
+	Agent    string `yaml:"agent" json:"agent"`
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model    string `yaml:"model,omitempty" json:"model,omitempty"`
 }
 
 // AssemblyLine is the schema for an assembly line.
