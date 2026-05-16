@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
 import type { SendMessageRequest, SendMessageResponse } from "../types";
 import { SkillAutocomplete, getSkillNav } from "./SkillAutocomplete";
@@ -14,6 +14,10 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    taRef.current?.focus();
+  }, [sessionId]);
 
   async function send() {
     const content = value.trim();
@@ -40,6 +44,7 @@ export function MessageInput({ sessionId, inFlight, queueDepth }: Props) {
       );
     } finally {
       setSending(false);
+      queueMicrotask(() => taRef.current?.focus());
     }
   }
 

@@ -28,29 +28,34 @@ export function ConversationView({
   filter,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
   const [newSinceScroll, setNewSinceScroll] = useState(0);
   const last = messages[messages.length - 1];
 
-  // Auto-scroll only when the user is already at the bottom; otherwise show
-  // a "new messages" pill so we don't yank them away from what they're
-  // reading.
+  // Auto-scroll on every new message / streaming update unless the user has
+  // actively scrolled up to read. Sending a new user message always re-pins
+  // to the bottom.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (atBottom) {
+    if (last?.kind === "user") {
+      userScrolledUpRef.current = false;
+    }
+    if (!userScrolledUpRef.current) {
       el.scrollTop = el.scrollHeight;
       setNewSinceScroll(0);
     } else {
       setNewSinceScroll((n) => n + 1);
     }
     // We intentionally re-run on every message-text change, not just length.
-  }, [messages.length, last?.text, last?.output, inFlight]);
+  }, [messages.length, last?.kind, last?.text, last?.output, inFlight]);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    userScrolledUpRef.current = !nearBottom;
     setAtBottom(nearBottom);
     if (nearBottom) setNewSinceScroll(0);
   }, []);
@@ -64,6 +69,7 @@ export function ConversationView({
   const jumpToBottom = () => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
+    userScrolledUpRef.current = false;
   };
 
   return (
