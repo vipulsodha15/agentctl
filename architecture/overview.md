@@ -40,6 +40,21 @@ The only persistent state for a session is:
 Container memory is ephemeral. The session is reconstructable any time from
 1+2 by starting a new container against the same volume.
 
+### 1.1 agentctl as an orchestrator across providers
+
+The headline framing of agentctl is *not* "agentctl talks to model X". It is
+"agentctl orchestrates agents across providers." Sessions and assembly-line
+stages each carry a `provider` field (ADR 0020). A single assembly line can
+investigate a bug on Anthropic, plan on whichever runtime the workspace was
+last using, and execute on OpenAI without changing the agent YAMLs — the
+underlying agents stay provider-portable, and the line's stage YAML pins
+runtime per stage. The built-in `bug-multi-provider` line ships this
+configuration and is the reference for the orchestration UX. Surfaces
+(CLI `agentctl task show`, the web run view) show each stage's
+provider+model as a first-class chip whenever the stages actually mix —
+single-provider lines render with zero new chrome, per the
+provider-invisibility rule in ADR 0020 §UX principles.
+
 ## 2. Component diagram
 
 ```mermaid

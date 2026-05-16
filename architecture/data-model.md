@@ -50,7 +50,7 @@ CREATE TABLE sessions (
     skills_snapshot_path  TEXT,                              -- abs path to per-session skills snapshot (composed at start, mounted ro at /skills/); NULL after teardown
     skills_snapshot_hash  TEXT NOT NULL,                     -- sha256 of the snapshot tree at session create; reproducibility pin
     sdk_session_id        TEXT,                              -- SDK-assigned session id (claude-agent-sdk); captured from runtime.session_id event on first turn; passed back as ClaudeAgentOptions.resume on idle-resume; NULL until first turn completes
-    model               TEXT NOT NULL,                       -- e.g. "claude-sonnet-4-6"
+    model               TEXT NOT NULL,                       -- e.g. "claude-sonnet-4-6"; mutable per session lifetime (ADR 0020 §2 — supersedes 0003's frozen-for-life rule). `sessions.provider` is the new immutable field. `usage.model` is still tagged from the runtime-reported id at insert time, so cost attribution remains correct across mid-session switches.
     mem_limit_bytes     INTEGER NOT NULL,
     cpu_limit_cores     REAL NOT NULL,
     mcp_set_json        TEXT NOT NULL,                       -- JSON array of MCP names captured at start
@@ -326,6 +326,23 @@ when v2 introduces egress filtering — see `v2-requirements.md` §V2.1.
 A change to `[pricing.tables]` increments `version` and applies only to
 **future** `usage` rows (R10). Historical rows keep their original
 `cost_usd` and `price_table_version`.
+
+The `[pricing.tables.models]` map is also the single source of truth
+for the per-provider model catalog the daemon exposes at
+`GET /v1/providers` (ADR 0020 §UX principles — "one source for the
+model catalog"). Adding a model means adding a pricing row and bumping
+the image, not editing a separate catalog file.
+
+**Model is mutable per session lifetime (ADR 0020 §2).** A `PATCH
+/v1/sessions/<id>` (or the `agentctl session set-model` scripting
+surface, or the `/model` slash command) writes a new value into
+`sessions.model`, and the daemon forwards `agentd.set_model` over the
+control channel so the in-container driver swaps clients without a
+container respawn. The provider — which is the new set-once /
+immutable-per-session field — is rejected on the same `PATCH`.
+Cost-row tagging is unaffected: `usage.model` continues to be set from
+the runtime-reported model id (per ADR 0003), so usage rows on either
+side of a switch attribute to the correct model. See ADR 0020 §2.
 
 ## 6. Secrets file
 

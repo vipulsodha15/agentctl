@@ -321,7 +321,9 @@ or the git-push output). `data.repo` (optional) scopes to one repo. See
 | `GET` | `/v1/sessions` | `ListSessions` |
 | `POST` | `/v1/sessions` | `CreateSession` |
 | `GET` | `/v1/sessions/{id}` | `GetSession` |
+| `PATCH` | `/v1/sessions/{id}` | `UpdateSession` — body `{ model: "..." }` swaps the model mid-session (ADR 0020 §2 and §4). The `provider` field is rejected with `bad_request` (the provider is the new immutable-at-create field). Models that don't belong to the session's provider are rejected with `bad_request` as well — the validation source is `[pricing.tables.models]` filtered through the resolved provider catalog. Successful response is `{ session: SessionSummary }` with the new `model` reflected. |
 | `DELETE` | `/v1/sessions/{id}` | `TerminateSession` |
+| `GET` | `/v1/providers` | List provider catalogs. Per ADR 0020 §9, returns a map keyed by provider id with `{enabled, default_model, models[]}`. Today only `anthropic` ships; the shape is forward-compatible with the openai entry phase 1 will add. The `models[]` array is read straight out of `[pricing.tables.models]` per the "one source for the model catalog" UX principle. |
 | `POST` | `/v1/sessions/{id}/messages` | `SendMessage` |
 | `POST` | `/v1/sessions/{id}/interrupt` | `Interrupt` |
 | `POST` | `/v1/sessions/{id}/restart` | `RestartSession` |
@@ -473,6 +475,7 @@ Line-delimited JSON (NDJSON). One frame = one line of UTF-8 JSON ending in
 | `agentd.interrupt` | Cancel current turn. | `{ reason: "user" \| "hard_cutoff" \| "shutdown" }` |
 | `agentd.snapshot_request` | Ask the runtime to dump current history. | `{ request_id }` |
 | `agentd.shutdown` | Graceful stop. Shim flushes and exits. | `{ grace_seconds: 30 }` |
+| `agentd.set_model` | Switch the runtime to a new model id mid-session (ADR 0020 §2). The shim's driver re-instantiates its client with the new model, preserving `resume=<sdk_session_id>` (Claude) or simply passing `--model` on the next `codex exec` call (Codex). Acknowledged via the next `runtime.event` / `usage` frame that carries the new model id — there is no dedicated ack frame in v1. The daemon rejects values that don't belong to the session's provider at the API layer, before the frame is sent. | `{ model: "claude-opus-4-7" }` |
 | `agentd.config_reload` | Reserved (v2): live config update. Not used in v1. | `{}` |
 
 ### 4.4 Authentication / authorization

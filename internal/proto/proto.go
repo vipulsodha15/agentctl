@@ -44,6 +44,12 @@ const (
 	OpExportPatch         = "ExportPatch"
 	OpExportPush          = "ExportPush"
 	OpListSessionRepos    = "ListSessionRepos"
+	// OpUpdateSession applies mid-session mutations (ADR 0020 §2 / §4 —
+	// today: model swap only). The request body shape lives in
+	// UpdateSessionRequest; the response carries the post-update
+	// SessionSummary so callers can echo the canonical model id back to
+	// the user.
+	OpUpdateSession = "UpdateSession"
 )
 
 type Frame struct {
@@ -94,13 +100,18 @@ type DockerHealth struct {
 }
 
 type CreateSessionRequest struct {
-	Name          string   `json:"name,omitempty"`
-	MCPs          []string `json:"mcps,omitempty"`
-	ExcludeMCPs   []string `json:"exclude_mcps,omitempty"`
-	Repos         []string `json:"repos,omitempty"`
-	Model         string   `json:"model,omitempty"`
-	MemLimitBytes int64    `json:"mem_limit_bytes,omitempty"`
-	CPULimitCores float64  `json:"cpu_limit_cores,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	MCPs        []string `json:"mcps,omitempty"`
+	ExcludeMCPs []string `json:"exclude_mcps,omitempty"`
+	Repos       []string `json:"repos,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	// Provider is the agent runtime the session runs on (`anthropic` or
+	// `openai`). When empty the daemon's resolver picks one — see
+	// secrets.ResolveProvider and ADR 0020 §3. Set-once at create; never
+	// mutated afterward.
+	Provider      string  `json:"provider,omitempty"`
+	MemLimitBytes int64   `json:"mem_limit_bytes,omitempty"`
+	CPULimitCores float64 `json:"cpu_limit_cores,omitempty"`
 }
 
 type CreateSessionResponse struct {
@@ -157,6 +168,23 @@ type GetSessionResponse struct {
 	Session SessionDetail `json:"session"`
 }
 
+// UpdateSessionRequest is the CLI/RPC mirror of the web's
+// PATCH /v1/sessions/<id> body. The only field today is `model` — the
+// mid-session model switch added in ADR 0020 §2 — but the struct is named
+// generically so future mutable fields (e.g. caller-supplied display name)
+// land here without proliferating ops.
+type UpdateSessionRequest struct {
+	SessionID string  `json:"session_id"`
+	Model     *string `json:"model,omitempty"`
+}
+
+// UpdateSessionResponse returns the post-update summary so the CLI can
+// echo the canonical model id (in case the resolver normalized it, e.g.
+// a future fuzzy-match step) back to the user.
+type UpdateSessionResponse struct {
+	Session SessionSummary `json:"session"`
+}
+
 type TerminateSessionRequest struct {
 	SessionID string `json:"session_id"`
 	Force     bool   `json:"force,omitempty"`
@@ -196,13 +224,18 @@ type SessionSummary struct {
 	LastActivityAt time.Time `json:"last_activity_at"`
 	ImageID        string    `json:"image_id"`
 	Model          string    `json:"model"`
-	MCPs           []string  `json:"mcps"`
-	Repos          []string  `json:"repos"`
-	InFlight       bool      `json:"in_flight"`
-	QueueDepth     int       `json:"queue_depth"`
-	MemLimitBytes  int64     `json:"mem_limit_bytes"`
-	CPULimitCores  float64   `json:"cpu_limit_cores"`
-	CostUSD        *float64  `json:"cost_usd,omitempty"`
+	// Provider is the agent runtime backing this session — `anthropic` or
+	// `openai`. Set-once at create per ADR 0020 §1. Older clients that
+	// don't know about provider get the empty string back; the web SPA and
+	// CLI renderer both treat "" as `anthropic` for one release.
+	Provider      string   `json:"provider,omitempty"`
+	MCPs          []string `json:"mcps"`
+	Repos         []string `json:"repos"`
+	InFlight      bool     `json:"in_flight"`
+	QueueDepth    int      `json:"queue_depth"`
+	MemLimitBytes int64    `json:"mem_limit_bytes"`
+	CPULimitCores float64  `json:"cpu_limit_cores"`
+	CostUSD       *float64 `json:"cost_usd,omitempty"`
 }
 
 type SessionDetail struct {

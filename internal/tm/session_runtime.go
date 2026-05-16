@@ -24,6 +24,14 @@ type SessionAPI interface {
 	Terminate(ctx context.Context, sessionID string) error
 }
 
+// ProviderResolver mirrors socksrv.ProviderResolver — see ADR 0020 §3.
+// SessionRuntime calls it for each stage so an agent's `provider:` /
+// `model:` are merged with config defaults and workspace sticky state
+// through the same algorithm CLI/web go through. When nil (legacy tests),
+// the agent's fields pass straight to sm.Create; the manager will reject
+// them if Provider is empty.
+type ProviderResolver func(cliProvider, cliModel string) (provider, model string, err error)
+
 // SessionRuntime drives each task-chat stage as a real container-backed
 // session via sm.Manager, instead of POSTing to Anthropic directly. Each
 // stage is one fresh session: own container, own empty workspace volume,
@@ -33,8 +41,9 @@ type SessionAPI interface {
 // (via message-id → turn-id correlation), so an unrelated in-flight reply
 // can't be mistaken for the synthesis.
 type SessionRuntime struct {
-	sm     SessionAPI
-	logger *slog.Logger
+	sm      SessionAPI
+	resolve ProviderResolver
+	logger  *slog.Logger
 
 	mu     sync.Mutex
 	stages map[string]*sessionStage // keyed by stage ID
@@ -81,6 +90,15 @@ func NewSessionRuntime(api SessionAPI, logger *slog.Logger) *SessionRuntime {
 	}
 }
 
+// WithResolver wires the (provider, model) resolver used per stage. The
+// resolver is decoupled from NewSessionRuntime so the existing test
+// fixtures that construct SessionRuntime without it keep compiling; in
+// production agentd calls this after NewSessionRuntime.
+func (r *SessionRuntime) WithResolver(resolve ProviderResolver) *SessionRuntime {
+	r.resolve = resolve
+	return r
+}
+
 // HasCredential mirrors SimRuntime's startup-time credential probe. With the
 // session-backed runtime, auth lives in sm.Manager (via the bundled claude
 // CLI + bind-mounted credentials file), so we always report true and let
@@ -88,11 +106,39 @@ func NewSessionRuntime(api SessionAPI, logger *slog.Logger) *SessionRuntime {
 func (r *SessionRuntime) HasCredential() bool { return true }
 
 func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (StartStageResult, error) {
+	// Per-stage assembly-line pins take precedence over agent-level pins
+	// (ADR 0020 §3 — mixed-provider lines). The same agent YAML can run on
+	// different providers in different lines without forking, because the
+	// line's stage entry overrides what the agent itself says.
+	provider := in.StageProvider
+	if provider == "" {
+		provider = in.Agent.Provider
+	}
+	model := in.StageModel
+	if model == "" {
+		model = in.Agent.Model
+	}
+	if r.resolve != nil {
+		// Funnel the agent's hints through the resolver so workspace-
+		// sticky last-used-provider and per-provider default models
+		// apply (ADR 0020 §3). When neither the stage nor the agent
+		// pins either field, the resolver picks the workspace's
+		// currently active provider + its configured default model —
+		// the portability property that lets built-in agent YAMLs run
+		// on whichever provider the user has configured.
+		p, m, rerr := r.resolve(provider, model)
+		if rerr != nil {
+			return StartStageResult{}, fmt.Errorf("session runtime: resolve: %w", rerr)
+		}
+		provider = p
+		model = m
+	}
 	res, err := r.sm.Create(ctx, sm.CreateRequest{
-		Name:  fmt.Sprintf("task-%s-stage-%d", in.TaskID, in.Position),
-		MCPs:  in.Agent.MCPsAllowed,
-		Model: in.Agent.Model,
-		Repos: nil,
+		Name:     fmt.Sprintf("task-%s-stage-%d", in.TaskID, in.Position),
+		MCPs:     in.Agent.MCPsAllowed,
+		Model:    model,
+		Provider: provider,
+		Repos:    nil,
 	})
 	if err != nil {
 		return StartStageResult{}, fmt.Errorf("session runtime: create: %w", err)

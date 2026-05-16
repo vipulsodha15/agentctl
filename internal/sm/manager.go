@@ -42,16 +42,31 @@ type Manager interface {
 	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
 	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
 	Rehydrate(ctx context.Context) error
+	// UpdateModel swaps the runtime's model id mid-session (ADR 0020 §2).
+	// Validates the new id against the session's provider catalog, writes
+	// sessions.model in storage, and forwards agentd.set_model to the shim.
+	// Returns ErrSessionNotFound if the session is unknown, ErrModelInvalid
+	// if the model doesn't belong to the session's provider. The new
+	// SessionSummary (with the swapped model) is returned so callers can
+	// echo the canonical value back to the user.
+	UpdateModel(ctx context.Context, sessionID, model string) (proto.SessionSummary, error)
 }
 
 type Stream = fan.Stream
 
 type CreateRequest struct {
-	Name          string
-	MCPs          []string
-	ExcludeMCPs   []string
-	Repos         []string
-	Model         string
+	Name        string
+	MCPs        []string
+	ExcludeMCPs []string
+	Repos       []string
+	Model       string
+	// Provider is the agent runtime the session runs on — `anthropic` or
+	// `openai`. Required at this layer: callers must resolve it via
+	// secrets.ResolveProvider before reaching Create, so the daemon has
+	// exactly one place that picks the provider for a session (CLI, web,
+	// and tm.SessionRuntime all funnel through the resolver). The session
+	// manager rejects Create when Provider is empty. ADR 0020 §1, §3.
+	Provider      string
 	MemLimitBytes int64
 	CPULimitCores float64
 	ImageID       string
@@ -62,6 +77,11 @@ type CreateRequest struct {
 	// the SDK keeps its default Claude Code system prompt.
 	SystemPrompt string
 }
+
+// ErrProviderRequired is returned by Create when CreateRequest.Provider is
+// empty. The resolver in `secrets` is the canonical entry point — see
+// ADR 0020 §3.
+var ErrProviderRequired = errors.New("session manager: Provider is required (call secrets.ResolveProvider first)")
 
 type CreateResult struct {
 	SessionID string
@@ -98,30 +118,48 @@ var (
 	ErrSessionNotFound   = errors.New("session not found")
 	ErrAlreadyTerminated = errors.New("session already terminated")
 	ErrNoInFlight        = errors.New("no in-flight turn")
-	ErrSnapshotFailed    = errors.New("snapshot failed")
+	// ErrModelInvalid is returned from UpdateModel when the requested model
+	// id is not in the session's provider catalog (ADR 0020 §2). API layers
+	// map this to bad_request — it's a client-correctable user error, not a
+	// server bug.
+	ErrModelInvalid   = errors.New("model not valid for session provider")
+	ErrSnapshotFailed = errors.New("snapshot failed")
 )
 
 type Options struct {
-	Store           *store.Store
-	SessionsDir     string
-	Hub             fan.Hub
-	Containers      ContainerManager
-	Control         ControlServer
-	MCPs            mcp.Registry
-	Skills          SkillsComposer
-	Usage           UsageRecorder
-	Logger          *slog.Logger
-	Now             func() time.Time
-	DefaultModel    string
-	ImageID         string
-	PinnedImageID   func() string
-	SecretsPath     string
-	ClaudeCredsDir  string
+	Store          *store.Store
+	SessionsDir    string
+	Hub            fan.Hub
+	Containers     ContainerManager
+	Control        ControlServer
+	MCPs           mcp.Registry
+	Skills         SkillsComposer
+	Usage          UsageRecorder
+	Logger         *slog.Logger
+	Now            func() time.Time
+	DefaultModel   string
+	ImageID        string
+	PinnedImageID  func() string
+	SecretsPath    string
+	ClaudeCredsDir string
+	// CodexCredsDir is the host directory bind-mounted into the container
+	// at /home/agent/.codex when OpenAI is in OAuth mode (phase 2). Wired
+	// in phase 1 so the Options shape is stable; phase 1 only reads the
+	// directory to compute EnabledProviders.
+	CodexCredsDir   string
 	User            string
 	WebURL          func(sessionID string) string
 	IdempotencyTTL  time.Duration
 	SnapshotTimeout time.Duration
 	ShutdownGrace   time.Duration
+	// ProviderCatalogs returns the list of model ids that UpdateModel
+	// accepts for a mid-session switch (ADR 0020 §2 / §UX principles —
+	// "one source for the model catalog"). The closure shape lets the
+	// daemon refresh the catalog when [pricing.tables] changes without
+	// recreating the manager. When nil, UpdateModel accepts any non-empty
+	// model id — appropriate for tests; production wires it up against
+	// config.Pricing.Tables.Models.
+	ProviderCatalog func() ProviderCatalog
 }
 
 type manager struct {
@@ -179,6 +217,15 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		return CreateResult{}, fmt.Errorf("manager: shutting down")
 	}
 	m.mu.Unlock()
+
+	// Provider is required at this layer — every entry point goes through
+	// the resolver in `secrets` first (ADR 0020 §3). We refuse rather than
+	// silently fall back to "anthropic" so that a caller forgetting to
+	// thread the field fails loudly in tests instead of quietly billing
+	// the wrong runtime.
+	if req.Provider == "" {
+		return CreateResult{}, ErrProviderRequired
+	}
 
 	id := ulidgen.WithPrefix("sess")
 	now := m.now()
@@ -283,12 +330,18 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		SessionName:  defaultName(req.Name, id),
 		Model:        model,
 		SessionToken: sessionToken,
+		Provider:     req.Provider,
 	}); err != nil {
 		_ = logger.Close()
 		return CreateResult{}, err
 	}
 
 	claudeCredsBindSource, err := m.resolveClaudeCredsBindSource()
+	if err != nil {
+		_ = logger.Close()
+		return CreateResult{}, err
+	}
+	codexCredsBindSource, err := m.resolveCodexCredsBindSource(req.Provider)
 	if err != nil {
 		_ = logger.Close()
 		return CreateResult{}, err
@@ -300,16 +353,25 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		if _, err := m.store.DB().ExecContext(ctx, `INSERT INTO sessions
             (id, name, status, created_at, last_activity_at,
              image_id, volume_path, control_sock_path, skills_snapshot_path, skills_snapshot_hash,
-             model, mem_limit_bytes, cpu_limit_cores, mcp_set_json, repos_json, session_token)
-             VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             model, mem_limit_bytes, cpu_limit_cores, mcp_set_json, repos_json, session_token, provider)
+             VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, defaultName(req.Name, id), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 			imageID, filepath.Join(dir, "volume"), "",
 			skillsResult.Path, skillsResult.Hash,
-			model, mem, cpus, string(mcpJSON), string(reposJSON), sessionToken,
+			model, mem, cpus, string(mcpJSON), string(reposJSON), sessionToken, req.Provider,
 		); err != nil {
 			_ = logger.Close()
 			return CreateResult{}, fmt.Errorf("insert session: %w", err)
 		}
+		// Stamp the workspace's sticky last-used-provider so the next
+		// session-create call that doesn't specify a provider picks the
+		// same one — ADR 0020 §3 (sticky-per-workspace tiebreak). Best-
+		// effort: a write failure here doesn't fail Create.
+		_, _ = m.store.DB().ExecContext(ctx,
+			`INSERT INTO workspace_state (key, value, updated_at)
+			 VALUES ('last_used_provider', ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+			req.Provider, now.Format(time.RFC3339Nano))
 		if _, err := m.store.DB().ExecContext(ctx, `INSERT INTO session_lifecycle (session_id, at, event, detail_json) VALUES (?, ?, 'created', ?)`,
 			id, now.Format(time.RFC3339Nano), `{}`); err != nil {
 			m.logger.Warn("lifecycle.insert_failed", slog.String("session_id", id), slog.String("error", err.Error()))
@@ -324,6 +386,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		LastActivityAt: now,
 		ImageID:        imageID,
 		Model:          model,
+		Provider:       req.Provider,
 		MCPs:           mcps,
 		Repos:          repoNames(reposState),
 		MemLimitBytes:  mem,
@@ -375,6 +438,7 @@ func (m *manager) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		VolumeDir:       filepath.Join(dir, "volume"),
 		SkillsDir:       skillsResult.Path,
 		ClaudeCredsHost: claudeCredsBindSource,
+		CodexCredsHost:  codexCredsBindSource,
 		MemBytes:        mem,
 		CPUs:            cpus,
 		SessionToken:    sessionToken,
@@ -413,6 +477,51 @@ func (m *manager) resolveClaudeCredsBindSource() (string, error) {
 	return m.opts.ClaudeCredsDir, nil
 }
 
+// resolveCodexCredsBindSource is the OpenAI / Codex mirror of
+// resolveClaudeCredsBindSource: returns the host directory to bind-mount
+// as the container's ~/.codex when the user has switched OpenAI to OAuth
+// mode via `agentctl auth login --provider openai`. Empty string means no
+// bind-mount (API-key mode, custom-endpoint mode, no secrets file, or
+// any non-openai session). A non-nil error means OAuth is configured but
+// the credentials file is missing — surfacing the cause early so the
+// container does not silently start without auth.
+//
+// Custom-endpoint mode takes precedence over OAuth per
+// CODEX_PROVIDER_PLAN §5.2: the ChatGPT OAuth flow doesn't route through
+// a third-party gateway, so if both are set the gateway wins and we skip
+// the bind-mount (writeSecretsEnv prefers OPENAI_AUTH_TOKEN in that
+// case). The auth-status table surfaces a warning when both are
+// configured.
+func (m *manager) resolveCodexCredsBindSource(provider string) (string, error) {
+	if provider != secrets.ProviderOpenAI {
+		return "", nil
+	}
+	if m.opts.SecretsPath == "" {
+		return "", nil
+	}
+	sec, err := secrets.Load(m.opts.SecretsPath)
+	if err != nil {
+		return "", nil
+	}
+	if sec.ResolvedOpenAIAuthMode() != secrets.AuthModeOAuth {
+		return "", nil
+	}
+	// Custom-endpoint precedence: if a gateway is configured, OAuth is
+	// silenced and we drop the bind-mount so the container falls through
+	// to OPENAI_BASE_URL + OPENAI_API_KEY (= the gateway token).
+	if sec.OpenAIBaseURL != "" && sec.OpenAIAuthToken != "" {
+		return "", nil
+	}
+	if m.opts.CodexCredsDir == "" {
+		return "", fmt.Errorf("openai auth mode=oauth but CodexCredsDir not configured; check agentd setup")
+	}
+	credFile := filepath.Join(m.opts.CodexCredsDir, "auth.json")
+	if info, err := os.Stat(credFile); err != nil || info.Size() == 0 {
+		return "", fmt.Errorf("openai auth mode=oauth but %s missing or empty; run `agentctl auth login --provider openai`", credFile)
+	}
+	return m.opts.CodexCredsDir, nil
+}
+
 type provisionInputs struct {
 	SessionID       string
 	Name            string
@@ -421,11 +530,18 @@ type provisionInputs struct {
 	VolumeDir       string
 	SkillsDir       string
 	ClaudeCredsHost string
-	MemBytes        int64
-	CPUs            float64
-	SessionToken    string
-	NetworkID       string
-	NetworkName     string
+	// CodexCredsHost is the host directory to bind-mount as the
+	// container's ~/.codex when OpenAI is in OAuth mode (phase 2).
+	// Empty means no Codex creds mount (API-key, custom-endpoint, or
+	// non-openai session). Set by resolveCodexCredsBindSource on both
+	// the Create and Restart paths so OAuth survives a session restart
+	// — symmetric with ClaudeCredsHost.
+	CodexCredsHost string
+	MemBytes       int64
+	CPUs           float64
+	SessionToken   string
+	NetworkID      string
+	NetworkName    string
 }
 
 // provisionContainer runs the Create -> Listen -> Start sequence from
@@ -508,6 +624,21 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 			Target: "/home/agent/.claude",
 		})
 	}
+	// OpenAI OAuth mode (ADR 0020 §8, CODEX_PROVIDER_PLAN §2.3): mount
+	// the host's Codex credentials directory at /home/agent/.codex (the
+	// default $CODEX_HOME). The codex CLI inside the container reads
+	// /home/agent/.codex/auth.json (written by the auth helper) and
+	// refreshes the OAuth access token in place — that write goes to our
+	// host snapshot, not anywhere the user has to manage manually. The
+	// CODEX_HOME env var is set further down (next to the control addr)
+	// because it needs to land in spec.Env, not the secrets env file.
+	if in.CodexCredsHost != "" {
+		mounts = append(mounts, ContainerMount{
+			Type:   MountBind,
+			Source: in.CodexCredsHost,
+			Target: "/home/agent/.codex",
+		})
+	}
 
 	// Listen first so we know the host port to hand to the container. TCP on
 	// 127.0.0.1 is reachable from the container via host.docker.internal,
@@ -545,13 +676,22 @@ func (m *manager) provisionContainer(ctx context.Context, a *actor, in provision
 		}
 	}
 
+	containerEnv := []string{"AGENTCTL_CONTROL_ADDR=" + containerAddr}
+	if in.CodexCredsHost != "" {
+		// Point codex at the bind-mounted creds dir explicitly so the
+		// CLI doesn't fall back to "$HOME/.codex" — equivalent of the
+		// CLAUDE_CONFIG_DIR override Claude uses, just propagated via
+		// spec.Env rather than the secrets env-file (which only carries
+		// vendor secrets, not container-shape vars).
+		containerEnv = append(containerEnv, "CODEX_HOME=/home/agent/.codex")
+	}
 	spec := ContainerSpec{
 		SessionID:      in.SessionID,
 		ImageID:        in.ImageID,
 		Name:           "agentctl-" + short,
 		Labels:         labels,
 		EnvFile:        in.EnvFile,
-		Env:            []string{"AGENTCTL_CONTROL_ADDR=" + containerAddr},
+		Env:            containerEnv,
 		Mounts:         mounts,
 		MemBytes:       in.MemBytes,
 		CPUs:           in.CPUs,
@@ -650,6 +790,12 @@ type secretsEnvInputs struct {
 	SessionName  string
 	Model        string
 	SessionToken string
+	// Provider selects which credential set is exported into the
+	// container. The Anthropic and OpenAI branches are deliberately
+	// disjoint (ADR 0020 §5) so a user with both providers configured
+	// doesn't have both vendors' API keys living in the same container's
+	// env at once.
+	Provider string
 }
 
 func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
@@ -659,27 +805,73 @@ func writeSecretsEnv(path, secretsPath string, in secretsEnvInputs) error {
 		"AGENTCTL_MODEL":         in.Model,
 		"AGENTCTL_SESSION_TOKEN": in.SessionToken,
 	}
+	if in.Provider != "" {
+		// Mirror the field into the env so the shim and any in-container
+		// helper scripts can branch on it without re-parsing the greet
+		// frame (which is the source of truth — see actor.sendGreet).
+		pairs["AGENTCTL_PROVIDER"] = in.Provider
+	}
 	if secretsPath != "" {
 		if sec, err := secrets.Load(secretsPath); err == nil {
-			// Auth selection precedence (most-explicit first):
-			//   1. oauth mode  -> inject nothing; the session container reads
-			//      .credentials.json from a bind-mounted /home/agent/.claude/.
-			//      Per Anthropic's auth precedence, ANTHROPIC_API_KEY /
-			//      ANTHROPIC_AUTH_TOKEN would override the OAuth subscription
-			//      and silently bill the wrong account.
-			//   2. custom endpoint -> ANTHROPIC_AUTH_TOKEN (+ optional
-			//      ANTHROPIC_BASE_URL) for routing through an LLM gateway.
-			//   3. api_key -> ANTHROPIC_API_KEY (the historical default).
-			switch {
-			case sec.ResolvedAuthMode() == secrets.AuthModeOAuth:
-				// no Anthropic env var injected
-			case sec.AnthropicAuthToken != "":
-				pairs["ANTHROPIC_AUTH_TOKEN"] = sec.AnthropicAuthToken
-				if sec.AnthropicBaseURL != "" {
-					pairs["ANTHROPIC_BASE_URL"] = sec.AnthropicBaseURL
+			switch in.Provider {
+			case secrets.ProviderOpenAI:
+				// OpenAI / Codex branch. Precedence is custom-endpoint >
+				// oauth > api_key (CODEX_PROVIDER_PLAN §5.2 — the
+				// ChatGPT OAuth flow doesn't make sense against a third-
+				// party gateway, so the gateway wins when both are set
+				// and `auth status` surfaces the override as a warning).
+				//   1. custom endpoint -> OPENAI_BASE_URL +
+				//      OPENAI_API_KEY (the bearer token; the codex CLI
+				//      takes a gateway token in the same env slot as the
+				//      OpenAI key for the standard openai-compatible
+				//      profile). TODO(verify-codex-base-url-auth):
+				//      confirm against pinned @openai/codex@0.130.0
+				//      whether OPENAI_BASE_URL is read for the default
+				//      provider or whether users must point at the
+				//      gateway via a $CODEX_HOME/config.toml
+				//      model_providers entry — if the latter, this
+				//      phase ships the env vars unconditionally and the
+				//      shim's codex_driver may need to write a config
+				//      stub. The env-var path is the simplest contract
+				//      to surface today; the wire change (if needed) is
+				//      a shim concern, not an sm concern.
+				//   2. oauth mode -> inject nothing; the ~/.codex
+				//      bind-mount (provisionContainer above) supplies
+				//      auth.json on disk.
+				//   3. api_key -> OPENAI_API_KEY.
+				switch {
+				case sec.OpenAIBaseURL != "" && sec.OpenAIAuthToken != "":
+					pairs["OPENAI_BASE_URL"] = sec.OpenAIBaseURL
+					pairs["OPENAI_API_KEY"] = sec.OpenAIAuthToken
+				case sec.ResolvedOpenAIAuthMode() == secrets.AuthModeOAuth:
+					// no OpenAI env var injected; resolveCodexCredsBindSource
+					// has mounted ~/.codex with auth.json.
+				case sec.OpenAIAPIKey != "":
+					pairs["OPENAI_API_KEY"] = sec.OpenAIAPIKey
 				}
-			case sec.AnthropicAPIKey != "":
-				pairs["ANTHROPIC_API_KEY"] = sec.AnthropicAPIKey
+			default:
+				// Anthropic branch (and any unknown provider falls
+				// through to the historical default — defense in depth;
+				// Create rejects empty Provider before reaching here).
+				//   1. oauth mode  -> inject nothing; the session container reads
+				//      .credentials.json from a bind-mounted /home/agent/.claude/.
+				//      Per Anthropic's auth precedence, ANTHROPIC_API_KEY /
+				//      ANTHROPIC_AUTH_TOKEN would override the OAuth subscription
+				//      and silently bill the wrong account.
+				//   2. custom endpoint -> ANTHROPIC_AUTH_TOKEN (+ optional
+				//      ANTHROPIC_BASE_URL) for routing through an LLM gateway.
+				//   3. api_key -> ANTHROPIC_API_KEY (the historical default).
+				switch {
+				case sec.ResolvedAuthMode() == secrets.AuthModeOAuth:
+					// no Anthropic env var injected
+				case sec.AnthropicAuthToken != "":
+					pairs["ANTHROPIC_AUTH_TOKEN"] = sec.AnthropicAuthToken
+					if sec.AnthropicBaseURL != "" {
+						pairs["ANTHROPIC_BASE_URL"] = sec.AnthropicBaseURL
+					}
+				case sec.AnthropicAPIKey != "":
+					pairs["ANTHROPIC_API_KEY"] = sec.AnthropicAPIKey
+				}
 			}
 			if sec.GitHubPAT != "" {
 				pairs["GITHUB_TOKEN"] = sec.GitHubPAT
@@ -764,6 +956,45 @@ func (m *manager) Interrupt(ctx context.Context, sessionID string, clearQueue bo
 	case <-ctx.Done():
 		return InterruptResult{}, ctx.Err()
 	}
+}
+
+// UpdateModel swaps the model id on an existing session (ADR 0020 §2).
+// Validation order matters: we first confirm the session exists, then that
+// the model is in the catalog. A no-op (model unchanged) still succeeds —
+// the surface is idempotent from the caller's perspective so /model
+// repeated entries don't surprise the user with errors. The control frame
+// is dispatched only when the value actually changes, so the shim does not
+// tear down its client for a no-op.
+func (m *manager) UpdateModel(ctx context.Context, sessionID, model string) (proto.SessionSummary, error) {
+	a := m.actorFor(sessionID)
+	if a == nil {
+		return proto.SessionSummary{}, ErrSessionNotFound
+	}
+	current := a.snapshotSummary()
+	if m.opts.ProviderCatalog != nil {
+		cat := m.opts.ProviderCatalog()
+		if !cat.HasModel(current.Provider, model) {
+			return proto.SessionSummary{}, fmt.Errorf("%w: %q for provider %q", ErrModelInvalid, model, current.Provider)
+		}
+	} else if model == "" {
+		// No catalog wired (tests / minimal setups) — still reject empty.
+		return proto.SessionSummary{}, fmt.Errorf("%w: empty model id", ErrModelInvalid)
+	}
+	if current.Model == model {
+		// No-op: surface unchanged summary so the caller can echo without
+		// triggering a control-channel roundtrip the shim can't ack.
+		return current, nil
+	}
+	if m.store != nil {
+		if _, err := m.store.DB().ExecContext(ctx,
+			`UPDATE sessions SET model=?, last_activity_at=? WHERE id=?`,
+			model, m.now().Format(time.RFC3339Nano), sessionID,
+		); err != nil {
+			return proto.SessionSummary{}, fmt.Errorf("persist model: %w", err)
+		}
+	}
+	out := a.setModel(model)
+	return out, nil
 }
 
 func (m *manager) Attach(ctx context.Context, sessionID string) (Stream, error) {
@@ -852,7 +1083,7 @@ func (m *manager) Rehydrate(ctx context.Context) error {
 	if m.store == nil {
 		return nil
 	}
-	rows, err := m.store.DB().QueryContext(ctx, `SELECT id, name, status, created_at, last_activity_at, container_id, image_id, network_id, model, mem_limit_bytes, cpu_limit_cores, mcp_set_json, repos_json, session_token, last_error
+	rows, err := m.store.DB().QueryContext(ctx, `SELECT id, name, status, created_at, last_activity_at, container_id, image_id, network_id, model, mem_limit_bytes, cpu_limit_cores, mcp_set_json, repos_json, session_token, last_error, provider
         FROM sessions
         WHERE status IN ('starting','running','stopped','error')`)
 	if err != nil {
@@ -863,11 +1094,12 @@ func (m *manager) Rehydrate(ctx context.Context) error {
 		containerID, networkID, lastError                                                                sql.NullString
 		memLimitBytes                                                                                    int64
 		cpuLimitCores                                                                                    float64
+		provider                                                                                         string
 	}
 	var batch []rehydrateRow
 	for rows.Next() {
 		var r rehydrateRow
-		if err := rows.Scan(&r.id, &r.name, &r.status, &r.createdAt, &r.lastActivityAt, &r.containerID, &r.imageID, &r.networkID, &r.model, &r.memLimitBytes, &r.cpuLimitCores, &r.mcpSetJSON, &r.reposJSON, &r.sessionToken, &r.lastError); err != nil {
+		if err := rows.Scan(&r.id, &r.name, &r.status, &r.createdAt, &r.lastActivityAt, &r.containerID, &r.imageID, &r.networkID, &r.model, &r.memLimitBytes, &r.cpuLimitCores, &r.mcpSetJSON, &r.reposJSON, &r.sessionToken, &r.lastError, &r.provider); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("rehydrate: scan: %w", err)
 		}
@@ -929,6 +1161,7 @@ func (m *manager) Rehydrate(ctx context.Context) error {
 			LastActivityAt: lastActivityAt,
 			ImageID:        r.imageID,
 			Model:          r.model,
+			Provider:       r.provider,
 			MCPs:           mcpNames,
 			Repos:          repoNames(reposState),
 			MemLimitBytes:  r.memLimitBytes,
@@ -1039,6 +1272,10 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 	if err != nil {
 		return RestartResult{}, err
 	}
+	codexCredsBindSource, err := m.resolveCodexCredsBindSource(summary.Provider)
+	if err != nil {
+		return RestartResult{}, err
+	}
 	in := provisionInputs{
 		SessionID:       sessionID,
 		Name:            summary.Name,
@@ -1046,6 +1283,7 @@ func (m *manager) Restart(ctx context.Context, sessionID string) (RestartResult,
 		EnvFile:         envFile,
 		VolumeDir:       filepath.Join(dir, "volume"),
 		ClaudeCredsHost: claudeCredsBindSource,
+		CodexCredsHost:  codexCredsBindSource,
 		MemBytes:        summary.MemLimitBytes,
 		CPUs:            summary.CPULimitCores,
 		SessionToken:    a.opts.SessionToken,

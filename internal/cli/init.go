@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,15 +35,22 @@ type initFlags struct {
 	anthropicKey       string
 	anthropicBaseURL   string
 	anthropicAuthToken string
-	githubPAT          string
-	noImportSkills     bool
-	importSkills       bool
-	claudePath         string
-	foreground         bool
-	resetToken         string
-	resetWebToken      bool
-	repair             bool
-	skipBuild          bool
+	// openaiKey + openaiBaseURL / openaiAuthToken mirror the Anthropic
+	// shape: either an OPENAI_API_KEY against api.openai.com, or a
+	// custom OPENAI_BASE_URL + bearer token for an OpenAI-compatible
+	// gateway (Azure OpenAI, vLLM, etc.). Phase 5 of CODEX_PROVIDER_PLAN.
+	openaiKey       string
+	openaiBaseURL   string
+	openaiAuthToken string
+	githubPAT       string
+	noImportSkills  bool
+	importSkills    bool
+	claudePath      string
+	foreground      bool
+	resetToken      string
+	resetWebToken   bool
+	repair          bool
+	skipBuild       bool
 }
 
 func runInit(ctx context.Context, env *Env, args []string) int {
@@ -52,6 +60,9 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	fs.StringVar(&f.anthropicKey, "anthropic-key", "", "use this Anthropic API key (skip prompt)")
 	fs.StringVar(&f.anthropicBaseURL, "anthropic-base-url", "", "use a custom Anthropic-compatible endpoint (e.g. an LLM gateway); requires --anthropic-auth-token")
 	fs.StringVar(&f.anthropicAuthToken, "anthropic-auth-token", "", "bearer token sent as Authorization to --anthropic-base-url (alternative to --anthropic-key)")
+	fs.StringVar(&f.openaiKey, "openai-key", "", "use this OpenAI API key (enables the OpenAI/Codex provider)")
+	fs.StringVar(&f.openaiBaseURL, "openai-base-url", "", "use a custom OpenAI-compatible endpoint (e.g. an LLM gateway); requires --openai-auth-token")
+	fs.StringVar(&f.openaiAuthToken, "openai-auth-token", "", "bearer token sent as Authorization to --openai-base-url (alternative to --openai-key)")
 	fs.StringVar(&f.githubPAT, "github-pat", "", "use this GitHub PAT (skip prompt)")
 	fs.BoolVar(&f.noImportSkills, "no-import-claude-skills", false, "skip the Claude Code skills import step")
 	fs.BoolVar(&f.importSkills, "import-claude-skills", false, "force the Claude Code skills import step")
@@ -305,8 +316,19 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 
 	skipAnthropic := os.Getenv("AGENTCTL_SKIP_ANTHROPIC_VALIDATE") == "1"
 	skipGitHub := os.Getenv("AGENTCTL_SKIP_GITHUB_PAT_CHECK") == "1"
+	skipOpenAI := os.Getenv("AGENTCTL_SKIP_OPENAI_VALIDATE") == "1"
 
 	if err := resolveAnthropicCreds(&out, env, f, skipAnthropic); err != nil {
+		return secrets.Secrets{}, err
+	}
+
+	// Phase 1/5: OpenAI credentials are opt-in. A fresh install that
+	// passes neither flag stays Anthropic-only, which preserves the
+	// existing single-provider workflow byte-for-byte (ADR 0020 §UX
+	// principles). Custom endpoint (--openai-base-url + --openai-auth-
+	// token) and api-key (--openai-key) are mutually exclusive — if
+	// both are passed we error out so the user picks one explicitly.
+	if err := resolveOpenAICreds(&out, f, skipOpenAI); err != nil {
 		return secrets.Secrets{}, err
 	}
 
@@ -708,6 +730,142 @@ func validateAnthropicCustom(baseURL, token string) error {
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("anthropic endpoint %s status %d", baseURL, resp.StatusCode)
+	}
+	return nil
+}
+
+// resolveOpenAICreds is the Phase 5 surface for OpenAI credentials. It
+// mirrors resolveAnthropicCreds but is purely flag-driven (we never
+// prompt for an OpenAI key — Anthropic remains the prompted provider so
+// the existing single-vendor onboarding doesn't grow a second mandatory
+// question per ADR 0020 §UX principles).
+//
+// Precedence:
+//
+//  1. --openai-base-url + --openai-auth-token together set the gateway
+//     and clear any stale OPENAI_API_KEY.
+//  2. --openai-key alone sets the API key against api.openai.com and
+//     clears any stale base_url/token.
+//  3. Neither set: leave any pre-existing secrets in place (re-running
+//     `agentctl init` should not erase a previously configured OpenAI
+//     credential).
+func resolveOpenAICreds(out *secrets.Secrets, f initFlags, skipValidate bool) error {
+	hasCustomEndpoint := f.openaiBaseURL != "" || f.openaiAuthToken != ""
+	if hasCustomEndpoint {
+		if f.openaiBaseURL == "" || f.openaiAuthToken == "" {
+			return fmt.Errorf("--openai-base-url and --openai-auth-token must be set together")
+		}
+		if f.openaiKey != "" {
+			return fmt.Errorf("--openai-key cannot be combined with --openai-base-url/--openai-auth-token")
+		}
+		baseURL := normalizeBaseURL(f.openaiBaseURL)
+		if !skipValidate {
+			if err := validateOpenAICustom(baseURL, f.openaiAuthToken); err != nil {
+				return err
+			}
+		}
+		out.OpenAIBaseURL = baseURL
+		out.OpenAIAuthToken = f.openaiAuthToken
+		out.OpenAIAPIKey = ""
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
+		return nil
+	}
+	if f.openaiKey != "" {
+		if !skipValidate {
+			if err := validateOpenAI(f.openaiKey); err != nil {
+				return err
+			}
+		}
+		out.OpenAIAPIKey = f.openaiKey
+		out.OpenAIBaseURL = ""
+		out.OpenAIAuthToken = ""
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
+	}
+	return nil
+}
+
+// validateOpenAICustom is the gateway variant: hit GET
+// <base-url>/v1/models with the bearer. Mirror of validateAnthropicCustom
+// — same shape, OpenAI-style Authorization header. Per
+// CODEX_PROVIDER_PLAN §5.1, gateways may not expose /v1/models; we treat
+// any 4xx as "configured but unverified" (warn, continue) and only fail
+// hard on network/TLS errors.
+func validateOpenAICustom(baseURL, token string) error {
+	req, err := http.NewRequest("GET", baseURL+"/v1/models", nil)
+	if err != nil {
+		return fmt.Errorf("openai base url: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	// Internal gateway hostnames (e.g. internal-gateway.corp.local) can
+	// leak into CI logs / shared error output, so error strings include
+	// host-only redactions; the full URL is the user's input — they can
+	// see what they typed — and the warn line still prints it locally
+	// for diagnostic value.
+	host := redactBaseURL(baseURL)
+	if err != nil {
+		// Network / TLS errors are hard fails — the user supplied an
+		// unreachable host or a cert mismatch and we won't get further.
+		return fmt.Errorf("openai endpoint %s: %w", host, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		// Auth-rejection is a hard fail: a real gateway that does
+		// expose /v1/models is telling us the token is wrong.
+		return fmt.Errorf("openai auth token rejected by %s (status %d)", host, resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		// Other 4xx (404 etc.): treat as "configured but unverified".
+		// Many gateways serve /v1/chat/completions but no /v1/models —
+		// the connection works, so leave the secrets in place and
+		// emit a hint instead of failing init.
+		fmt.Fprintf(os.Stderr, "warn: %s returned status %d for /v1/models; gateway endpoint set, but unverified\n", baseURL, resp.StatusCode)
+		return nil
+	}
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("openai endpoint %s status %d", host, resp.StatusCode)
+	}
+	return nil
+}
+
+// redactBaseURL returns scheme://host for use in error strings, dropping
+// the path / query / fragment. Internal gateway URLs (e.g.
+// https://internal-gw.corp.local/v2/openai/abc?token=…) often carry
+// path-encoded identifiers that don't belong in CI logs or shared error
+// output. Hostname-only is enough for the user — who typed the URL — to
+// recognize which endpoint failed.
+func redactBaseURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<gateway>"
+	}
+	if u.Scheme == "" {
+		return u.Host
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// validateOpenAI hits GET https://api.openai.com/v1/models with the bearer
+// key. Mirror of validateAnthropic — same shape, different endpoint and
+// auth header.
+func validateOpenAI(key string) error {
+	req, err := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("openai api: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("openai key rejected (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("openai api status %d", resp.StatusCode)
 	}
 	return nil
 }

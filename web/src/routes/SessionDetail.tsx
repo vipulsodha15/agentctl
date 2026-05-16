@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ApiError, apiJson } from "../api";
+import { ApiError, apiJson, jsonBody } from "../api";
 import { attach } from "../ws";
-import type { SessionStatus, SnapshotData, WireEvent } from "../types";
+import type {
+  ProvidersResponse,
+  SessionStatus,
+  SnapshotData,
+  WireEvent,
+} from "../types";
 import { ConversationView, type TranscriptFilter } from "../components/ConversationView";
 import { MessageInput } from "../components/MessageInput";
 import { McpPanel } from "../components/McpPanel";
@@ -30,6 +35,16 @@ export function SessionDetail() {
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [costRefreshKey, setCostRefreshKey] = useState(0);
   const [filter, setFilter] = useState<TranscriptFilter>("all");
+  // Mid-session model swap (ADR 0020 §2 / Phase 4). The dropdown is the
+  // primary surface per the ADR's UX principles — keyboard users get
+  // `/model` in the input box, scripters get `agentctl session set-model`.
+  // We track the current model separately from the conversation reducer
+  // because the snapshot doesn't carry it (the SDK's JSONL records are
+  // model-tagged per turn, not session-wide).
+  const [currentModel, setCurrentModel] = useState<string>("");
+  const [providerModels, setProviderModels] = useState<string[]>([]);
+  const [modelSwapping, setModelSwapping] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(SIDE_PANEL_COLLAPSED_KEY) === "1";
@@ -50,12 +65,15 @@ export function SessionDetail() {
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
-    apiJson<{ session: { name?: string; status?: SessionStatus } }>(
+    apiJson<{ session: { name?: string; status?: SessionStatus; model?: string } }>(
       `/v1/sessions/${encodeURIComponent(id)}`,
     )
       .then((r) => {
         if (cancelled) return;
         if (r?.session) {
+          if (typeof r.session.model === "string" && r.session.model) {
+            setCurrentModel(r.session.model);
+          }
           dispatch({
             type: "event",
             e: {
@@ -72,6 +90,55 @@ export function SessionDetail() {
       cancelled = true;
     };
   }, [id]);
+
+  // Provider catalog drives the model dropdown. Single-provider installs
+  // (every install before ADR 0020 Phase 1 lands) get a flat models[]; the
+  // dropdown silently hides itself when the catalog is empty so installs
+  // without a populated pricing table keep the pre-Phase-4 display.
+  useEffect(() => {
+    let cancelled = false;
+    apiJson<ProvidersResponse>("/v1/providers")
+      .then((r) => {
+        if (cancelled) return;
+        const models = collectAllModels(r);
+        setProviderModels(models);
+      })
+      .catch(() => {
+        if (!cancelled) setProviderModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const switchModel = useCallback(
+    async (next: string) => {
+      if (!id) return;
+      if (!next || next === currentModel) return;
+      setModelSwapping(true);
+      setModelError(null);
+      const prev = currentModel;
+      // Optimistic: flip the local state so the dropdown shows the new
+      // selection immediately. Roll back on error.
+      setCurrentModel(next);
+      try {
+        await apiJson(`/v1/sessions/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          ...jsonBody({ model: next }),
+        });
+      } catch (err) {
+        setCurrentModel(prev);
+        const msg =
+          err instanceof ApiError
+            ? `${err.code ?? err.status}: ${err.message}`
+            : String(err);
+        setModelError(msg);
+      } finally {
+        setModelSwapping(false);
+      }
+    },
+    [id, currentModel],
+  );
 
   useEffect(() => {
     if (!id) return;
@@ -147,6 +214,13 @@ export function SessionDetail() {
           {state.name || id}
         </span>
         <span className={`status-badge ${state.status}`}>{state.status}</span>
+        <ModelControl
+          current={currentModel}
+          models={providerModels}
+          swapping={modelSwapping}
+          error={modelError}
+          onChange={switchModel}
+        />
         {state.inFlight && (
           <span className="responding-pill" aria-live="polite">
             <span className="bdot" />
@@ -227,6 +301,9 @@ export function SessionDetail() {
               sessionId={id}
               inFlight={state.inFlight}
               queueDepth={state.queueDepth}
+              providerModels={providerModels}
+              currentModel={currentModel}
+              onModelSwitch={switchModel}
             />
           </div>
         )}
@@ -282,6 +359,77 @@ function SideChevron({ direction }: { direction: "left" | "right" }) {
         <polyline points="9 6 15 12 9 18" />
       )}
     </svg>
+  );
+}
+
+// collectAllModels flattens the per-provider catalog into a deduped,
+// stable-ordered list. The dropdown filters to a single provider once the
+// Codex split (ADR 0020 Phase 1) lands and the session detail learns its
+// session.provider; until then every model is reachable from every
+// session, which preserves single-provider behavior.
+function collectAllModels(catalog: ProvidersResponse | null | undefined): string[] {
+  if (!catalog) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const key of Object.keys(catalog).sort()) {
+    const entry = catalog[key];
+    if (!entry || !entry.enabled) continue;
+    for (const m of entry.models || []) {
+      if (!seen.has(m)) {
+        seen.add(m);
+        out.push(m);
+      }
+    }
+  }
+  return out;
+}
+
+interface ModelControlProps {
+  current: string;
+  models: string[];
+  swapping: boolean;
+  error: string | null;
+  onChange: (next: string) => void;
+}
+
+// ModelControl renders the per-session model picker that lives in the
+// session header (ADR 0020 §UX principles — "the in-session model
+// dropdown is the affordance users will reach for"). Three layout cases:
+//
+//   - No catalog: the daemon's /v1/providers returned an empty map (a
+//     fresh install with no pricing-table models). We render the current
+//     model as plain text, matching pre-Phase-4 behavior — no UI noise
+//     in setups that aren't using the catalog yet.
+//   - Catalog without the current model: the runtime is reporting a model
+//     not in the user's pricing table. Render the current value alongside
+//     the catalog entries so the picker is honest about what's running.
+//   - Normal: a real <select> bound to the catalog.
+function ModelControl({ current, models, swapping, error, onChange }: ModelControlProps) {
+  if (models.length === 0) {
+    if (!current) return null;
+    return (
+      <span className="model-display" title={current}>
+        {current}
+      </span>
+    );
+  }
+  const options = models.includes(current) || !current ? models : [current, ...models];
+  return (
+    <span className={`model-control${swapping ? " swapping" : ""}`}>
+      <select
+        className="model-select"
+        value={current}
+        disabled={swapping}
+        onChange={(e) => onChange(e.target.value)}
+        title={error ? `Last switch failed: ${error}` : "Switch model for this session"}
+      >
+        {options.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+    </span>
   );
 }
 

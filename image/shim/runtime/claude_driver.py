@@ -26,15 +26,15 @@ except Exception:  # noqa: BLE001
     ClaudeAgentOptions = None  # type: ignore[assignment]
     ClaudeSDKClient = None  # type: ignore[assignment]
 
-
-EVENT_ASSISTANT_DELTA = "assistant.delta"
-EVENT_ASSISTANT_MESSAGE = "assistant.message"
-EVENT_TOOL_CALL = "tool.call"
-EVENT_TOOL_RESULT = "tool.result"
-EVENT_USAGE = "usage"
-EVENT_TURN_START = "turn.start"
-EVENT_TURN_END = "turn.end"
-EVENT_TURN_CANCELLED = "turn.cancelled"
+from .translate import (
+    EVENT_ASSISTANT_DELTA,
+    EVENT_ASSISTANT_MESSAGE,
+    EVENT_TOOL_CALL,
+    EVENT_TOOL_RESULT,
+    EVENT_TURN_CANCELLED,
+    EVENT_TURN_END,
+    EVENT_USAGE,
+)
 
 
 EmitEvent = Callable[[str, dict], None]
@@ -102,7 +102,11 @@ class RuntimeDriver:
             self._loop.close()
 
     def _options(self) -> Any:
-        if ClaudeAgentOptions is None:
+        # Resolve lazily through the module so unit tests that monkeypatch
+        # ``claude_driver.ClaudeAgentOptions`` (or the legacy alias on the
+        # ``shim.runtime`` package facade) still see their fake.
+        options_cls = _resolve("ClaudeAgentOptions")
+        if options_cls is None:
             raise RuntimeError("claude_agent_sdk not installed")
         kwargs: dict[str, Any] = dict(
             model=self._cfg.model,
@@ -124,14 +128,15 @@ class RuntimeDriver:
             kwargs["system_prompt"] = self._cfg.system_prompt
         if self._sdk_session_id:
             kwargs["resume"] = self._sdk_session_id
-        return ClaudeAgentOptions(**kwargs)
+        return options_cls(**kwargs)
 
     async def _ensure_client(self) -> Any:
         if self._client is not None:
             return self._client
-        if ClaudeSDKClient is None:
+        client_cls = _resolve("ClaudeSDKClient")
+        if client_cls is None:
             raise RuntimeError("claude_agent_sdk not installed")
-        client = ClaudeSDKClient(options=self._options())
+        client = client_cls(options=self._options())
         await client.connect()
         self._client = client
         return client
@@ -175,6 +180,51 @@ class RuntimeDriver:
                 return
             except Exception:  # noqa: BLE001
                 continue
+
+    def set_model(self, new_model: str) -> None:
+        """Swap the SDK client's model id mid-session (ADR 0020 §2).
+
+        The Claude Agent SDK doesn't expose a runtime ``set_model`` knob, so
+        we tear down the live ``ClaudeSDKClient`` and re-create it with the
+        new model. ``ClaudeAgentOptions.resume=<sdk_session_id>`` is reapplied
+        from the stored session id so the SDK picks up the same JSONL
+        transcript on the new connection — i.e. the same path idle-resume
+        already exercises every container restart.
+
+        Empty / unchanged model is a no-op so a repeated ``/model`` doesn't
+        churn the connection. Errors during teardown are logged but never
+        raised: the next ``submit_turn`` will hit ``_ensure_client`` and
+        attempt a fresh connect with the new model.
+
+        TODO(verify-resume-after-model-swap): per ADR 0020 §Consequences
+        ("Items to verify"), confirm the SDK reliably re-picks up the same
+        JSONL when resume=<sid> is passed with a *different* model than the
+        one that created the conversation. The idle-resume path already
+        does this with the same model; cross-model resume is the new case
+        introduced by Phase 4. Smoke test deferred to integration.
+        """
+
+        if not new_model:
+            return
+        if new_model == self._cfg.model:
+            return
+        self._cfg.model = new_model
+        if self._loop is None:
+            # No event loop yet — config-only update is enough; the first
+            # turn will build the client with the new model.
+            return
+        # Schedule the swap on the runtime loop so we don't race the
+        # in-flight turn's read of self._client. _swap_client closes the
+        # old client cleanly; the next submit_turn rebuilds.
+        try:
+            asyncio.run_coroutine_threadsafe(self._swap_client(), self._loop)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _swap_client(self) -> None:
+        await self._close_client()
+        # _ensure_client picks up self._cfg.model on next call; nothing
+        # else to do here.
 
     def shutdown(self, grace_seconds: float = 30.0) -> None:
         with self._in_flight_lock:
@@ -299,6 +349,27 @@ class RuntimeDriver:
         except OSError:
             return
         self._jsonl_lines_emitted = emitted
+
+
+def _resolve(name: str) -> Any:
+    """Look up ``name`` honoring monkeypatches on either this module or the
+    package facade.
+
+    The package re-exports ``ClaudeAgentOptions`` / ``ClaudeSDKClient`` for
+    backward compat (tests do ``runtime.ClaudeAgentOptions = Fake``); the
+    driver should honor those overrides too. Falls back to whatever this
+    module imported at the top.
+    """
+
+    try:
+        import shim.runtime as _pkg  # noqa: WPS433 — facade, not a cycle at call time
+    except Exception:  # noqa: BLE001
+        _pkg = None  # type: ignore[assignment]
+    if _pkg is not None:
+        val = getattr(_pkg, name, None)
+        if val is not None:
+            return val
+    return globals().get(name)
 
 
 def _extract_session_id(message: Any) -> Optional[str]:

@@ -11,7 +11,9 @@ import (
 
 	"github.com/agentctl/agentctl/internal/cliclient"
 	"github.com/agentctl/agentctl/internal/config"
+	"github.com/agentctl/agentctl/internal/paths"
 	"github.com/agentctl/agentctl/internal/proto"
+	"github.com/agentctl/agentctl/internal/secrets"
 )
 
 func runStart(ctx context.Context, env *Env, args []string) int {
@@ -23,6 +25,7 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 		noMCPCSV string
 		repoArr  stringList
 		model    string
+		provider string
 		memBytes int64
 		cpuLimit float64
 	)
@@ -32,6 +35,13 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 	fs.StringVar(&noMCPCSV, "no-mcp", "", "comma-separated MCP names to exclude")
 	fs.Var(&repoArr, "repo", "repo URL to clone (repeatable)")
 	fs.StringVar(&model, "model", "", "model id override (e.g. claude-sonnet-4-6)")
+	// --provider is registered unconditionally on the flag set so callers can
+	// always pass it scripted; help-text visibility is gated on
+	// EnabledProviders() count per ADR 0020 §UX principles (provider
+	// invisibility). The Usage closure below filters it from PrintDefaults
+	// when only one provider is configured so the existing Anthropic-only
+	// workflow is byte-for-byte unchanged after upgrade.
+	fs.StringVar(&provider, "provider", "", "agent provider (anthropic|openai); omit to let the resolver pick")
 	fs.Int64Var(&memBytes, "mem-limit", 0, "container memory limit in bytes (0 = config default)")
 	fs.Float64Var(&cpuLimit, "cpu-limit", 0, "container CPU limit in cores (0 = config default)")
 	fs.Usage = func() {
@@ -49,10 +59,21 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "  agentctl start --plain | tee transcript.log")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Flags:")
-		fs.PrintDefaults()
+		printFlagsHidingProvider(fs, env)
 	}
 	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return ExitUsage
+	}
+
+	// Catch typos before the RPC: --provider claude / --provider gpt fail
+	// fast with the allowed set rather than rounding-tripping through the
+	// daemon to hit a less-targeted "not configured" error. Empty is OK —
+	// that's the "let the resolver pick" path per ADR 0020 §3.
+	if provider != "" {
+		if err := secrets.ValidateProvider(provider); err != nil {
+			fmt.Fprintf(env.Stderr, "start: %v\n", err)
+			return ExitUsage
+		}
 	}
 
 	cfg, _ := config.Load(env.Layout.ConfigFile)
@@ -69,6 +90,7 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 		ExcludeMCPs:   splitCSV(noMCPCSV),
 		Repos:         repoArr,
 		Model:         model,
+		Provider:      provider,
 		MemLimitBytes: memBytes,
 		CPULimitCores: cpuLimit,
 	}
@@ -100,6 +122,53 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 	// survives in the scrollback after detach.
 	fmt.Fprintf(env.Stderr, "session %s · %s\n", resp.SessionID, webURL)
 	return attachAndRunTUI(streamCtx, c, resp.SessionID, env)
+}
+
+// printFlagsHidingProvider mirrors fs.PrintDefaults() but suppresses the
+// --provider flag while fewer than two providers are configured. This is
+// the "provider invisibility" rule from ADR 0020 §UX principles: a user
+// with only Anthropic configured sees the same --help they always have.
+// The count is read locally from secrets.json — the CLI already owns
+// that file, so this is a host-local decision that doesn't need to
+// round-trip the daemon.
+func printFlagsHidingProvider(fs *flag.FlagSet, env *Env) {
+	hide := localEnabledProviderCount(env) < 2
+	fs.VisitAll(func(f *flag.Flag) {
+		if hide && f.Name == "provider" {
+			return
+		}
+		fmt.Fprintf(env.Stderr, "  -%s", f.Name)
+		if f.DefValue != "" {
+			fmt.Fprintf(env.Stderr, " %s", f.DefValue)
+		}
+		fmt.Fprintf(env.Stderr, "\n\t%s\n", f.Usage)
+	})
+}
+
+// localEnabledProviderCount counts enabled providers by loading
+// secrets.json from the user's config dir. Returns 0 when the file
+// can't be read (e.g. fresh install, permission error); the help-text
+// caller treats that as "hide --provider" which matches the
+// pre-upgrade experience.
+func localEnabledProviderCount(env *Env) int {
+	layout := env.Layout
+	if layout.SecretsFile == "" {
+		layout = paths.Resolve()
+	}
+	sec, err := secrets.Load(layout.SecretsFile)
+	if err != nil {
+		return 0
+	}
+	credsPathFor := func(provider string) string {
+		switch provider {
+		case secrets.ProviderAnthropic:
+			return layout.ClaudeCredsFile
+		case secrets.ProviderOpenAI:
+			return layout.CodexCredsFile
+		}
+		return ""
+	}
+	return len(sec.EnabledProviders(credsPathFor))
 }
 
 func splitCSV(s string) []string {

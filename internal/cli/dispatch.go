@@ -56,7 +56,7 @@ const (
 func commands() []Command {
 	return []Command{
 		{Name: "init", Group: groupSetup, Summary: "Set up agentctl on this machine (build image, prompt for tokens, install service).", Run: runInit},
-		{Name: "auth", Group: groupSetup, Summary: "Manage Anthropic credentials (auth login runs `claude auth login` in a one-shot container).", Run: runAuth},
+		{Name: "auth", Group: groupSetup, Summary: "Manage provider credentials (auth login --provider {anthropic|openai} runs the vendor OAuth flow in a one-shot container).", Run: runAuth},
 		{Name: "update", Group: groupSetup, Summary: "Rebuild the session base image and repin its id.", Run: runUpdate},
 		{Name: "config", Group: groupSetup, Summary: "Read or write a config.toml key.", Run: runConfig},
 		{Name: "ui", Group: groupSetup, Summary: "Open the local Web UI in a browser.", Run: runUI},
@@ -72,6 +72,12 @@ func commands() []Command {
 		{Name: "logs", Group: groupSessions, Summary: "Tail daemon, session, or container logs.", Run: runLogs},
 		{Name: "diff", Group: groupSessions, Summary: "Stream the working-tree diff against the recorded base SHA.", Run: runDiff},
 		{Name: "export", Group: groupSessions, Summary: "Export a patch (--patch) or push to a branch (--push <branch>).", Run: runExport},
+		// `session` is the scripting-surface subcommand for session mutations
+		// that the primary UX (web header / chat-input slash commands) covers
+		// for interactive users. Today: `session set-model` (ADR 0020 §2).
+		// Per the ADR's UX principles, this is intentionally lower-key than
+		// the discoverable surfaces — see internal/cli/session.go.
+		{Name: "session", Group: groupSessions, Summary: "Scripting subcommands for session mutations (set-model).", Run: runSession},
 
 		{Name: "mcp", Group: groupMCPs, Summary: "Manage the MCP registry (list/add/update/remove/set-default).", Run: runMCP},
 

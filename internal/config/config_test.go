@@ -56,6 +56,65 @@ func TestGetSet(t *testing.T) {
 	}
 }
 
+// TestLegacyDefaultFallsBackToAnthropicDefault locks in the one-release
+// compatibility rule: a pre-ADR-0020 config.toml has only `[model]
+// default = "..."` (no anthropic_default / openai_default). On load,
+// AnthropicDefault must inherit Default so the resolver finds a value.
+// Plan §1.9 / CODEX_PROVIDER_PLAN cross-cutting prerequisite 3.
+func TestLegacyDefaultFallsBackToAnthropicDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+[agentd]
+web_addr = "127.0.0.1:7777"
+log_level = "info"
+
+[model]
+default = "claude-opus-4-7"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Model.Default != "claude-opus-4-7" {
+		t.Errorf("Default round-trip lost: %q", got.Model.Default)
+	}
+	if got.Model.AnthropicDefault != "claude-opus-4-7" {
+		t.Errorf("AnthropicDefault must inherit legacy Default; got %q", got.Model.AnthropicDefault)
+	}
+	if got.Model.OpenAIDefault == "" {
+		t.Errorf("OpenAIDefault should fall back to the daemon default, got empty")
+	}
+}
+
+// TestExplicitDefaultsDoNotInherit verifies a config that sets both
+// AnthropicDefault and Default keeps them disjoint — the fallback only
+// applies when AnthropicDefault is empty.
+func TestExplicitDefaultsDoNotInherit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+[model]
+default = "claude-haiku-4-5"
+anthropic_default = "claude-sonnet-4-6"
+openai_default = "gpt-5.5"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Model.AnthropicDefault != "claude-sonnet-4-6" {
+		t.Errorf("AnthropicDefault should stay explicit; got %q", got.Model.AnthropicDefault)
+	}
+	if got.Model.OpenAIDefault != "gpt-5.5" {
+		t.Errorf("OpenAIDefault should stay explicit; got %q", got.Model.OpenAIDefault)
+	}
+}
+
 func TestEnsurePerms(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")

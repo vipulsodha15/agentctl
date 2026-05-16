@@ -185,6 +185,77 @@ stages:
 	}
 }
 
+// TestMaterializeShipsMixedProviderBuiltin — the bug-multi-provider line
+// from ADR 0020 §3 is the headline example for orchestration across
+// providers, so it lives in the image as a built-in. This test guards
+// that it's actually wired up (the YAML embed glob fires for it) and
+// that the per-stage provider pins survive the parse + materialise +
+// reload round trip — without them, the line's whole point is lost.
+func TestMaterializeShipsMixedProviderBuiltin(t *testing.T) {
+	lib, db := newTestLib(t)
+	ctx := context.Background()
+	if _, err := Materialize(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := lib.GetAssemblyLine("bug-multi-provider")
+	if err != nil {
+		t.Fatalf("bug-multi-provider not materialized: %v", err)
+	}
+	if wf.Source != SourceBuiltin {
+		t.Fatalf("expected source=builtin, got %q", wf.Source)
+	}
+	if len(wf.Stages) < 2 {
+		t.Fatalf("expected >=2 stages, got %d", len(wf.Stages))
+	}
+	// Locate the two pinned stages by agent name so the test doesn't break
+	// if the planner stage gains or loses a pin in the future.
+	got := map[string]string{}
+	for _, s := range wf.Stages {
+		got[s.Agent] = s.Provider
+	}
+	if got["bug-investigator"] != "anthropic" {
+		t.Errorf("bug-investigator stage should pin provider=anthropic, got %q", got["bug-investigator"])
+	}
+	if got["bug-executor"] != "openai" {
+		t.Errorf("bug-executor stage should pin provider=openai, got %q", got["bug-executor"])
+	}
+}
+
+// TestParseAssemblyLineYAMLStageProviderModel — stage-level provider and
+// model overrides survive YAML round-trips. This is the wire format the
+// run-view chip relies on; if YAML deserialisation drops the field,
+// mixed-provider lines silently collapse to the resolver default.
+func TestParseAssemblyLineYAMLStageProviderModel(t *testing.T) {
+	body := []byte(`name: mixed
+description: stage pins
+stages:
+  - agent: a-investigator
+    provider: anthropic
+    model: claude-opus-4-7
+  - agent: a-executor
+    provider: openai
+`)
+	wf, err := ParseAssemblyLineYAML(body)
+	if err != nil {
+		t.Fatalf("ParseAssemblyLineYAML: %v", err)
+	}
+	if len(wf.Stages) != 2 {
+		t.Fatalf("expected 2 stages, got %d", len(wf.Stages))
+	}
+	if wf.Stages[0].Provider != "anthropic" || wf.Stages[0].Model != "claude-opus-4-7" {
+		t.Errorf("stage 0 pins lost: %+v", wf.Stages[0])
+	}
+	if wf.Stages[1].Provider != "openai" {
+		t.Errorf("stage 1 provider lost: %+v", wf.Stages[1])
+	}
+	if wf.Stages[1].Model != "" {
+		t.Errorf("stage 1 model should be empty when YAML omits it; got %q", wf.Stages[1].Model)
+	}
+}
+
 // TestPutAssemblyLineValidatesAgents — assembly lines that reference an
 // unknown agent are rejected at Put time, not silently loaded with a flag.
 func TestPutAssemblyLineValidatesAgents(t *testing.T) {

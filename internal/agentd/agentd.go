@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +58,8 @@ func Run(ctx context.Context, opts Options) error {
 	if sec, err := secrets.Load(opts.Layout.SecretsFile); err == nil {
 		log.RegisterSecret(sec.AnthropicAPIKey)
 		log.RegisterSecret(sec.AnthropicAuthToken)
+		log.RegisterSecret(sec.OpenAIAPIKey)
+		log.RegisterSecret(sec.OpenAIAuthToken)
 		log.RegisterSecret(sec.GitHubPAT)
 	}
 	if tok, err := secrets.ReadWebToken(opts.Layout.WebTokenFile); err == nil {
@@ -158,9 +161,37 @@ func Run(ctx context.Context, opts Options) error {
 		},
 		SecretsPath:    opts.Layout.SecretsFile,
 		ClaudeCredsDir: opts.Layout.ClaudeCredsDir,
+		CodexCredsDir:  opts.Layout.CodexCredsDir,
 		MCPs:           mcpReg,
 		Skills:         newSkillsComposerAdapter(skillMgr),
 		Usage:          newUsageRecorderAdapter(usageSvc),
+		// Mid-session model switch (ADR 0020 §2 / Phase 4) validates the
+		// requested model against this catalog before dispatching the
+		// agentd.set_model frame. The closure re-reads config.toml on each
+		// call so users editing [pricing.tables.models] don't have to
+		// restart agentd. Models are partitioned by name prefix
+		// (`claude-*` → anthropic, `gpt-*` → openai) so cross-provider
+		// switches are rejected per ADR 0020 §1 — the session's immutable
+		// provider field picks which list HasModel validates against.
+		ProviderCatalog: func() sm.ProviderCatalog {
+			c, err := config.Load(configPath)
+			if err != nil {
+				return sm.ProviderCatalog{}
+			}
+			byProv := map[string][]string{
+				secrets.ProviderAnthropic: {},
+				secrets.ProviderOpenAI:    {},
+			}
+			for name := range c.Pricing.Tables.Models {
+				switch {
+				case strings.HasPrefix(name, "claude-"):
+					byProv[secrets.ProviderAnthropic] = append(byProv[secrets.ProviderAnthropic], name)
+				case strings.HasPrefix(name, "gpt-"):
+					byProv[secrets.ProviderOpenAI] = append(byProv[secrets.ProviderOpenAI], name)
+				}
+			}
+			return sm.ProviderCatalog{ModelsByProvider: byProv}
+		},
 	}
 	if cmAdapt != nil {
 		managerOpts.Containers = cmAdapt
@@ -215,17 +246,25 @@ func Run(ctx context.Context, opts Options) error {
 		containerLogStream = newContainerLogStreamer(manager, cmMgr)
 	}
 
+	// Single provider-resolution closure shared between the CLI socket and
+	// the web server. Builds the resolver inputs fresh on every call so
+	// rotating secrets or editing config.toml is picked up without a
+	// daemon restart. ADR 0020 §3 — exactly one implementation.
+	providerResolver := newProviderResolver(opts.Layout, st)
+	providerCatalog := newProviderCatalog(opts.Layout, st)
+
 	sockLog := log.New(log.Options{Component: log.ComponentSock})
 	socketSrv := socksrv.New(socksrv.Options{
-		SocketPath:    opts.Layout.SocketFile,
-		API:           apiSrv,
-		Manager:       manager,
-		MCPs:          mcpReg,
-		Skills:        skillMgr,
-		LogStream:     logStream,
-		ContainerLogs: containerLogStream,
-		Usage:         usageSvc,
-		Logger:        sockLog,
+		SocketPath:       opts.Layout.SocketFile,
+		API:              apiSrv,
+		Manager:          manager,
+		MCPs:             mcpReg,
+		Skills:           skillMgr,
+		LogStream:        logStream,
+		ContainerLogs:    containerLogStream,
+		Usage:            usageSvc,
+		ProviderResolver: providerResolver,
+		Logger:           sockLog,
 	})
 	if err := socketSrv.Start(); err != nil {
 		return fmt.Errorf("cli socket: %w", err)
@@ -239,19 +278,21 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	webLog := log.New(log.Options{Component: log.ComponentWeb})
 	webSrv := websrv.New(websrv.Options{
-		Addr:    cfg.Agentd.WebAddr,
-		Token:   tok,
-		API:     apiSrv,
-		Manager: manager,
-		MCPs:    newMcpAdapter(mcpReg),
-		Skills:  newSkillsAdapter(skillMgr),
-		Usage:   newUsageWebAdapter(usageSvc),
-		Logs:    logStream,
-		Library: taskLib,
-		Tasks:   taskMgr,
-		TaskHub: taskHub,
-		Secrets: newSecretsAdapter(opts.Layout.SecretsFile),
-		Logger:  webLog,
+		Addr:             cfg.Agentd.WebAddr,
+		Token:            tok,
+		API:              apiSrv,
+		Manager:          manager,
+		MCPs:             newMcpAdapter(mcpReg),
+		Skills:           newSkillsAdapter(skillMgr),
+		Usage:            newUsageWebAdapter(usageSvc),
+		Logs:             logStream,
+		Library:          taskLib,
+		Tasks:            taskMgr,
+		TaskHub:          taskHub,
+		Secrets:          newSecretsAdapter(opts.Layout.SecretsFile),
+		ProviderResolver: websrv.ProviderResolver(providerResolver),
+		Providers:        providerCatalog,
+		Logger:           webLog,
 	})
 	if err := webSrv.Start(); err != nil {
 		return fmt.Errorf("web server: %w", err)

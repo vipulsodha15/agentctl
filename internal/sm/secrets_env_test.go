@@ -27,6 +27,7 @@ func TestWriteSecretsEnvCustomEndpoint(t *testing.T) {
 		SessionName:  "demo",
 		Model:        "claude-sonnet-4-6",
 		SessionToken: "tok",
+		Provider:     secrets.ProviderAnthropic,
 	}); err != nil {
 		t.Fatalf("writeSecretsEnv: %v", err)
 	}
@@ -58,7 +59,10 @@ func TestWriteSecretsEnvAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	envPath := filepath.Join(dir, "secrets.env")
-	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{SessionID: "sess_01"}); err != nil {
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_01",
+		Provider:  secrets.ProviderAnthropic,
+	}); err != nil {
 		t.Fatalf("writeSecretsEnv: %v", err)
 	}
 	body, _ := os.ReadFile(envPath)
@@ -68,5 +72,144 @@ func TestWriteSecretsEnvAPIKey(t *testing.T) {
 	}
 	if strings.Contains(got, "ANTHROPIC_AUTH_TOKEN=") || strings.Contains(got, "ANTHROPIC_BASE_URL=") {
 		t.Errorf("custom-endpoint vars must not leak in api-key mode; got:\n%s", got)
+	}
+	if !strings.Contains(got, "AGENTCTL_PROVIDER=anthropic\n") {
+		t.Errorf("AGENTCTL_PROVIDER not threaded through; got:\n%s", got)
+	}
+}
+
+// TestWriteSecretsEnvOpenAIAPIKey covers the OpenAI api-key branch added
+// in phase 1 (ADR 0020 §5, CODEX_PROVIDER_PLAN §1.9). Both vendors'
+// credentials live in the same secrets.json; the env file must carry only
+// the active provider's vars so a Codex container doesn't see
+// ANTHROPIC_API_KEY (which would bill the wrong vendor through any
+// future shared MCP that observes both).
+func TestWriteSecretsEnvOpenAIAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		V:               1,
+		AnthropicAPIKey: "sk-ant-x",
+		OpenAIAPIKey:    "sk-openai-y",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_oa",
+		Provider:  secrets.ProviderOpenAI,
+	}); err != nil {
+		t.Fatalf("writeSecretsEnv: %v", err)
+	}
+	body, _ := os.ReadFile(envPath)
+	got := string(body)
+	if !strings.Contains(got, "OPENAI_API_KEY=sk-openai-y\n") {
+		t.Errorf("expected OPENAI_API_KEY; got:\n%s", got)
+	}
+	if strings.Contains(got, "ANTHROPIC_API_KEY=") {
+		t.Errorf("anthropic key must not leak into openai container; got:\n%s", got)
+	}
+	if !strings.Contains(got, "AGENTCTL_PROVIDER=openai\n") {
+		t.Errorf("AGENTCTL_PROVIDER not threaded through; got:\n%s", got)
+	}
+}
+
+// TestWriteSecretsEnvOpenAIOAuthInjectsNothing locks in the OAuth-mode
+// rule: when the user has run `agentctl auth login --provider openai`
+// (phase 2), no OPENAI_API_KEY is exported into the container — the
+// bind-mounted ~/.codex/auth.json carries the auth. Mirror of the
+// Anthropic OAuth contract.
+func TestWriteSecretsEnvOpenAIOAuthInjectsNothing(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		V:              1,
+		OpenAIAPIKey:   "sk-stale-should-not-leak",
+		OpenAIAuthMode: secrets.AuthModeOAuth,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_oa_oauth",
+		Provider:  secrets.ProviderOpenAI,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(envPath)
+	got := string(body)
+	if strings.Contains(got, "OPENAI_API_KEY=") {
+		t.Errorf("oauth mode must not export OPENAI_API_KEY; got:\n%s", got)
+	}
+}
+
+// TestWriteSecretsEnvOpenAICustomEndpoint covers the Phase 5 gateway
+// branch: OPENAI_BASE_URL + OPENAI_API_KEY (using the bearer token) are
+// injected, and the legacy OpenAI key is silenced even when it's also
+// set. ADR 0020 §5 / CODEX_PROVIDER_PLAN §5.2.
+func TestWriteSecretsEnvOpenAICustomEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		V:               1,
+		OpenAIAPIKey:    "sk-direct",
+		OpenAIBaseURL:   "https://gateway.example.com",
+		OpenAIAuthToken: "gw-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_oa_gw",
+		Provider:  secrets.ProviderOpenAI,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(envPath)
+	got := string(body)
+	if !strings.Contains(got, "OPENAI_BASE_URL=https://gateway.example.com\n") {
+		t.Errorf("expected OPENAI_BASE_URL in env file; got:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=gw-token\n") {
+		t.Errorf("custom-endpoint mode must inject the bearer token under OPENAI_API_KEY; got:\n%s", got)
+	}
+	// The direct OpenAI key field must NOT leak — the active credential
+	// is the gateway token, not the user's direct OpenAI key.
+	if strings.Contains(got, "OPENAI_API_KEY=sk-direct") {
+		t.Errorf("OpenAIAPIKey must not leak when custom endpoint is configured; got:\n%s", got)
+	}
+}
+
+// TestWriteSecretsEnvOpenAIOAuthPlusCustomEndpoint enforces the
+// precedence rule from CODEX_PROVIDER_PLAN §5.2: custom endpoint wins
+// over OAuth for the same provider. The container ends up with
+// OPENAI_BASE_URL + OPENAI_API_KEY (the gateway token), no OAuth
+// bind-mount-driven behaviour. `auth status` separately surfaces a
+// warning so the user knows the OAuth credentials are being shadowed.
+func TestWriteSecretsEnvOpenAIOAuthPlusCustomEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		V:               1,
+		OpenAIAuthMode:  secrets.AuthModeOAuth,
+		OpenAIBaseURL:   "https://gateway.example.com",
+		OpenAIAuthToken: "gw-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_oa_oauth_plus_gw",
+		Provider:  secrets.ProviderOpenAI,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(envPath)
+	got := string(body)
+	if !strings.Contains(got, "OPENAI_BASE_URL=") {
+		t.Errorf("custom endpoint must win over OAuth; got:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=gw-token\n") {
+		t.Errorf("expected gateway token under OPENAI_API_KEY; got:\n%s", got)
 	}
 }

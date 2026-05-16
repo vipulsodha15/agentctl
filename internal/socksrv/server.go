@@ -37,6 +37,13 @@ type UsageAggregator interface {
 	Range(ctx context.Context, start, end time.Time, sessionFilter string) (usage.RangeTotals, error)
 }
 
+// ProviderResolver resolves (provider, model) for a session-create request.
+// Wired by agentd to a closure over secrets + config + workspace state per
+// ADR 0020 §3. Optional: when nil, the request's Provider/Model are used
+// as-is (sm.Create rejects an empty Provider). Tests that don't care
+// about provider plumbing leave this nil and pass Provider explicitly.
+type ProviderResolver func(cliProvider, cliModel string) (provider, model string, err error)
+
 type Server struct {
 	socketPath    string
 	apiSrv        *api.Server
@@ -46,6 +53,7 @@ type Server struct {
 	logStream     SessionLogStreamer
 	containerLogs ContainerLogStreamer
 	usage         UsageAggregator
+	resolve       ProviderResolver
 	logger        *slog.Logger
 	listener      net.Listener
 	wg            sync.WaitGroup
@@ -54,15 +62,16 @@ type Server struct {
 }
 
 type Options struct {
-	SocketPath    string
-	API           *api.Server
-	Manager       sm.Manager
-	MCPs          mcp.Registry
-	Skills        skills.Manager
-	LogStream     SessionLogStreamer
-	ContainerLogs ContainerLogStreamer
-	Usage         UsageAggregator
-	Logger        *slog.Logger
+	SocketPath       string
+	API              *api.Server
+	Manager          sm.Manager
+	MCPs             mcp.Registry
+	Skills           skills.Manager
+	LogStream        SessionLogStreamer
+	ContainerLogs    ContainerLogStreamer
+	Usage            UsageAggregator
+	ProviderResolver ProviderResolver
+	Logger           *slog.Logger
 }
 
 func New(opts Options) *Server {
@@ -75,6 +84,7 @@ func New(opts Options) *Server {
 		logStream:     opts.LogStream,
 		containerLogs: opts.ContainerLogs,
 		usage:         opts.Usage,
+		resolve:       opts.ProviderResolver,
 		logger:        opts.Logger,
 		closing:       make(chan struct{}),
 	}
@@ -229,6 +239,8 @@ func (s *Server) dispatch(cw *connWriter, frame proto.Frame) {
 		s.handleExportPush(cw, frame)
 	case proto.OpListSessionRepos:
 		s.handleListSessionRepos(cw, frame)
+	case proto.OpUpdateSession:
+		s.handleUpdateSession(cw, frame)
 	default:
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, "unknown op: "+frame.Op)
 	}
@@ -251,12 +263,22 @@ func (s *Server) handleCreateSession(cw *connWriter, frame proto.Frame) {
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
 		return
 	}
+	provider, model := req.Provider, req.Model
+	if s.resolve != nil {
+		var err error
+		provider, model, err = s.resolve(req.Provider, req.Model)
+		if err != nil {
+			s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+			return
+		}
+	}
 	res, err := s.manager.Create(context.Background(), sm.CreateRequest{
 		Name:          req.Name,
 		MCPs:          req.MCPs,
 		ExcludeMCPs:   req.ExcludeMCPs,
 		Repos:         req.Repos,
-		Model:         req.Model,
+		Model:         model,
+		Provider:      provider,
 		MemLimitBytes: req.MemLimitBytes,
 		CPULimitCores: req.CPULimitCores,
 	})
@@ -391,6 +413,35 @@ func (s *Server) handleRestart(cw *connWriter, frame proto.Frame) {
 	})
 }
 
+// handleUpdateSession is the unix-socket twin of the web's PATCH
+// /v1/sessions/<id>. v1 only honors `model` (mid-session swap per
+// ADR 0020 §2); the field is a pointer so omitting it produces a
+// "no mutable fields" error instead of silently overwriting with "".
+func (s *Server) handleUpdateSession(cw *connWriter, frame proto.Frame) {
+	if !s.requireManager(cw, frame.ID) {
+		return
+	}
+	var req proto.UpdateSessionRequest
+	if err := json.Unmarshal(frame.Data, &req); err != nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+		return
+	}
+	if req.SessionID == "" {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "session_id required")
+		return
+	}
+	if req.Model == nil {
+		s.writeError(cw, frame.ID, proto.ErrBadRequest, "no mutable fields in request (supported: model)")
+		return
+	}
+	summary, err := s.manager.UpdateModel(context.Background(), req.SessionID, *req.Model)
+	if err != nil {
+		s.writeError(cw, frame.ID, mapSMError(err), err.Error())
+		return
+	}
+	s.writeResponse(cw, frame.ID, proto.UpdateSessionResponse{Session: summary})
+}
+
 func (s *Server) handleTerminate(cw *connWriter, frame proto.Frame) {
 	if !s.requireManager(cw, frame.ID) {
 		return
@@ -520,6 +571,12 @@ func mapSMError(err error) string {
 		return proto.ErrPreconditionFailed
 	case errors.Is(err, sm.ErrSnapshotFailed):
 		return proto.ErrSnapshotFailed
+	case errors.Is(err, sm.ErrModelInvalid):
+		// Client-correctable: the user passed a model id the daemon's
+		// resolver doesn't know about (ADR 0020 §2). Surfacing this as
+		// bad_request lets the CLI exit 64 and the web SPA show the
+		// inline form error instead of an opaque 500.
+		return proto.ErrBadRequest
 	default:
 		return proto.ErrInternal
 	}

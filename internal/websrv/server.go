@@ -23,63 +23,94 @@ const (
 	WSSubprotocol    = "agentctl.v1"
 )
 
+// ProviderResolver resolves (provider, model) for a session-create. Wired
+// by agentd to a closure over secrets + config + workspace state per ADR
+// 0020 §3. When nil, request.Provider / request.Model pass through unchanged
+// (and sm.Create rejects an empty Provider).
+type ProviderResolver func(cliProvider, cliModel string) (provider, model string, err error)
+
+// ProviderCatalog answers GET /v1/providers. Returns the catalog the web
+// SPA filters its session-/agent-create dropdowns on. Sourced from
+// secrets.EnabledProviders + config.toml [model] / [pricing.tables.models]
+// (single source of truth — no parallel catalog file, ADR 0020 §UX
+// principles). The path lives under /v1/ to match the rest of the daemon
+// API; the ADR's §9 informally writes /api/providers.
+type ProviderCatalog interface {
+	Catalog() ProvidersResponse
+}
+
+// ProvidersResponse is the body of GET /v1/providers. Shape per ADR 0020 §9.
+type ProvidersResponse map[string]ProviderInfo
+
+type ProviderInfo struct {
+	Enabled      bool     `json:"enabled"`
+	DefaultModel string   `json:"default_model"`
+	Models       []string `json:"models"`
+}
+
 type Server struct {
-	httpSrv  *http.Server
-	listener net.Listener
-	logger   *slog.Logger
-	apiSrv   *api.Server
-	manager  Manager
-	mcps     MCPRegistry
-	skills   SkillsService
-	usage    UsageService
-	logs     LogStreamer
-	doctor   Doctor
-	updater  Updater
-	library  LibraryService
-	tasks    TaskService
-	taskHub  TaskHub
-	secrets  SecretsService
-	token    string
-	addr     string
-	originOK string
+	httpSrv   *http.Server
+	listener  net.Listener
+	logger    *slog.Logger
+	apiSrv    *api.Server
+	manager   Manager
+	mcps      MCPRegistry
+	skills    SkillsService
+	usage     UsageService
+	logs      LogStreamer
+	doctor    Doctor
+	updater   Updater
+	library   LibraryService
+	tasks     TaskService
+	taskHub   TaskHub
+	secrets   SecretsService
+	resolve   ProviderResolver
+	providers ProviderCatalog
+	token     string
+	addr      string
+	originOK  string
 }
 
 type Options struct {
-	Addr    string
-	Token   string
-	API     *api.Server
-	Manager Manager
-	MCPs    MCPRegistry
-	Skills  SkillsService
-	Usage   UsageService
-	Logs    LogStreamer
-	Doctor  Doctor
-	Updater Updater
-	Library LibraryService
-	Tasks   TaskService
-	TaskHub TaskHub
-	Secrets SecretsService
-	Logger  *slog.Logger
+	Addr             string
+	Token            string
+	API              *api.Server
+	Manager          Manager
+	MCPs             MCPRegistry
+	Skills           SkillsService
+	Usage            UsageService
+	Logs             LogStreamer
+	Doctor           Doctor
+	Updater          Updater
+	Library          LibraryService
+	Tasks            TaskService
+	TaskHub          TaskHub
+	Secrets          SecretsService
+	ProviderResolver ProviderResolver
+	Providers        ProviderCatalog
+	Logger           *slog.Logger
 }
 
 func New(opts Options) *Server {
 	s := &Server{
-		logger:   opts.Logger,
-		apiSrv:   opts.API,
-		manager:  opts.Manager,
-		mcps:     opts.MCPs,
-		skills:   opts.Skills,
-		usage:    opts.Usage,
-		logs:     opts.Logs,
-		doctor:   opts.Doctor,
-		updater:  opts.Updater,
-		library:  opts.Library,
-		tasks:    opts.Tasks,
-		taskHub:  opts.TaskHub,
-		secrets:  opts.Secrets,
-		token:    opts.Token,
-		addr:     opts.Addr,
-		originOK: "http://" + opts.Addr,
+		logger:    opts.Logger,
+		apiSrv:    opts.API,
+		manager:   opts.Manager,
+		mcps:      opts.MCPs,
+		skills:    opts.Skills,
+		usage:     opts.Usage,
+		logs:      opts.Logs,
+		doctor:    opts.Doctor,
+		updater:   opts.Updater,
+		library:   opts.Library,
+		tasks:     opts.Tasks,
+		taskHub:   opts.TaskHub,
+		secrets:   opts.Secrets,
+		resolve:   opts.ProviderResolver,
+		providers: opts.Providers,
+		token:     opts.Token,
+		addr:      opts.Addr,
+		originOK:  "http://" + opts.Addr,
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
@@ -222,6 +253,13 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w)
 		}
 		return
+	case path == "/v1/providers":
+		if method == http.MethodGet {
+			s.handleListProviders(w, r)
+			return
+		}
+		methodNotAllowed(w)
+		return
 	case path == "/v1/assembly-lines":
 		switch method {
 		case http.MethodGet:
@@ -352,6 +390,11 @@ func (s *Server) routeSessionItem(w http.ResponseWriter, r *http.Request, rest s
 		switch method {
 		case http.MethodGet:
 			s.handleGetSession(w, r, id)
+		case http.MethodPatch:
+			// ADR 0020 §2 / §4 — mid-session model switch lives here.
+			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
+				s.handleUpdateSession(w, r, id)
+			})
 		case http.MethodDelete:
 			s.requireOrigin(w, r, func(w http.ResponseWriter, r *http.Request) {
 				s.handleTerminateSession(w, r, id)

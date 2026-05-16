@@ -1074,6 +1074,37 @@ func (a *actor) renderedMCPs() []mcp.Entry {
 	return append([]mcp.Entry(nil), a.opts.ResolvedMCPs...)
 }
 
+// setModel swaps the runtime's model id mid-session (ADR 0020 §2).
+//
+// The daemon side of UpdateModel is responsible for validation against the
+// session's provider catalog; this method assumes the model has already
+// cleared that check and is correct for the session's provider. It updates
+// the in-actor SessionSummary so subsequent turn.start frames carry the
+// new model id, and forwards agentd.set_model to the shim. The control
+// frame is fire-and-forget — there is no dedicated runtime.set_model_ack;
+// per the api.md §4.3 entry, the next runtime.event (usage / assistant.*)
+// carrying the new model id is the implicit ack.
+//
+// The new SessionSummary is returned so callers can echo the canonical
+// value back to the user without a second snapshotSummary round-trip.
+func (a *actor) setModel(model string) proto.SessionSummary {
+	a.mu.Lock()
+	prev := a.summary.Model
+	a.summary.Model = model
+	a.summary.LastActivityAt = a.opts.Now()
+	if a.control != nil {
+		a.sendControlLocked(AgentdSetModel, mustJSON(map[string]any{
+			"model": model,
+		}))
+	}
+	out := a.summary
+	a.mu.Unlock()
+	a.opts.Logger.Info("session.model.swapped",
+		slog.String("from", prev),
+		slog.String("to", model))
+	return out
+}
+
 func (a *actor) sendGreet() {
 	entries := a.renderedMCPs()
 	render := mcp.Render(mcp.RenderInputs{
@@ -1091,6 +1122,15 @@ func (a *actor) sendGreet() {
 		"session_id": a.opts.ID,
 		"model":      a.summary.Model,
 		"mcps":       render.Configs,
+	}
+	// provider selects which driver the shim instantiates (claude vs codex —
+	// ADR 0020 §7). Always send when known so a daemon that has been
+	// upgraded can drive the new Codex driver immediately; the shim treats
+	// a missing field as "anthropic" for one release for backward
+	// compatibility with sessions started before the daemon upgrade
+	// (CODEX_PROVIDER_PLAN §1.3).
+	if a.summary.Provider != "" {
+		payload["provider"] = a.summary.Provider
 	}
 	// Pass the previously captured SDK session id so the shim resumes the
 	// same conversation (extending its existing JSONL) instead of forking

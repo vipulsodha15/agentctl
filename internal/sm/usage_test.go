@@ -52,7 +52,7 @@ func TestActorPersistsUsageOnRuntimeEvent(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	r, err := mgr.Create(ctx, CreateRequest{Name: "u"})
+	r, err := mgr.Create(ctx, CreateRequest{Name: "u", Provider: "anthropic"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestActorWithoutRecorderForwardsUsage(t *testing.T) {
 		SnapshotTimeout: 100 * time.Millisecond,
 	})
 	ctx := context.Background()
-	r, _ := mgr.Create(ctx, CreateRequest{Name: "u2"})
+	r, _ := mgr.Create(ctx, CreateRequest{Name: "u2", Provider: "anthropic"})
 	stream, _ := mgr.Attach(ctx, r.SessionID)
 	defer stream.Close()
 	mustEvent(t, stream, proto.EventSessionSnapshot)
