@@ -31,6 +31,11 @@ import base64
 from . import control, git as gitops, repos, runtime as rt
 from .watcher import RepoWatcher
 
+# Default provider when ``agentd.greet`` omits the field — preserves the
+# byte-for-byte behaviour the shim had pre-ADR-0020 for one release.
+# Older agentd builds didn't send ``provider``; new ones always do.
+DEFAULT_PROVIDER = rt.DEFAULT_PROVIDER
+
 
 SHIM_VERSION = "1.0.0-m2"
 SDK_VERSION = "0.1.80"
@@ -51,7 +56,10 @@ class Shim:
         self._control_addr = control_addr
         self._session_meta = session_meta
         self._client: Optional[control.ControlClient] = None
-        self._driver: Optional[rt.RuntimeDriver] = None
+        # Concrete driver type is provider-dependent (RuntimeDriver for
+        # Claude, CodexDriver for OpenAI). Tracked as Any so the
+        # dispatcher doesn't have to import every concrete class.
+        self._driver: Optional[Any] = None
         self._watcher: Optional[RepoWatcher] = None
         self._stopping = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
@@ -113,18 +121,28 @@ class Shim:
         }
         self._client.send(control.KIND_READY, ready)
 
-        self._driver = rt.RuntimeDriver(
-            rt.RuntimeConfig(
-                model=greet_data.get("model") or os.environ.get("AGENTCTL_MODEL", ""),
-                cwd="/work",
-                resume=self._sdk_session_id,
-                mcp_servers=_render_mcp_servers(greet_data.get("mcps")),
-                system_prompt=greet_data.get("system_prompt") or None,
-            ),
-            emit_event=self._emit_event,
-            emit_session_id=self._emit_session_id,
-            emit_message_record=self._emit_message_record,
-        )
+        # ADR 0020 §7: provider is set-once at session create and the shim
+        # picks its driver from the greet frame. Older agentd builds (one
+        # release back) didn't send the field; fall back to the historical
+        # Anthropic default so an in-place agentd upgrade doesn't strand
+        # already-running containers.
+        provider = (greet_data.get("provider") or DEFAULT_PROVIDER).strip().lower()
+        driver_options: dict[str, Any] = {
+            "model": greet_data.get("model") or os.environ.get("AGENTCTL_MODEL", ""),
+            "cwd": "/work",
+            "resume": self._sdk_session_id,
+            "system_prompt": greet_data.get("system_prompt") or None,
+            "emit_event": self._emit_event,
+            "emit_session_id": self._emit_session_id,
+            "emit_message_record": self._emit_message_record,
+        }
+        # MCP rendering is Claude-specific (the SDK consumes the dict the
+        # helper builds); pass it through only when the resolved provider
+        # is Anthropic so we don't leak provider-specific keys into the
+        # Codex driver's options dict.
+        if provider in ("anthropic", "claude"):
+            driver_options["mcp_servers"] = _render_mcp_servers(greet_data.get("mcps"))
+        self._driver = rt.get_driver(provider, driver_options)
         self._driver.start()
 
         self._watcher = RepoWatcher(
