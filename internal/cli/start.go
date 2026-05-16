@@ -65,6 +65,15 @@ func runStart(ctx context.Context, env *Env, args []string) int {
 		return ExitUsage
 	}
 
+	// Catch typos before the RPC: --provider claude / --provider gpt fail
+	// fast with the allowed set rather than rounding-tripping through the
+	// daemon to hit a less-targeted "not configured" error. Empty is OK —
+	// that's the "let the resolver pick" path per ADR 0020 §3.
+	if provider != "" && provider != secrets.ProviderAnthropic && provider != secrets.ProviderOpenAI {
+		fmt.Fprintf(env.Stderr, "start: invalid --provider %q (expected anthropic|openai)\n", provider)
+		return ExitUsage
+	}
+
 	cfg, _ := config.Load(env.Layout.ConfigFile)
 	c, err := cliclient.Dial(env.Layout.SocketFile, 3*time.Second)
 	if err != nil {
