@@ -69,12 +69,22 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, proto.ErrBadRequest, err.Error())
 		return
 	}
+	provider, model := req.Provider, req.Model
+	if s.resolve != nil {
+		var rerr error
+		provider, model, rerr = s.resolve(req.Provider, req.Model)
+		if rerr != nil {
+			writeError(w, http.StatusBadRequest, proto.ErrBadRequest, rerr.Error())
+			return
+		}
+	}
 	res, err := s.manager.Create(r.Context(), sm.CreateRequest{
 		Name:          req.Name,
 		MCPs:          req.MCPs,
 		ExcludeMCPs:   req.ExcludeMCPs,
 		Repos:         req.Repos,
-		Model:         req.Model,
+		Model:         model,
+		Provider:      provider,
 		MemLimitBytes: req.MemLimitBytes,
 		CPULimitCores: req.CPULimitCores,
 	})

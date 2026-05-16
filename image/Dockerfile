@@ -49,6 +49,15 @@ RUN python3 -m venv /opt/agentctl/venv \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
       watchdog
 
+# OpenAI Codex CLI — second agent runtime per ADR 0020 §1.6. Installed
+# globally so the `codex` binary lands on PATH for the `agent` user (uid
+# 1000) created below. `--omit=optional` and `npm cache clean --force`
+# keep the layer within ADR 0014's ~50–100MB delta budget.
+# As of 2026-05-16, @openai/codex 0.130.0 is the current release on npm.
+ARG CODEX_CLI_VERSION=0.130.0
+RUN npm install -g --omit=optional "@openai/codex@${CODEX_CLI_VERSION}" \
+ && npm cache clean --force
+
 COPY shim/ /opt/agentctl/shim/
 RUN /opt/agentctl/venv/bin/pip install --no-cache-dir -r /opt/agentctl/shim/requirements.txt
 

@@ -25,6 +25,11 @@ type Layout struct {
 	LastErrorLog    string
 	ClaudeCredsDir  string
 	ClaudeCredsFile string
+	// Codex (OpenAI) OAuth credentials. Mirror of the Claude pair —
+	// `codex login --device-auth` writes auth.json into CODEX_HOME, which
+	// the auth helper points at this directory. ADR 0020 §5.
+	CodexCredsDir  string
+	CodexCredsFile string
 }
 
 func From(home string) Layout {
@@ -35,6 +40,7 @@ func From(home string) Layout {
 	data := filepath.Join(home, ".local", "share", "agentctl")
 	state := filepath.Join(home, ".local", "state", "agentctl")
 	claudeCreds := filepath.Join(cfg, "claude")
+	codexCreds := filepath.Join(cfg, "codex")
 	return Layout{
 		Home:            home,
 		ConfigDir:       cfg,
@@ -55,6 +61,8 @@ func From(home string) Layout {
 		LastErrorLog:    filepath.Join(state, "last-error.log"),
 		ClaudeCredsDir:  claudeCreds,
 		ClaudeCredsFile: filepath.Join(claudeCreds, ".credentials.json"),
+		CodexCredsDir:   codexCreds,
+		CodexCredsFile:  filepath.Join(codexCreds, "auth.json"),
 	}
 }
 

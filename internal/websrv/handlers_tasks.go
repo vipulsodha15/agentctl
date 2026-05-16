@@ -90,6 +90,20 @@ func (s *Server) handlePutAgent(w http.ResponseWriter, r *http.Request, name str
 	if name != "" {
 		spec.Name = name
 	}
+	// If the agent pins a provider, gate the write on the daemon
+	// actually having credentials for it (ADR 0020 §9). The body is
+	// parsed once before PutAgent so the gate can inspect provider
+	// even when the YAML path is used. The empty case is OK — the
+	// resolver picks a provider at session-create time.
+	if specProvider := agentProviderHint(spec, body); specProvider != "" && s.providers != nil {
+		catalog := s.providers.Catalog()
+		info, known := catalog[specProvider]
+		if !known || !info.Enabled {
+			writeError(w, http.StatusBadRequest, "provider_not_enabled",
+				"provider "+specProvider+" not configured; run agentctl auth login --provider "+specProvider+" or agentctl init --"+specProvider+"-key")
+			return
+		}
+	}
 	saved, err := s.library.PutAgent(r.Context(), spec, body)
 	if err != nil {
 		if errors.Is(err, ttl.ErrValidation) {
@@ -104,6 +118,24 @@ func (s *Server) handlePutAgent(w http.ResponseWriter, r *http.Request, name str
 		return
 	}
 	writeJSON(w, http.StatusOK, saved)
+}
+
+// agentProviderHint pulls Provider from either the typed spec or the raw
+// YAML body, whichever was provided. The handler can't trust spec.Provider
+// alone because the JSON / YAML branches in handlePutAgent flip which one
+// holds the parsed data.
+func agentProviderHint(spec ttl.Agent, body []byte) string {
+	if spec.Provider != "" {
+		return spec.Provider
+	}
+	if len(body) == 0 {
+		return ""
+	}
+	parsed, err := ttl.ParseAgentYAML(body)
+	if err != nil {
+		return ""
+	}
+	return parsed.Provider
 }
 
 func (s *Server) handleRemoveAgent(w http.ResponseWriter, r *http.Request, name string) {

@@ -37,6 +37,13 @@ type UsageAggregator interface {
 	Range(ctx context.Context, start, end time.Time, sessionFilter string) (usage.RangeTotals, error)
 }
 
+// ProviderResolver resolves (provider, model) for a session-create request.
+// Wired by agentd to a closure over secrets + config + workspace state per
+// ADR 0020 §3. Optional: when nil, the request's Provider/Model are used
+// as-is (sm.Create rejects an empty Provider). Tests that don't care
+// about provider plumbing leave this nil and pass Provider explicitly.
+type ProviderResolver func(cliProvider, cliModel string) (provider, model string, err error)
+
 type Server struct {
 	socketPath    string
 	apiSrv        *api.Server
@@ -46,6 +53,7 @@ type Server struct {
 	logStream     SessionLogStreamer
 	containerLogs ContainerLogStreamer
 	usage         UsageAggregator
+	resolve       ProviderResolver
 	logger        *slog.Logger
 	listener      net.Listener
 	wg            sync.WaitGroup
@@ -54,15 +62,16 @@ type Server struct {
 }
 
 type Options struct {
-	SocketPath    string
-	API           *api.Server
-	Manager       sm.Manager
-	MCPs          mcp.Registry
-	Skills        skills.Manager
-	LogStream     SessionLogStreamer
-	ContainerLogs ContainerLogStreamer
-	Usage         UsageAggregator
-	Logger        *slog.Logger
+	SocketPath       string
+	API              *api.Server
+	Manager          sm.Manager
+	MCPs             mcp.Registry
+	Skills           skills.Manager
+	LogStream        SessionLogStreamer
+	ContainerLogs    ContainerLogStreamer
+	Usage            UsageAggregator
+	ProviderResolver ProviderResolver
+	Logger           *slog.Logger
 }
 
 func New(opts Options) *Server {
@@ -75,6 +84,7 @@ func New(opts Options) *Server {
 		logStream:     opts.LogStream,
 		containerLogs: opts.ContainerLogs,
 		usage:         opts.Usage,
+		resolve:       opts.ProviderResolver,
 		logger:        opts.Logger,
 		closing:       make(chan struct{}),
 	}
@@ -251,12 +261,22 @@ func (s *Server) handleCreateSession(cw *connWriter, frame proto.Frame) {
 		s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
 		return
 	}
+	provider, model := req.Provider, req.Model
+	if s.resolve != nil {
+		var err error
+		provider, model, err = s.resolve(req.Provider, req.Model)
+		if err != nil {
+			s.writeError(cw, frame.ID, proto.ErrBadRequest, err.Error())
+			return
+		}
+	}
 	res, err := s.manager.Create(context.Background(), sm.CreateRequest{
 		Name:          req.Name,
 		MCPs:          req.MCPs,
 		ExcludeMCPs:   req.ExcludeMCPs,
 		Repos:         req.Repos,
-		Model:         req.Model,
+		Model:         model,
+		Provider:      provider,
 		MemLimitBytes: req.MemLimitBytes,
 		CPULimitCores: req.CPULimitCores,
 	})

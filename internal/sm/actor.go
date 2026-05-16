@@ -1092,6 +1092,15 @@ func (a *actor) sendGreet() {
 		"model":      a.summary.Model,
 		"mcps":       render.Configs,
 	}
+	// provider selects which driver the shim instantiates (claude vs codex —
+	// ADR 0020 §7). Always send when known so a daemon that has been
+	// upgraded can drive the new Codex driver immediately; the shim treats
+	// a missing field as "anthropic" for one release for backward
+	// compatibility with sessions started before the daemon upgrade
+	// (CODEX_PROVIDER_PLAN §1.3).
+	if a.summary.Provider != "" {
+		payload["provider"] = a.summary.Provider
+	}
 	// Pass the previously captured SDK session id so the shim resumes the
 	// same conversation (extending its existing JSONL) instead of forking
 	// a fresh one after a daemon restart or container swap.
