@@ -7,6 +7,35 @@ talk to a single local daemon (`agentd`) that owns the database and
 container lifecycle, so you can detach from a session and reattach
 later without losing state.
 
+## Why agentctl
+
+- **Sandboxed by default.** Every session runs in its own Docker
+  container on its own bridge network with its own working volume.
+  The agent never touches your host filesystem outside the repo you
+  hand it, and one session can't see another. Stop the session and
+  the blast radius goes with it.
+- **You control the toolbox.** Skills and MCP servers are first-class
+  and explicit. You register MCP servers in a local registry and
+  attach them to a session by name; skills are folders you drop into
+  `~/.local/share/agentctl/custom-skills/` and edit in place. No
+  hidden tool surface, no "what is this agent allowed to do?"
+  guesswork.
+- **Curate narrow agents.** Instead of one omniscient agent, define
+  small, role-scoped agents (e.g. `bug-investigator`,
+  `bug-planner`, `bug-executor`) with their own system prompts, tool
+  allow-lists, and skill sets. Narrow agents stay on task and are
+  cheaper to reason about.
+- **Assembly-line workflows for tasks.** Chain those narrow agents
+  into a workflow (see `internal/ttl/builtins/workflows/bug.yaml`
+  for a worked example). A task moves through stages — investigate
+  → plan → execute → review — with each stage owned by the right
+  agent and the right tools.
+- **Explicit handoff between stages.** When one stage finishes, run
+  `agentctl task handoff <id>` (or click Handoff in the UI) to
+  advance the task to the next agent, carrying the prior stage's
+  output forward as context. You stay in the loop at every seam
+  instead of letting one agent drift end-to-end.
+
 ---
 
 ## Install
