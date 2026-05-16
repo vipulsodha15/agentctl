@@ -45,11 +45,12 @@ Concretely:
 ### 1. `provider` is a session-set-once, agent-optional field.
 
 - `sm.CreateRequest` gains `Provider string`. The `sessions` table gains
-  `provider TEXT NOT NULL DEFAULT 'anthropic'` (back-compat for existing
-  rows). It is written at session create and never mutated after.
+  `provider TEXT NOT NULL`. The session manager always writes it at
+  create; it is never mutated after.
 - `ttl.Agent` gains an optional `Provider string` (`provider:` in YAML).
-  Custom (user-authored) agents must set it; built-in agents leave it
-  unset and resolve dynamically at session-create time.
+  When unset, the resolver below picks one at session-create time —
+  this is what makes built-in agents portable across providers without
+  per-provider YAML.
 - The runtime constraint that the provider is immutable for a session's
   lifetime is enforced both at the API (`PATCH /api/sessions/<id>`
   rejects any `provider` field) and structurally — the shim's driver
@@ -83,7 +84,6 @@ stage), `(provider, model)` are resolved by one helper:
 ```
 provider := agent.provider
          OR cli.provider
-         OR inferFromModel(model)             // gpt-* → openai, claude-* → anthropic
          OR config.model.default_provider     // "openai" by default
 
 if provider not in secrets.EnabledProviders():
@@ -110,10 +110,9 @@ user has configured.
 
 ```toml
 [model]
-default_provider  = "openai"             # used when both providers are enabled
+default_provider  = "openai"             # tiebreak when multiple providers are enabled
 anthropic_default = "claude-sonnet-4-6"
 openai_default    = "gpt-5.5"            # placeholder; verify exact id at impl time
-default           = "claude-sonnet-4-6"  # legacy fallback (kept for back-compat)
 ```
 
 When only one provider is enabled, `default_provider` is ignored and the
@@ -144,22 +143,24 @@ modes belong to different credential lifecycles.
 `internal/paths/paths.go` adds `CodexCredsDir =
 ~/.config/agentctl/codex/` and `CodexCredsFile = .../auth.json`.
 
-A new one-shot login image `image/codex-auth.Dockerfile` (sibling of
-`image/auth.Dockerfile`) builds from `node:20-slim` with
-`@openai/codex` installed globally, runs `codex login --device-auth`
-inside, and points `CODEX_HOME=/creds` so `auth.json` lands in the
-host-bound `~/.config/agentctl/codex/`. Device-auth (print code + URL,
-user enters on host browser) is the Codex equivalent of Claude's
-paste-fallback flow and the right primitive for a no-callback-port
-container. The current Anthropic helper at `image/auth.Dockerfile`
-is left untouched.
+The existing `image/auth.Dockerfile` (node:20-slim, runs as uid 1000,
+writes to a host-bound `/creds`) gains `@openai/codex` alongside
+`@anthropic-ai/claude-code` and a `PROVIDER` build/run arg that selects
+which CLI's login flow to launch. For `anthropic` it runs the current
+`claude auth login` flow against `CLAUDE_CONFIG_DIR=/creds`; for
+`openai` it runs `codex login --device-auth` with `CODEX_HOME=/creds`
+so `auth.json` lands in the host-bound `~/.config/agentctl/codex/`.
+Device-auth (print code + URL, user enters on host browser) is the
+Codex equivalent of Claude's paste-fallback flow and the right
+primitive for a no-callback-port container. One image, one entrypoint,
+parametric per provider.
 
-`agentctl auth login` grows a `--provider {anthropic,openai}` flag
-(default `anthropic` for back-compat). `agentctl auth status` prints
-both providers' state side-by-side. `agentctl init` grows
-`--openai-key` / `--openai-base-url` / `--openai-auth-token` flags
-mirroring the Anthropic ones; validation hits `GET
-https://api.openai.com/v1/models` with `Authorization: Bearer <key>`.
+`agentctl auth login` grows a required `--provider {anthropic,openai}`
+flag. `agentctl auth status` prints both providers' state side-by-side.
+`agentctl init` grows `--openai-key` / `--openai-base-url` /
+`--openai-auth-token` flags mirroring the Anthropic ones; validation
+hits `GET https://api.openai.com/v1/models` with `Authorization: Bearer
+<key>`.
 
 ### 6. The container image installs both runtimes.
 
@@ -293,7 +294,7 @@ via the `/work/.claude` symlink.
   per-provider default to Opus or fork the agent into a custom one with
   an explicit `model:`.
 
-### Items to verify during phase 1 (not blocking the design)
+### Items to verify during the first phase (not blocking the design)
 
 - Exact `gpt-5.5` model id and OpenAI list pricing for the
   `[pricing.tables.models]` table. The OpenAI dev docs currently
@@ -301,7 +302,7 @@ via the `/work/.claude` symlink.
   `gpt-5.5` is the target. Easy to change in `config.toml` once
   confirmed.
 - That `--device-auth` ships stably in the pinned `@openai/codex`
-  version. If not, phase 3 (OAuth) falls back to "API-key only for
+  version. If not, phase 2 (OAuth) falls back to "API-key only for
   OpenAI" until the upstream stabilizes.
 - That `--sandbox workspace-write --ask-for-approval never` gives
   Claude-`bypassPermissions`-equivalent behaviour with no agent stalls
@@ -314,8 +315,9 @@ via the `/work/.claude` symlink.
 
 - **Infer provider purely from model prefix.** Simplest diff, brittle
   for gateway/custom-base-url cases and any future model whose name
-  doesn't fit the `gpt-*` / `claude-*` convention. Used as a fallback
-  in the resolution algorithm but not as the primary mechanism.
+  doesn't fit the `gpt-*` / `claude-*` convention. Rejected — explicit
+  `--provider` plus per-provider model defaults covers the common cases
+  without coupling the resolver to a model catalog.
 - **One unified `AuthMode` field.** Forces a single global "I'm in
   OAuth mode" or "I'm in API-key mode" toggle. Rejected because the
   common case is "Anthropic OAuth + OpenAI API key" — different
@@ -338,30 +340,27 @@ via the `/work/.claude` symlink.
 
 ## Phasing
 
-Each phase is shippable on its own.
+Three cuts, each shippable on its own.
 
-1. **Phase 1 — API-key path only.** Secrets + env injection +
-   `--openai-key` flag + doctor probe. Acceptance: a session runs
-   end-to-end against `https://api.openai.com` with an `OPENAI_API_KEY`
-   from `secrets.json`.
-2. **Phase 2 — Codex driver + image.** Install Codex CLI in the image,
-   land the Codex driver in the shim, plumb `provider` through session
-   creation. Acceptance: `agentctl start --provider openai --model
-   gpt-5.5` runs one full turn including a tool call.
-3. **Phase 3 — OAuth helper.** `codex-auth.Dockerfile`, `agentctl auth
-   login --provider openai`, OAuth bind-mount path. Acceptance: a full
-   subscription-billed session works after `auth login`, with no
-   `OPENAI_API_KEY` ever set.
-4. **Phase 4 — Mid-session model switch.** Control frame, CLI/web
-   surfaces, driver re-instantiate. Acceptance: switch `claude-sonnet`
-   → `claude-opus` mid-conversation; switch `gpt-5.5` → `gpt-5.3-codex`
+1. **Codex end-to-end with API keys.** Secrets + env injection +
+   `--openai-key` flag, Codex CLI in the image, Codex driver in the
+   shim, `provider` plumbed through session create, `EnabledProviders()`
+   + the resolution algorithm, built-in YAMLs drop their hardcoded
+   model, agent-create gating on the resolved provider set. Acceptance:
+   the built-in `bug-investigator` runs on either provider depending on
+   what the user has configured — no YAML edits required — and
+   completes one full turn including a tool call against
+   `https://api.openai.com` with `OPENAI_API_KEY` from `secrets.json`.
+2. **OAuth helper.** Parametric `image/auth.Dockerfile` with a
+   `PROVIDER` arg, `agentctl auth login --provider openai`, OAuth
+   bind-mount path. Acceptance: a full subscription-billed Codex
+   session works after `auth login`, with no `OPENAI_API_KEY` ever
+   set.
+3. **Mid-session model switch.** Control frame, CLI/web surfaces,
+   driver re-instantiate. Acceptance: switch `claude-sonnet` →
+   `claude-opus` mid-conversation; switch `gpt-5.5` → `gpt-5.3-codex`
    mid-conversation; usage rows are correctly tagged across the
    transition.
-5. **Phase 5 — Dynamic agent resolution + built-ins.**
-   `EnabledProviders()`, resolution algorithm, built-in YAML cleanup,
-   agent-create gating. Acceptance: built-in `bug-investigator` runs
-   on either provider depending on what the user has enabled, with no
-   YAML edits required by the user.
 
 ## References
 
