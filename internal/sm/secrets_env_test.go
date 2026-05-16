@@ -142,3 +142,74 @@ func TestWriteSecretsEnvOpenAIOAuthInjectsNothing(t *testing.T) {
 		t.Errorf("oauth mode must not export OPENAI_API_KEY; got:\n%s", got)
 	}
 }
+
+// TestWriteSecretsEnvOpenAICustomEndpoint covers the Phase 5 gateway
+// branch: OPENAI_BASE_URL + OPENAI_API_KEY (using the bearer token) are
+// injected, and the legacy OpenAI key is silenced even when it's also
+// set. ADR 0020 §5 / CODEX_PROVIDER_PLAN §5.2.
+func TestWriteSecretsEnvOpenAICustomEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		V:               1,
+		OpenAIAPIKey:    "sk-direct",
+		OpenAIBaseURL:   "https://gateway.example.com",
+		OpenAIAuthToken: "gw-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_oa_gw",
+		Provider:  secrets.ProviderOpenAI,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(envPath)
+	got := string(body)
+	if !strings.Contains(got, "OPENAI_BASE_URL=https://gateway.example.com\n") {
+		t.Errorf("expected OPENAI_BASE_URL in env file; got:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=gw-token\n") {
+		t.Errorf("custom-endpoint mode must inject the bearer token under OPENAI_API_KEY; got:\n%s", got)
+	}
+	// The direct OpenAI key field must NOT leak — the active credential
+	// is the gateway token, not the user's direct OpenAI key.
+	if strings.Contains(got, "OPENAI_API_KEY=sk-direct") {
+		t.Errorf("OpenAIAPIKey must not leak when custom endpoint is configured; got:\n%s", got)
+	}
+}
+
+// TestWriteSecretsEnvOpenAIOAuthPlusCustomEndpoint enforces the
+// precedence rule from CODEX_PROVIDER_PLAN §5.2: custom endpoint wins
+// over OAuth for the same provider. The container ends up with
+// OPENAI_BASE_URL + OPENAI_API_KEY (the gateway token), no OAuth
+// bind-mount-driven behaviour. `auth status` separately surfaces a
+// warning so the user knows the OAuth credentials are being shadowed.
+func TestWriteSecretsEnvOpenAIOAuthPlusCustomEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "secrets.json")
+	if err := secrets.Save(secretsPath, secrets.Secrets{
+		V:               1,
+		OpenAIAuthMode:  secrets.AuthModeOAuth,
+		OpenAIBaseURL:   "https://gateway.example.com",
+		OpenAIAuthToken: "gw-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "secrets.env")
+	if err := writeSecretsEnv(envPath, secretsPath, secretsEnvInputs{
+		SessionID: "sess_oa_oauth_plus_gw",
+		Provider:  secrets.ProviderOpenAI,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(envPath)
+	got := string(body)
+	if !strings.Contains(got, "OPENAI_BASE_URL=") {
+		t.Errorf("custom endpoint must win over OAuth; got:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=gw-token\n") {
+		t.Errorf("expected gateway token under OPENAI_API_KEY; got:\n%s", got)
+	}
+}
