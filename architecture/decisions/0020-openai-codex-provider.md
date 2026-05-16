@@ -58,14 +58,25 @@ Concretely:
 
 ### 2. The *model* becomes mutable post-create.
 
+Surfaces ship in phase 4 (see §Phasing); the design is fixed here so
+the wire/schema work in phases 1–2 doesn't need to be reopened.
+
 - `sessions.model` becomes writable. ADR 0003's "frozen for the
   session's lifetime" rule is reversed; in exchange, the provider takes
   over as the set-once field, which is what 0003 was actually trying to
   protect (immutable runtime identity for the duration of a
   conversation).
-- New CLI: `agentctl session set-model <session-id> <new-model>`.
-- New web UI: a model dropdown in the session header, filtered to the
-  models available under the session's provider.
+- **Primary UX:** a model dropdown in the session header (web),
+  filtered to the models available under the session's provider — this
+  is where the user is already looking at the current model and where
+  the change feels in-place rather than a new command to remember.
+- **Secondary UX:** `/model <name>` inside the chat input, intercepted
+  by the renderer before the message reaches the driver. Fuzzy match
+  against the provider's enabled models (e.g. `/model opus` resolves to
+  the current Anthropic Opus id).
+- **Scripting surface:** `agentctl session set-model <session-id>
+  <new-model>` exists for automation but is not surfaced in `--help`
+  examples — users discover the dropdown and the slash command first.
 - New control frame `agentd.set_model { model }` carries the change to
   the shim. The driver re-instantiates its underlying client with the
   new model, preserving `resume=<sdk_session_id>` (Claude) or simply
@@ -84,7 +95,9 @@ stage), `(provider, model)` are resolved by one helper:
 ```
 provider := agent.provider
          OR cli.provider
-         OR config.model.default_provider     // "openai" by default
+         OR workspace.last_used_provider      // sticky per workspace
+         OR sole_enabled_provider              // when exactly one is configured
+         OR fail("multiple providers enabled; pass --provider or pick one in the UI")
 
 if provider not in secrets.EnabledProviders():
     fail("provider %s not configured; run agentctl auth login --provider %s
@@ -100,24 +113,32 @@ a custom-endpoint+token pair, OR an OAuth `auth.json` /
 `.credentials.json` present and non-empty. The check lives once in
 `secrets.EnabledProviders()`.
 
+The `workspace.last_used_provider` slot is persisted in the workspace's
+session store (not `config.toml`) and updated every time a session is
+created. New users have one provider and never see the choice; power
+users with both providers configured get sticky behavior tied to the
+work they were last doing. See §UX principles for why this replaces a
+config-file tiebreak.
+
 This makes built-in agents portable: the shipped `bug-investigator` /
 `bug-planner` / `bug-executor` YAMLs drop their hardcoded
 `model: claude-opus-4-7` and don't set `provider:`. They inherit per-
 provider defaults, so the same built-in runs on whichever provider the
 user has configured.
 
-### 4. `config.toml` gains per-provider defaults and a tiebreak.
+### 4. `config.toml` gains per-provider model defaults.
 
 ```toml
 [model]
-default_provider  = "openai"             # tiebreak when multiple providers are enabled
 anthropic_default = "claude-sonnet-4-6"
 openai_default    = "gpt-5.5"            # placeholder; verify exact id at impl time
 ```
 
-When only one provider is enabled, `default_provider` is ignored and the
-enabled one wins. When zero are enabled, session create fails with a
-hint pointing at `agentctl init` / `agentctl auth login`.
+No `default_provider` tiebreak. Provider ambiguity is resolved
+adaptively (sticky last-used-provider, see §3 and §UX principles) rather
+than via a config knob users won't think to set. When zero providers are
+enabled, session create fails with a hint pointing at `agentctl init` /
+`agentctl auth login`.
 
 ### 5. Secrets, paths, and auth helper mirror the Anthropic structure.
 
@@ -128,8 +149,8 @@ type Secrets struct {
     // existing Anthropic fields …
     OpenAIAPIKey    string
     OpenAIAuthMode  string   // "api_key" | "oauth"
-    OpenAIBaseURL   string   // optional, openai-compatible gateways
-    OpenAIAuthToken string   // bearer for custom endpoint
+    OpenAIBaseURL   string   // optional, openai-compatible gateways — phase 5
+    OpenAIAuthToken string   // bearer for custom endpoint — phase 5
 }
 
 func (s Secrets) ResolvedOpenAIAuthMode() string
@@ -139,6 +160,12 @@ func (s Secrets) EnabledProviders() []string
 The Anthropic and OpenAI modes are deliberately *not* unified: users
 will commonly run Anthropic OAuth alongside an OpenAI API key, and the
 modes belong to different credential lifecycles.
+
+`OpenAIBaseURL` / `OpenAIAuthToken` (and the matching
+`--openai-base-url` / `--openai-auth-token` flags below) ship in phase
+5 with the rest of the gateway story. Phases 1–2 leave those fields
+zero and target `api.openai.com` directly. The struct shape lands in
+phase 1 so the gateway phase doesn't require a secrets migration.
 
 `internal/paths/paths.go` adds `CodexCredsDir =
 ~/.config/agentctl/codex/` and `CodexCredsFile = .../auth.json`.
@@ -233,10 +260,20 @@ interface without touching agentd.
   Target: "/home/agent/.codex"}` and `Env: ["CODEX_HOME=/home/agent/.codex"]`.
 
 The existing `/home/agent` tmpfs in `manager.go` (mode 0700, uid=1000)
-collides with the bind-mount strategy. Cleanest fix: drop the tmpfs in
-favour of letting `/home/agent` come from the session volume. This also
-gives Codex sessions the same idle-resume persistence Claude already has
-via the `/work/.claude` symlink.
+collides with the bind-mount strategy. Two viable shapes:
+
+- **Default — symlink Codex creds onto the tmpfs.** Mirror the existing
+  Claude pattern: keep the `/home/agent` tmpfs, bind-mount the host
+  creds dir at a known subpath of the session volume, and symlink
+  `~/.codex/` to it the same way the entrypoint already wires
+  `/work/.claude` → `/home/agent/.claude`. Preserves the tmpfs's
+  `mode=0700,uid=1000` security properties for both providers; smaller
+  change; reuses a pattern that has already shipped.
+- **Fallback — drop the tmpfs and let `/home/agent` come from the
+  session volume.** Larger blast radius (changes existing Claude
+  sessions too), but gives `/home/agent` durable backing without
+  symlinks. Adopt this only if a concrete blocker for the symlink
+  approach surfaces during implementation.
 
 ### 9. Agent-creation UIs gate on enabled providers.
 
@@ -247,8 +284,17 @@ via the `/work/.claude` symlink.
     "openai":    {"enabled": false, "default_model": "gpt-5.5",           "models": [...]}
   }
   ```
+  The `models` array is read directly from `[pricing.tables.models]` in
+  the active pricing table (already version-keyed per ADR 0003 / data-
+  model §5). Adding a new model = adding a pricing row + bumping the
+  image; no separate catalog to keep in sync. The response shape
+  intentionally leaves room for a future `recommended` field per
+  provider (e.g. `{ "investigator": "claude-opus-4-7", "executor":
+  "claude-sonnet-4-6" }`) that phase 3's orchestration UX will populate
+  — adding it later is a non-breaking change.
 - Web "Create agent" form filters the provider dropdown to enabled
-  providers; if only one is enabled it's selected and locked.
+  providers; if only one is enabled the provider control is hidden
+  entirely (see §UX principles — provider invisibility).
 - CLI agent-write paths and the web `POST /api/agents` reject `provider`
   values that aren't enabled with the same hint message as session
   create.
@@ -338,29 +384,95 @@ via the `/work/.claude` symlink.
   switch costs a container spawn and a fresh JSONL. The driver-level
   re-instantiate is cheap and preserves history.
 
+## UX principles
+
+These rules cross-cut the decision sections above and shape the
+surfaces users actually touch. They apply across all phases.
+
+- **Provider invisibility when only one is enabled.** The word
+  "provider" never appears in CLI help, prompts, or the web UI while a
+  user has exactly one provider configured — the existing Anthropic-
+  only workflow is byte-for-byte unchanged after upgrade. The moment a
+  second provider is configured, provider chips, dropdowns, and the
+  `--provider` flag appear everywhere they're relevant. The cost of
+  adding the second provider should be visible; the cost of having
+  configured only one should be zero.
+- **Adaptive default, not config.** Provider ambiguity (two providers
+  enabled, nothing in the call site says which) is resolved by sticky
+  last-used-provider per workspace — not a `default_provider` config
+  knob. New users have one provider and never see the choice; power
+  users get behavior tied to the work they were last doing. Override
+  is always `--provider` or the chip in the UI; no one edits TOML for
+  this.
+- **Multi-surface model switch with the web header as primary.** The
+  in-session model dropdown is the affordance users will reach for —
+  it's where their attention already is. `/model <name>` inside the
+  chat input is the keyboard-driven secondary. The CLI
+  `agentctl session set-model` subcommand exists for scripting and is
+  not surfaced in `--help` examples. Discoverability follows where
+  users actually look.
+- **One source for the model catalog.** The `models` array under
+  `GET /api/providers` is read directly from
+  `[pricing.tables.models]` (already version-keyed). Adding a model =
+  adding a pricing row + bumping the image. No parallel catalog file
+  to keep in sync, no hardcoded list in the daemon.
+- **Orchestration is the destination, not provider count.** The
+  headline reading of this ADR is not "agentctl now supports OpenAI" —
+  it's "agentctl orchestrates agents across providers." Phasing (next
+  section) reflects that: the mixed-provider assembly-line UX ships
+  before the mid-session model switch, because the former is what
+  earns the "orchestrator" label.
+
 ## Phasing
 
-Three cuts, each shippable on its own.
+Five cuts, each shippable on its own. Order is chosen so each phase
+delivers a coherent, user-visible step toward the agent-orchestrator
+end state.
 
 1. **Codex end-to-end with API keys.** Secrets + env injection +
    `--openai-key` flag, Codex CLI in the image, Codex driver in the
    shim, `provider` plumbed through session create, `EnabledProviders()`
    + the resolution algorithm, built-in YAMLs drop their hardcoded
-   model, agent-create gating on the resolved provider set. Acceptance:
-   the built-in `bug-investigator` runs on either provider depending on
-   what the user has configured — no YAML edits required — and
-   completes one full turn including a tool call against
-   `https://api.openai.com` with `OPENAI_API_KEY` from `secrets.json`.
-2. **OAuth helper.** Parametric `image/auth.Dockerfile` with a
-   `PROVIDER` arg, `agentctl auth login --provider openai`, OAuth
-   bind-mount path. Acceptance: a full subscription-billed Codex
-   session works after `auth login`, with no `OPENAI_API_KEY` ever
-   set.
-3. **Mid-session model switch.** Control frame, CLI/web surfaces,
-   driver re-instantiate. Acceptance: switch `claude-sonnet` →
-   `claude-opus` mid-conversation; switch `gpt-5.5` → `gpt-5.3-codex`
-   mid-conversation; usage rows are correctly tagged across the
-   transition.
+   model, agent-create gating on the resolved provider set. The
+   `OpenAIBaseURL` / `OpenAIAuthToken` fields land in the Secrets
+   struct (so phase 5 doesn't need a migration) but are not yet
+   surfaced via flags. Acceptance: the built-in `bug-investigator`
+   runs on either provider depending on what the user has configured —
+   no YAML edits required — and completes one full turn including a
+   tool call against `https://api.openai.com` with `OPENAI_API_KEY`
+   from `secrets.json`.
+2. **OAuth helper for Codex.** Parametric `image/auth.Dockerfile` with
+   a `PROVIDER` arg, `agentctl auth login --provider openai`, OAuth
+   bind-mount path (preferring the symlink shape from §8 unless
+   blocked). Acceptance: a full subscription-billed Codex session
+   works after `auth login`, with no `OPENAI_API_KEY` ever set.
+3. **Orchestration as the headline.** Ship at least one built-in
+   assembly line that explicitly mixes providers (e.g. investigator on
+   Claude, executor on Codex), plus the run-view surface that shows
+   each stage's provider+model as a first-class visual rather than
+   buried metadata. Docs and the `agentctl start --line` UX get a
+   pass. The infra is already there (`tm.SessionRuntime` spawns a
+   fresh container per stage); this phase is mostly built-in YAMLs,
+   render polish, and documentation. Acceptance: a built-in mixed-
+   provider line completes a bug-fix end-to-end with correct
+   per-stage usage attribution, and the run view makes the
+   provider/model of each stage obvious without drilling in.
+4. **Mid-session model switch.** Control frame, driver re-instantiate,
+   web header dropdown (primary), `/model` slash command (secondary),
+   `agentctl session set-model` (scripting). Acceptance: switch
+   `claude-sonnet` → `claude-opus` mid-conversation; switch `gpt-5.5`
+   → `gpt-5.3-codex` mid-conversation; usage rows are correctly tagged
+   across the transition; resume from idle continues to work on both
+   sides of a switch.
+5. **Custom endpoints / gateways.** Surface `OpenAIBaseURL` and
+   `OpenAIAuthToken` via `--openai-base-url` / `--openai-auth-token`
+   on `agentctl init` (mirroring the existing Anthropic flags) and
+   wire `writeSecretsEnv` to inject them when set. Validation in
+   `init` accommodates the gateway case (best-effort `GET /v1/models`
+   against the custom base URL; tolerate gateways that don't expose
+   it). Acceptance: a Codex session against an OpenAI-compatible
+   gateway (Azure OpenAI, vLLM, or similar) completes one full turn
+   with no traffic to `api.openai.com`.
 
 ## References
 
