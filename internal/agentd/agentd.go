@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -168,20 +169,28 @@ func Run(ctx context.Context, opts Options) error {
 		// requested model against this catalog before dispatching the
 		// agentd.set_model frame. The closure re-reads config.toml on each
 		// call so users editing [pricing.tables.models] don't have to
-		// restart agentd. The flat-union shape matches sm.ProviderCatalog;
-		// per-provider scoping (cross-provider rejection) is tracked in the
-		// TODO at internal/sm/provider_catalog.go and will tighten once the
-		// catalog is plumbed with the session's provider.
+		// restart agentd. Models are partitioned by name prefix
+		// (`claude-*` → anthropic, `gpt-*` → openai) so cross-provider
+		// switches are rejected per ADR 0020 §1 — the session's immutable
+		// provider field picks which list HasModel validates against.
 		ProviderCatalog: func() sm.ProviderCatalog {
 			c, err := config.Load(configPath)
 			if err != nil {
 				return sm.ProviderCatalog{}
 			}
-			names := make([]string, 0, len(c.Pricing.Tables.Models))
-			for name := range c.Pricing.Tables.Models {
-				names = append(names, name)
+			byProv := map[string][]string{
+				secrets.ProviderAnthropic: {},
+				secrets.ProviderOpenAI:    {},
 			}
-			return sm.ProviderCatalog{Models: names}
+			for name := range c.Pricing.Tables.Models {
+				switch {
+				case strings.HasPrefix(name, "claude-"):
+					byProv[secrets.ProviderAnthropic] = append(byProv[secrets.ProviderAnthropic], name)
+				case strings.HasPrefix(name, "gpt-"):
+					byProv[secrets.ProviderOpenAI] = append(byProv[secrets.ProviderOpenAI], name)
+				}
+			}
+			return sm.ProviderCatalog{ModelsByProvider: byProv}
 		},
 	}
 	if cmAdapt != nil {

@@ -11,12 +11,19 @@ import (
 
 // newCatalogManager builds a manager wired with a fixed provider catalog
 // so UpdateModel's validation step has something to reject against. Mirrors
-// newTestManager but with the catalog closure set.
-func newCatalogManager(t *testing.T, models []string) (Manager, *fakeControl) {
+// newTestManager but with the catalog closure set. The variadic shape lets
+// callers pass per-provider model lists; the common single-provider case is
+// the first map entry.
+func newCatalogManager(t *testing.T, modelsByProvider map[string][]string) (Manager, *fakeControl) {
 	t.Helper()
 	dir := t.TempDir()
 	fc := newFakeControl()
-	cat := ProviderCatalog{Models: append([]string(nil), models...)}
+	// Deep-copy so the closure sees a stable snapshot even if callers mutate.
+	snap := make(map[string][]string, len(modelsByProvider))
+	for p, models := range modelsByProvider {
+		snap[p] = append([]string(nil), models...)
+	}
+	cat := ProviderCatalog{ModelsByProvider: snap}
 	mgr := New(Options{
 		SessionsDir:     dir,
 		Hub:             fan.NewHub(),
@@ -33,9 +40,8 @@ func newCatalogManager(t *testing.T, models []string) (Manager, *fakeControl) {
 // catalog-known model on purpose: UpdateModel must rely on the catalog's
 // allowlist (the create-side validation is separate per ADR 0003).
 func TestUpdateModelValidatesAgainstCatalog(t *testing.T) {
-	mgr, fc := newCatalogManager(t, []string{
-		"claude-sonnet-4-6",
-		"claude-opus-4-7",
+	mgr, fc := newCatalogManager(t, map[string][]string{
+		"anthropic": {"claude-sonnet-4-6", "claude-opus-4-7"},
 	})
 	ctx := context.Background()
 	r, err := mgr.Create(ctx, CreateRequest{Name: "m", Provider: "anthropic"})
@@ -74,7 +80,9 @@ func TestUpdateModelValidatesAgainstCatalog(t *testing.T) {
 // dispatches agentd.set_model on the control channel carrying the new
 // model id — the shim relies on that frame to swap its driver client.
 func TestUpdateModelSendsControlFrame(t *testing.T) {
-	mgr, fc := newCatalogManager(t, []string{"claude-sonnet-4-6", "claude-opus-4-7"})
+	mgr, fc := newCatalogManager(t, map[string][]string{
+		"anthropic": {"claude-sonnet-4-6", "claude-opus-4-7"},
+	})
 	ctx := context.Background()
 	r, err := mgr.Create(ctx, CreateRequest{Name: "ctrl", Provider: "anthropic"})
 	if err != nil {
@@ -95,7 +103,9 @@ func TestUpdateModelSendsControlFrame(t *testing.T) {
 // control channel — repeatedly setting the same model is a UX-level idempotent
 // (the /model command echoes "already on …" rather than burning a frame).
 func TestUpdateModelNoOpWhenUnchanged(t *testing.T) {
-	mgr, fc := newCatalogManager(t, []string{"claude-sonnet-4-6", "claude-opus-4-7"})
+	mgr, fc := newCatalogManager(t, map[string][]string{
+		"anthropic": {"claude-sonnet-4-6", "claude-opus-4-7"},
+	})
 	ctx := context.Background()
 	r, err := mgr.Create(ctx, CreateRequest{Name: "noop", Provider: "anthropic"})
 	if err != nil {
@@ -164,17 +174,58 @@ func drainFiltered(c *fakeConn) {
 }
 
 // TestProviderCatalogHasModel doubles as a sanity check on the catalog's
-// empty-string handling so the validation contract is explicit.
+// empty-string handling and per-provider scoping so the validation contract
+// is explicit.
 func TestProviderCatalogHasModel(t *testing.T) {
-	cat := ProviderCatalog{Models: []string{"claude-sonnet-4-6"}}
-	if !cat.HasModel("claude-sonnet-4-6") {
-		t.Error("expected catalog to recognize claude-sonnet-4-6")
+	cat := ProviderCatalog{ModelsByProvider: map[string][]string{
+		"anthropic": {"claude-sonnet-4-6"},
+		"openai":    {"gpt-5.5"},
+	}}
+	if !cat.HasModel("anthropic", "claude-sonnet-4-6") {
+		t.Error("expected catalog to recognize claude-sonnet-4-6 under anthropic")
 	}
-	if cat.HasModel("") {
+	if cat.HasModel("anthropic", "gpt-5.5") {
+		t.Error("cross-provider model (gpt-5.5 under anthropic) must not validate")
+	}
+	if cat.HasModel("openai", "claude-sonnet-4-6") {
+		t.Error("cross-provider model (claude-sonnet-4-6 under openai) must not validate")
+	}
+	if cat.HasModel("", "claude-sonnet-4-6") {
+		t.Error("empty provider must never validate")
+	}
+	if cat.HasModel("anthropic", "") {
 		t.Error("empty model id must never validate")
 	}
-	if cat.HasModel("claude-opus-4-7") {
+	if cat.HasModel("anthropic", "claude-opus-4-7") {
 		t.Error("unknown model id must not validate")
+	}
+	if cat.HasModel("unknown-provider", "claude-sonnet-4-6") {
+		t.Error("unknown provider must not validate any model")
+	}
+}
+
+// TestUpdateModelRejectsCrossProviderSwitch enforces ADR 0020 §1: the
+// session's immutable `provider` field constrains which models are valid
+// for UpdateModel. A Claude session must NOT be switchable to a GPT model
+// even if both providers are configured and the GPT model is in the
+// catalog under its own provider.
+func TestUpdateModelRejectsCrossProviderSwitch(t *testing.T) {
+	mgr, fc := newCatalogManager(t, map[string][]string{
+		"anthropic": {"claude-sonnet-4-6", "claude-opus-4-7"},
+		"openai":    {"gpt-5.5"},
+	})
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "cross", Provider: "anthropic"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_ = fc.attach(t, r.SessionID, mgr)
+
+	// gpt-5.5 is a real, catalog-known model — but not for this session's
+	// provider. The rejection must come from the provider scoping, not
+	// from "model not in catalog at all."
+	if _, err := mgr.UpdateModel(ctx, r.SessionID, "gpt-5.5"); !errors.Is(err, ErrModelInvalid) {
+		t.Fatalf("expected ErrModelInvalid for cross-provider switch, got %v", err)
 	}
 }
 

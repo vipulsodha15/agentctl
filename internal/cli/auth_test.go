@@ -242,6 +242,31 @@ func TestRunAuthStatusSingleProviderUnchanged(t *testing.T) {
 	}
 }
 
+// TestRunAuthStatusOpenAIOnlyShowsOpenAILabel covers the case where the
+// only configured provider is OpenAI. Provider-invisibility means we stay
+// on the single-line shape, but the label has to reflect the actual
+// provider — printing "anthropic auth mode: …" when no Anthropic creds
+// exist would mislead the user and break the run-init hint.
+func TestRunAuthStatusOpenAIOnlyShowsOpenAILabel(t *testing.T) {
+	env, stdout, _ := newAuthTestEnv(t)
+	if err := secrets.Save(env.Layout.SecretsFile, secrets.Secrets{
+		OpenAIAPIKey: "sk-openai",
+	}); err != nil {
+		t.Fatalf("save secrets: %v", err)
+	}
+	code := runAuthStatus(env)
+	if code != ExitOK {
+		t.Fatalf("runAuthStatus: code=%d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "openai auth mode") {
+		t.Errorf("expected openai-shaped single-line output; got:\n%s", out)
+	}
+	if strings.Contains(out, "anthropic auth mode") {
+		t.Errorf("openai-only install must not surface anthropic label; got:\n%s", out)
+	}
+}
+
 // TestRunAuthStatusTwoProvidersTable verifies the side-by-side table
 // surface that fires once both providers are configured (per plan §2.2).
 // Each row leads with the provider id so callers can grep one out.

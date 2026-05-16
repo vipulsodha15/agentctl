@@ -29,16 +29,17 @@ const (
 // (and sm.Create rejects an empty Provider).
 type ProviderResolver func(cliProvider, cliModel string) (provider, model string, err error)
 
-// ProviderCatalog answers GET /api/providers. Returns the catalog the web
+// ProviderCatalog answers GET /v1/providers. Returns the catalog the web
 // SPA filters its session-/agent-create dropdowns on. Sourced from
 // secrets.EnabledProviders + config.toml [model] / [pricing.tables.models]
 // (single source of truth — no parallel catalog file, ADR 0020 §UX
-// principles).
+// principles). The path lives under /v1/ to match the rest of the daemon
+// API; the ADR's §9 informally writes /api/providers.
 type ProviderCatalog interface {
 	Catalog() ProvidersResponse
 }
 
-// ProvidersResponse is the body of GET /api/providers. Shape per ADR 0020 §9.
+// ProvidersResponse is the body of GET /v1/providers. Shape per ADR 0020 §9.
 type ProvidersResponse map[string]ProviderInfo
 
 type ProviderInfo struct {
@@ -278,13 +279,6 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 		default:
 			methodNotAllowed(w)
 		}
-		return
-	case path == "/v1/providers":
-		if method == http.MethodGet {
-			s.handleListProviders(w, r)
-			return
-		}
-		methodNotAllowed(w)
 		return
 	}
 

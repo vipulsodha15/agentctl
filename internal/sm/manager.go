@@ -970,16 +970,16 @@ func (m *manager) UpdateModel(ctx context.Context, sessionID, model string) (pro
 	if a == nil {
 		return proto.SessionSummary{}, ErrSessionNotFound
 	}
+	current := a.snapshotSummary()
 	if m.opts.ProviderCatalog != nil {
 		cat := m.opts.ProviderCatalog()
-		if !cat.HasModel(model) {
-			return proto.SessionSummary{}, fmt.Errorf("%w: %q", ErrModelInvalid, model)
+		if !cat.HasModel(current.Provider, model) {
+			return proto.SessionSummary{}, fmt.Errorf("%w: %q for provider %q", ErrModelInvalid, model, current.Provider)
 		}
 	} else if model == "" {
 		// No catalog wired (tests / minimal setups) — still reject empty.
 		return proto.SessionSummary{}, fmt.Errorf("%w: empty model id", ErrModelInvalid)
 	}
-	current := a.snapshotSummary()
 	if current.Model == model {
 		// No-op: surface unchanged summary so the caller can echo without
 		// triggering a control-channel roundtrip the shim can't ack.

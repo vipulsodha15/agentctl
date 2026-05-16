@@ -83,25 +83,56 @@ func runAuthStatus(env *Env) int {
 	})
 
 	// Provider-invisibility: when 0 or 1 providers are configured, keep the
-	// historical single-line Anthropic-only output unchanged (ADR 0020
-	// §UX principles). Only when both providers are configured do we
-	// switch to the side-by-side table.
+	// historical single-line shape unchanged (ADR 0020 §UX principles).
+	// The output is labelled with whichever provider is actually enabled —
+	// historically Anthropic was the only option, but a fresh install of
+	// just OpenAI must print openai labels, not anthropic ones. Zero-
+	// enabled defaults to anthropic so the run-init hint is correctly
+	// anthropic-shaped (the historical first-run experience).
 	if len(enabled) <= 1 {
-		mode := sec.ResolvedAuthMode()
-		fmt.Fprintf(env.Stdout, "anthropic auth mode: %s\n", mode)
-		switch mode {
-		case secrets.AuthModeOAuth:
-			credFile := env.Layout.ClaudeCredsFile
-			if info, statErr := os.Stat(credFile); statErr == nil && info.Size() > 0 {
-				fmt.Fprintf(env.Stdout, "credentials file:    %s\n", credFile)
-			} else {
-				fmt.Fprintf(env.Stdout, "credentials file:    %s (missing — run `agentctl auth login`)\n", credFile)
+		p := secrets.ProviderAnthropic
+		if len(enabled) == 1 {
+			p = enabled[0]
+		}
+		switch p {
+		case secrets.ProviderOpenAI:
+			mode := sec.ResolvedOpenAIAuthMode()
+			fmt.Fprintf(env.Stdout, "openai auth mode:    %s\n", mode)
+			switch mode {
+			case secrets.AuthModeOAuth:
+				credFile := env.Layout.CodexCredsFile
+				if info, statErr := os.Stat(credFile); statErr == nil && info.Size() > 0 {
+					fmt.Fprintf(env.Stdout, "credentials file:    %s\n", credFile)
+				} else {
+					fmt.Fprintf(env.Stdout, "credentials file:    %s (missing — run `agentctl auth login --provider openai`)\n", credFile)
+				}
+			case secrets.AuthModeAPIKey:
+				switch {
+				case sec.OpenAIBaseURL != "" && sec.OpenAIAuthToken != "":
+					fmt.Fprintf(env.Stdout, "openai endpoint:     %s (OPENAI_AUTH_TOKEN set)\n", sec.OpenAIBaseURL)
+				case sec.OpenAIAPIKey != "":
+					fmt.Fprintln(env.Stdout, "openai api key:      set (run `agentctl init --reset-token openai` to replace)")
+				default:
+					fmt.Fprintln(env.Stdout, "openai api key:      NOT set (run `agentctl init` or `agentctl auth login --provider openai`)")
+				}
 			}
-		case secrets.AuthModeAPIKey:
-			if sec.AnthropicAPIKey != "" {
-				fmt.Fprintln(env.Stdout, "anthropic api key:   set (run `agentctl init --reset-token anthropic` to replace)")
-			} else {
-				fmt.Fprintln(env.Stdout, "anthropic api key:   NOT set (run `agentctl init` or `agentctl auth login`)")
+		default:
+			mode := sec.ResolvedAuthMode()
+			fmt.Fprintf(env.Stdout, "anthropic auth mode: %s\n", mode)
+			switch mode {
+			case secrets.AuthModeOAuth:
+				credFile := env.Layout.ClaudeCredsFile
+				if info, statErr := os.Stat(credFile); statErr == nil && info.Size() > 0 {
+					fmt.Fprintf(env.Stdout, "credentials file:    %s\n", credFile)
+				} else {
+					fmt.Fprintf(env.Stdout, "credentials file:    %s (missing — run `agentctl auth login`)\n", credFile)
+				}
+			case secrets.AuthModeAPIKey:
+				if sec.AnthropicAPIKey != "" {
+					fmt.Fprintln(env.Stdout, "anthropic api key:   set (run `agentctl init --reset-token anthropic` to replace)")
+				} else {
+					fmt.Fprintln(env.Stdout, "anthropic api key:   NOT set (run `agentctl init` or `agentctl auth login`)")
+				}
 			}
 		}
 		return ExitOK
