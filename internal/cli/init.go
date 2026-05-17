@@ -218,13 +218,16 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 		return wrapInit(ExitEnvironment, err)
 	}
 
-	if !f.noImportSkills {
+	anthropicOn := anthropicEnabled(sec, pendingOAuth)
+	openaiOn := openaiEnabled(sec, pendingOAuth)
+
+	if !f.noImportSkills && (anthropicOn || f.claudePath != "" || f.importSkills) {
 		if err := importClaudeSkillsAtInit(env, layout, f); err != nil {
 			fmt.Fprintf(env.Stderr, "skills import: %v\n", err)
 		}
 	}
 
-	if !f.noImportCodexSkills {
+	if !f.noImportCodexSkills && (openaiOn || f.codexPath != "" || f.importCodexSkills) {
 		if err := importCodexSkillsAtInit(env, layout, f); err != nil {
 			fmt.Fprintf(env.Stderr, "codex skills import: %v\n", err)
 		}
@@ -466,6 +469,34 @@ func hasOpenAICreds(s secrets.Secrets) bool {
 	return s.OpenAIAPIKey != "" || s.OpenAIAuthToken != ""
 }
 
+// anthropicEnabled reports whether the user has Anthropic configured in
+// any auth mode, including OAuth selections from this init run that have
+// not yet completed `agentctl auth login`.
+func anthropicEnabled(s secrets.Secrets, pendingOAuth []string) bool {
+	if hasAnthropicCreds(s) || s.AnthropicAuthMode == secrets.AuthModeOAuth {
+		return true
+	}
+	for _, p := range pendingOAuth {
+		if p == "anthropic" {
+			return true
+		}
+	}
+	return false
+}
+
+// openaiEnabled mirrors anthropicEnabled for the OpenAI/Codex provider.
+func openaiEnabled(s secrets.Secrets, pendingOAuth []string) bool {
+	if hasOpenAICreds(s) || s.OpenAIAuthMode == secrets.AuthModeOAuth {
+		return true
+	}
+	for _, p := range pendingOAuth {
+		if p == "openai" {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureSecretsFile(layout paths.Layout, sec secrets.Secrets) error {
 	return secrets.Save(layout.SecretsFile, sec)
 }
@@ -624,6 +655,7 @@ func importClaudeSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error 
 	}
 	if _, err := os.Stat(src); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.Stdout, "claude skills: %s not found, nothing to import.\n", src)
 			return nil
 		}
 		return err
@@ -685,6 +717,7 @@ func importCodexSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error {
 	}
 	if _, err := os.Stat(src); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.Stdout, "codex skills: %s not found, nothing to import.\n", src)
 			return nil
 		}
 		return err
