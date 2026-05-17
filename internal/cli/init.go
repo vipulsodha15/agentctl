@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -74,7 +75,7 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	fs.BoolVar(&f.importCodexSkills, "import-codex-skills", false, "force the Codex CLI skills import step")
 	fs.StringVar(&f.codexPath, "codex-path", "", "override the Codex CLI skills source path")
 	fs.BoolVar(&f.foreground, "foreground", false, "skip system-service install and run agentd in foreground")
-	fs.StringVar(&f.resetToken, "reset-token", "", "force re-prompt for a token kind: anthropic|github")
+	fs.StringVar(&f.resetToken, "reset-token", "", "force re-prompt for a token kind: anthropic|openai|github")
 	fs.BoolVar(&f.resetWebToken, "reset-web-token", false, "regenerate the web bearer token")
 	fs.BoolVar(&f.repair, "repair", false, "re-run install steps without prompting for tokens")
 	fs.BoolVar(&f.skipBuild, "skip-image-build", false, "(test-only) skip the docker build step")
@@ -83,11 +84,11 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Usage: agentctl init [flags]")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "First-time setup: verifies Docker, builds the session base image,")
-		fmt.Fprintln(env.Stderr, "prompts for an Anthropic credential (either ANTHROPIC_API_KEY against")
-		fmt.Fprintln(env.Stderr, "api.anthropic.com, or ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN against")
-		fmt.Fprintln(env.Stderr, "a provisioned gateway) and GITHUB_PAT, ensures perms on")
-		fmt.Fprintln(env.Stderr, "~/.config/agentctl, seeds the MCP registry, installs the user service,")
-		fmt.Fprintln(env.Stderr, "and waits for /healthz to come up. Idempotent: re-run to repair drift.")
+		fmt.Fprintln(env.Stderr, "asks which provider(s) to enable (Anthropic, OpenAI, or both) and how")
+		fmt.Fprintln(env.Stderr, "to authenticate each (API key, custom gateway, or OAuth), prompts for")
+		fmt.Fprintln(env.Stderr, "GITHUB_PAT, ensures perms on ~/.config/agentctl, seeds the MCP")
+		fmt.Fprintln(env.Stderr, "registry, installs the user service, and waits for /healthz to come")
+		fmt.Fprintln(env.Stderr, "up. Idempotent: re-run to repair drift.")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Flags:")
 		fs.PrintDefaults()
@@ -147,7 +148,7 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 		}
 	}
 
-	sec, err := loadOrInitSecrets(layout, env, f)
+	sec, pendingOAuth, err := loadOrInitSecrets(layout, env, f)
 	if err != nil {
 		return wrapInit(ExitAuth, err)
 	}
@@ -229,7 +230,7 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 		}
 	}
 
-	printInitSummary(env, layout, cfg, foreground)
+	printInitSummary(env, layout, cfg, foreground, pendingOAuth)
 
 	if foreground && !alreadyRunning {
 		sigs := make(chan os.Signal, 1)
@@ -318,10 +319,28 @@ func buildImage(ctx context.Context, env *Env, layout paths.Layout, cfg *config.
 	return nil
 }
 
-func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secrets, error) {
+// loadOrInitSecrets resolves provider credentials and the GitHub PAT,
+// prompting interactively when needed. Returns the resolved secrets plus
+// a list of providers ("anthropic"|"openai") for which the user picked
+// OAuth and still needs to run `agentctl auth login` to finish setup.
+//
+// Decision order per provider:
+//
+//  1. If a provider's flags are set, use them (flag-driven, no prompt).
+//  2. Else if the provider is already in oauth mode (from a prior
+//     `agentctl auth login`) and the user didn't pass --reset-token, keep
+//     it and print a status line.
+//  3. Else if --reset-token names this provider, prompt for it.
+//  4. Else if this is a fresh install (nothing configured for either
+//     provider and no flags), the user gets a "which providers?" prompt
+//     and then a per-provider auth method prompt.
+//  5. Otherwise (re-install with partial state): only Anthropic gets a
+//     prompt when it has no creds — OpenAI stays opt-in via flags or
+//     --reset-token openai, matching today's behavior.
+func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secrets, []string, error) {
 	existing, err := secrets.Load(layout.SecretsFile)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return secrets.Secrets{}, err
+		return secrets.Secrets{}, nil, err
 	}
 	out := existing
 	out.V = 1
@@ -330,24 +349,90 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 	skipGitHub := os.Getenv("AGENTCTL_SKIP_GITHUB_PAT_CHECK") == "1"
 	skipOpenAI := os.Getenv("AGENTCTL_SKIP_OPENAI_VALIDATE") == "1"
 
-	if err := resolveAnthropicCreds(&out, env, f, skipAnthropic); err != nil {
-		return secrets.Secrets{}, err
+	anthropicFromFlags, err := applyAnthropicFlags(&out, f, skipAnthropic)
+	if err != nil {
+		return secrets.Secrets{}, nil, err
+	}
+	openaiFromFlags, err := applyOpenAIFlags(&out, f, skipOpenAI)
+	if err != nil {
+		return secrets.Secrets{}, nil, err
 	}
 
-	// Phase 1/5: OpenAI credentials are opt-in. A fresh install that
-	// passes neither flag stays Anthropic-only, which preserves the
-	// existing single-provider workflow byte-for-byte (ADR 0020 §UX
-	// principles). Custom endpoint (--openai-base-url + --openai-auth-
-	// token) and api-key (--openai-key) are mutually exclusive — if
-	// both are passed we error out so the user picks one explicitly.
-	if err := resolveOpenAICreds(&out, f, skipOpenAI); err != nil {
-		return secrets.Secrets{}, err
+	anthropicHasOAuth := out.ResolvedAuthMode() == secrets.AuthModeOAuth
+	openaiHasOAuth := out.ResolvedOpenAIAuthMode() == secrets.AuthModeOAuth
+	anthropicHasCreds := hasAnthropicCreds(out)
+	openaiHasCreds := hasOpenAICreds(out)
+
+	if anthropicHasOAuth && !anthropicFromFlags && f.resetToken != "anthropic" {
+		fmt.Fprintln(env.Stdout, "Anthropic auth: oauth (from `agentctl auth login`)")
+	}
+	if openaiHasOAuth && !openaiFromFlags && f.resetToken != "openai" {
+		fmt.Fprintln(env.Stdout, "OpenAI auth: oauth (from `agentctl auth login`)")
+	}
+
+	var pendingOAuth []string
+
+	switch {
+	case f.resetToken == "anthropic" && !anthropicFromFlags:
+		oauth, err := promptAnthropicAuth(&out, env, skipAnthropic)
+		if err != nil {
+			return secrets.Secrets{}, nil, err
+		}
+		if oauth {
+			pendingOAuth = append(pendingOAuth, "anthropic")
+		}
+	case f.resetToken == "openai" && !openaiFromFlags:
+		oauth, err := promptOpenAIAuth(&out, env, skipOpenAI)
+		if err != nil {
+			return secrets.Secrets{}, nil, err
+		}
+		if oauth {
+			pendingOAuth = append(pendingOAuth, "openai")
+		}
+	case !anthropicFromFlags && !openaiFromFlags && !anthropicHasCreds && !openaiHasCreds && !anthropicHasOAuth && !openaiHasOAuth:
+		// Fresh install: ask which providers, then auth method per provider.
+		promptAnthropic, promptOpenAI, err := promptProviderSelection(env)
+		if err != nil {
+			return secrets.Secrets{}, nil, err
+		}
+		if promptAnthropic {
+			oauth, err := promptAnthropicAuth(&out, env, skipAnthropic)
+			if err != nil {
+				return secrets.Secrets{}, nil, err
+			}
+			if oauth {
+				pendingOAuth = append(pendingOAuth, "anthropic")
+			}
+		}
+		if promptOpenAI {
+			oauth, err := promptOpenAIAuth(&out, env, skipOpenAI)
+			if err != nil {
+				return secrets.Secrets{}, nil, err
+			}
+			if oauth {
+				pendingOAuth = append(pendingOAuth, "openai")
+			}
+		}
+	default:
+		// Re-install with at least one provider already configured (or
+		// a flag-driven setup). Prompt only for Anthropic when it still
+		// has no credentials at all — mirrors today's behavior where
+		// Anthropic was the mandatory provider. OpenAI remains opt-in.
+		if !anthropicFromFlags && !anthropicHasOAuth && !anthropicHasCreds {
+			oauth, err := promptAnthropicAuth(&out, env, skipAnthropic)
+			if err != nil {
+				return secrets.Secrets{}, nil, err
+			}
+			if oauth {
+				pendingOAuth = append(pendingOAuth, "anthropic")
+			}
+		}
 	}
 
 	if f.githubPAT != "" {
 		if !skipGitHub {
 			if err := secrets.ValidateGitHubPAT(context.Background(), f.githubPAT); err != nil {
-				return secrets.Secrets{}, err
+				return secrets.Secrets{}, nil, err
 			}
 		}
 		out.GitHubPAT = f.githubPAT
@@ -357,20 +442,28 @@ func loadOrInitSecrets(layout paths.Layout, env *Env, f initFlags) (secrets.Secr
 	} else if out.GitHubPAT == "" || f.resetToken == "github" {
 		v, err := promptSecret(env, "GITHUB_PAT: ")
 		if err != nil {
-			return secrets.Secrets{}, err
+			return secrets.Secrets{}, nil, err
 		}
 		if v == "" {
-			return secrets.Secrets{}, fmt.Errorf("GITHUB_PAT required (use --github-pat)")
+			return secrets.Secrets{}, nil, fmt.Errorf("GITHUB_PAT required (use --github-pat)")
 		}
 		if !skipGitHub {
 			if err := secrets.ValidateGitHubPAT(context.Background(), v); err != nil {
-				return secrets.Secrets{}, err
+				return secrets.Secrets{}, nil, err
 			}
 		}
 		out.GitHubPAT = v
 		out.GitHubPATKind = secrets.InferGitHubPATKind(v)
 	}
-	return out, nil
+	return out, pendingOAuth, nil
+}
+
+func hasAnthropicCreds(s secrets.Secrets) bool {
+	return s.AnthropicAPIKey != "" || s.AnthropicAuthToken != ""
+}
+
+func hasOpenAICreds(s secrets.Secrets) bool {
+	return s.OpenAIAPIKey != "" || s.OpenAIAuthToken != ""
 }
 
 func ensureSecretsFile(layout paths.Layout, sec secrets.Secrets) error {
@@ -698,7 +791,7 @@ func waitForHealth(ctx context.Context, layout paths.Layout, webAddr string, tot
 	}
 }
 
-func printInitSummary(env *Env, layout paths.Layout, cfg config.Config, foreground bool) {
+func printInitSummary(env *Env, layout paths.Layout, cfg config.Config, foreground bool, pendingOAuth []string) {
 	fmt.Fprintln(env.Stdout, "")
 	fmt.Fprintln(env.Stdout, "agentctl is ready.")
 	fmt.Fprintln(env.Stdout, "")
@@ -712,6 +805,13 @@ func printInitSummary(env *Env, layout paths.Layout, cfg config.Config, foregrou
 		fmt.Fprintf(env.Stdout, "  Image pinned:   %s id=%s\n", cfg.Image.LocalTag, cfg.Image.PinnedID)
 	}
 	fmt.Fprintf(env.Stdout, "  Config:         %s\n", layout.ConfigFile)
+	if len(pendingOAuth) > 0 {
+		fmt.Fprintln(env.Stdout, "")
+		fmt.Fprintln(env.Stdout, "Finish OAuth setup:")
+		for _, p := range pendingOAuth {
+			fmt.Fprintf(env.Stdout, "  agentctl auth login --provider %s\n", p)
+		}
+	}
 	fmt.Fprintln(env.Stdout, "")
 	fmt.Fprintln(env.Stdout, "Next: agentctl start --repo <git-url>   (M2)")
 }
@@ -748,109 +848,291 @@ func indexByte(b []byte, c byte) int {
 	return -1
 }
 
-func resolveAnthropicCreds(out *secrets.Secrets, env *Env, f initFlags, skipValidate bool) error {
-	// Already in oauth mode from a prior `agentctl auth login`. Sessions
-	// authenticate via the bind-mounted credentials file; we don't need an
-	// API key, base URL, or auth token. Skip the prompt unless the user
-	// explicitly resets the anthropic token.
-	if out.ResolvedAuthMode() == secrets.AuthModeOAuth && f.anthropicKey == "" && f.anthropicBaseURL == "" && f.anthropicAuthToken == "" && f.resetToken != "anthropic" {
-		fmt.Fprintln(env.Stdout, "Anthropic auth: oauth (from `agentctl auth login`)")
-		return nil
-	}
-
+// applyAnthropicFlags applies flag-driven Anthropic credentials (if any
+// Anthropic flag is set). Returns true when a flag was applied so the
+// caller can skip the interactive prompt for this provider.
+func applyAnthropicFlags(out *secrets.Secrets, f initFlags, skipValidate bool) (bool, error) {
 	if f.anthropicBaseURL != "" || f.anthropicAuthToken != "" {
 		if f.anthropicBaseURL == "" || f.anthropicAuthToken == "" {
-			return fmt.Errorf("--anthropic-base-url and --anthropic-auth-token must be set together")
+			return false, fmt.Errorf("--anthropic-base-url and --anthropic-auth-token must be set together")
 		}
 		if f.anthropicKey != "" {
-			return fmt.Errorf("--anthropic-key cannot be combined with --anthropic-base-url/--anthropic-auth-token")
+			return false, fmt.Errorf("--anthropic-key cannot be combined with --anthropic-base-url/--anthropic-auth-token")
 		}
 		baseURL := normalizeBaseURL(f.anthropicBaseURL)
 		if !skipValidate {
 			if err := validateAnthropicCustom(baseURL, f.anthropicAuthToken); err != nil {
-				return err
+				return false, err
 			}
 		}
 		out.AnthropicBaseURL = baseURL
 		out.AnthropicAuthToken = f.anthropicAuthToken
 		out.AnthropicAPIKey = ""
 		out.AnthropicAuthMode = secrets.AuthModeAPIKey
-		return nil
+		return true, nil
 	}
-
 	if f.anthropicKey != "" {
 		if !skipValidate {
 			if err := validateAnthropic(f.anthropicKey); err != nil {
-				return err
+				return false, err
 			}
 		}
 		out.AnthropicAPIKey = f.anthropicKey
 		out.AnthropicBaseURL = ""
 		out.AnthropicAuthToken = ""
 		out.AnthropicAuthMode = secrets.AuthModeAPIKey
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
 
-	hasAnyCred := out.AnthropicAPIKey != "" || out.AnthropicAuthToken != ""
-	if hasAnyCred && f.resetToken != "anthropic" {
-		return nil
+// applyOpenAIFlags is the OpenAI mirror of applyAnthropicFlags. The two
+// providers share the same shape: either an API key against the vendor
+// endpoint, or a custom base URL + bearer token for a gateway.
+func applyOpenAIFlags(out *secrets.Secrets, f initFlags, skipValidate bool) (bool, error) {
+	if f.openaiBaseURL != "" || f.openaiAuthToken != "" {
+		if f.openaiBaseURL == "" || f.openaiAuthToken == "" {
+			return false, fmt.Errorf("--openai-base-url and --openai-auth-token must be set together")
+		}
+		if f.openaiKey != "" {
+			return false, fmt.Errorf("--openai-key cannot be combined with --openai-base-url/--openai-auth-token")
+		}
+		baseURL := normalizeBaseURL(f.openaiBaseURL)
+		if !skipValidate {
+			if err := validateOpenAICustom(baseURL, f.openaiAuthToken); err != nil {
+				return false, err
+			}
+		}
+		out.OpenAIBaseURL = baseURL
+		out.OpenAIAuthToken = f.openaiAuthToken
+		out.OpenAIAPIKey = ""
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
+		return true, nil
 	}
+	if f.openaiKey != "" {
+		if !skipValidate {
+			if err := validateOpenAI(f.openaiKey); err != nil {
+				return false, err
+			}
+		}
+		out.OpenAIAPIKey = f.openaiKey
+		out.OpenAIBaseURL = ""
+		out.OpenAIAuthToken = ""
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
+		return true, nil
+	}
+	return false, nil
+}
 
-	useCustom, err := promptYesNo(env, "Use a custom Anthropic-compatible endpoint (proxy / LLM gateway)? [y/N]: ", false)
+// promptProviderSelection asks the fresh-install user which providers to
+// enable. Returns (anthropic, openai); at least one is true. Defaults to
+// Anthropic-only on Enter so the historical single-provider onboarding
+// stays a single keystroke away.
+func promptProviderSelection(env *Env) (bool, bool, error) {
+	fmt.Fprintln(env.Stdout, "")
+	fmt.Fprintln(env.Stdout, "Which provider(s) do you want to enable?")
+	fmt.Fprintln(env.Stdout, "  [1] Anthropic (Claude)")
+	fmt.Fprintln(env.Stdout, "  [2] OpenAI (Codex)")
+	fmt.Fprintln(env.Stdout, "  [3] Both")
+	n, err := promptChoice(env, "Choice [1]: ", 1, 3)
 	if err != nil {
-		return err
+		return false, false, err
 	}
-	if useCustom {
+	switch n {
+	case 1:
+		return true, false, nil
+	case 2:
+		return false, true, nil
+	case 3:
+		return true, true, nil
+	}
+	return false, false, fmt.Errorf("unreachable")
+}
+
+// promptAnthropicAuth runs the interactive auth-method picker for
+// Anthropic and stores the resulting credentials. The returned bool is
+// true when the user chose OAuth; in that case credentials are left
+// untouched and `agentctl auth login --provider anthropic` is expected
+// to complete setup (it flips AnthropicAuthMode to oauth when the
+// credentials file is written).
+func promptAnthropicAuth(out *secrets.Secrets, env *Env, skipValidate bool) (bool, error) {
+	method, err := promptProviderAuthMethod(env, "Anthropic")
+	if err != nil {
+		return false, err
+	}
+	switch method {
+	case authMethodAPIKey:
+		v, err := promptSecret(env, "ANTHROPIC_API_KEY: ")
+		if err != nil {
+			return false, err
+		}
+		if v == "" {
+			return false, fmt.Errorf("ANTHROPIC_API_KEY required (re-run and pick OAuth to defer)")
+		}
+		if !skipValidate {
+			if err := validateAnthropic(v); err != nil {
+				return false, err
+			}
+		}
+		out.AnthropicAPIKey = v
+		out.AnthropicBaseURL = ""
+		out.AnthropicAuthToken = ""
+		out.AnthropicAuthMode = secrets.AuthModeAPIKey
+		return false, nil
+	case authMethodGateway:
 		baseURL, err := promptSecret(env, "ANTHROPIC_BASE_URL (e.g. https://gateway.example.com): ")
 		if err != nil {
-			return err
+			return false, err
 		}
 		if baseURL == "" {
-			return fmt.Errorf("ANTHROPIC_BASE_URL required (use --anthropic-base-url)")
+			return false, fmt.Errorf("ANTHROPIC_BASE_URL required")
 		}
 		token, err := promptSecret(env, "ANTHROPIC_AUTH_TOKEN: ")
 		if err != nil {
-			return err
+			return false, err
 		}
 		if token == "" {
-			return fmt.Errorf("ANTHROPIC_AUTH_TOKEN required (use --anthropic-auth-token)")
+			return false, fmt.Errorf("ANTHROPIC_AUTH_TOKEN required")
 		}
 		baseURL = normalizeBaseURL(baseURL)
 		if !skipValidate {
 			if err := validateAnthropicCustom(baseURL, token); err != nil {
-				return err
+				return false, err
 			}
 		}
 		out.AnthropicBaseURL = baseURL
 		out.AnthropicAuthToken = token
 		out.AnthropicAPIKey = ""
-		return nil
+		out.AnthropicAuthMode = secrets.AuthModeAPIKey
+		return false, nil
+	case authMethodOAuth:
+		fmt.Fprintln(env.Stdout, "")
+		fmt.Fprintln(env.Stdout, "Anthropic OAuth selected. After init finishes, run:")
+		fmt.Fprintln(env.Stdout, "  agentctl auth login --provider anthropic")
+		return true, nil
 	}
+	return false, fmt.Errorf("unreachable")
+}
 
-	fmt.Fprintln(env.Stdout, "Anthropic credentials:")
-	fmt.Fprintln(env.Stdout, "  Press Enter to skip and use `agentctl auth login` (Pro/Max subscription)")
-	fmt.Fprintln(env.Stdout, "  Or paste an ANTHROPIC_API_KEY now")
-	v, err := promptSecret(env, "ANTHROPIC_API_KEY: ")
+// promptOpenAIAuth is the OpenAI mirror of promptAnthropicAuth.
+func promptOpenAIAuth(out *secrets.Secrets, env *Env, skipValidate bool) (bool, error) {
+	method, err := promptProviderAuthMethod(env, "OpenAI")
 	if err != nil {
-		return err
+		return false, err
 	}
-	if v == "" {
-		fmt.Fprintln(env.Stdout, "Skipped. Run `agentctl auth login` to sign in with your Claude subscription.")
-		// Leave AnthropicAuthMode untouched: a prior oauth setup survives an
-		// Enter on this prompt. If there's no prior setup either, the user
-		// is left with no credentials and `agentctl start` will surface that.
-		return nil
-	}
-	if !skipValidate {
-		if err := validateAnthropic(v); err != nil {
-			return err
+	switch method {
+	case authMethodAPIKey:
+		v, err := promptSecret(env, "OPENAI_API_KEY: ")
+		if err != nil {
+			return false, err
 		}
+		if v == "" {
+			return false, fmt.Errorf("OPENAI_API_KEY required (re-run and pick OAuth to defer)")
+		}
+		if !skipValidate {
+			if err := validateOpenAI(v); err != nil {
+				return false, err
+			}
+		}
+		out.OpenAIAPIKey = v
+		out.OpenAIBaseURL = ""
+		out.OpenAIAuthToken = ""
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
+		return false, nil
+	case authMethodGateway:
+		baseURL, err := promptSecret(env, "OPENAI_BASE_URL (e.g. https://gateway.example.com): ")
+		if err != nil {
+			return false, err
+		}
+		if baseURL == "" {
+			return false, fmt.Errorf("OPENAI_BASE_URL required")
+		}
+		token, err := promptSecret(env, "OPENAI_AUTH_TOKEN: ")
+		if err != nil {
+			return false, err
+		}
+		if token == "" {
+			return false, fmt.Errorf("OPENAI_AUTH_TOKEN required")
+		}
+		baseURL = normalizeBaseURL(baseURL)
+		if !skipValidate {
+			if err := validateOpenAICustom(baseURL, token); err != nil {
+				return false, err
+			}
+		}
+		out.OpenAIBaseURL = baseURL
+		out.OpenAIAuthToken = token
+		out.OpenAIAPIKey = ""
+		out.OpenAIAuthMode = secrets.AuthModeAPIKey
+		return false, nil
+	case authMethodOAuth:
+		fmt.Fprintln(env.Stdout, "")
+		fmt.Fprintln(env.Stdout, "OpenAI OAuth selected. After init finishes, run:")
+		fmt.Fprintln(env.Stdout, "  agentctl auth login --provider openai")
+		return true, nil
 	}
-	out.AnthropicAPIKey = v
-	out.AnthropicBaseURL = ""
-	out.AnthropicAuthToken = ""
-	out.AnthropicAuthMode = secrets.AuthModeAPIKey
-	return nil
+	return false, fmt.Errorf("unreachable")
+}
+
+const (
+	authMethodAPIKey  = "apikey"
+	authMethodGateway = "gateway"
+	authMethodOAuth   = "oauth"
+)
+
+// promptProviderAuthMethod offers the three auth modes for `provider`
+// ("Anthropic"|"OpenAI"). Defaults to API key on Enter — the single
+// most common case and historically the only one we prompted for.
+func promptProviderAuthMethod(env *Env, provider string) (string, error) {
+	var keyName, oauthHint string
+	switch provider {
+	case "Anthropic":
+		keyName = "ANTHROPIC_API_KEY"
+		oauthHint = "sign in with your Claude subscription"
+	case "OpenAI":
+		keyName = "OPENAI_API_KEY"
+		oauthHint = "sign in with your ChatGPT account"
+	}
+	fmt.Fprintln(env.Stdout, "")
+	fmt.Fprintf(env.Stdout, "How would you like to authenticate with %s?\n", provider)
+	fmt.Fprintf(env.Stdout, "  [1] API key        — paste %s now\n", keyName)
+	fmt.Fprintln(env.Stdout, "  [2] Custom gateway — base URL + bearer token for an LLM gateway / proxy")
+	fmt.Fprintf(env.Stdout, "  [3] OAuth          — %s via `agentctl auth login` (after init)\n", oauthHint)
+	n, err := promptChoice(env, "Choice [1]: ", 1, 3)
+	if err != nil {
+		return "", err
+	}
+	switch n {
+	case 1:
+		return authMethodAPIKey, nil
+	case 2:
+		return authMethodGateway, nil
+	case 3:
+		return authMethodOAuth, nil
+	}
+	return "", fmt.Errorf("unreachable")
+}
+
+// promptChoice reads a single integer in [1, max] from env.Stdin. Empty
+// input returns def. Invalid input is re-prompted until the user either
+// gives a valid answer, hits EOF (returns def), or the underlying
+// reader errors (propagated).
+func promptChoice(env *Env, prompt string, def, max int) (int, error) {
+	for {
+		v, err := promptSecret(env, prompt)
+		if err != nil {
+			return 0, err
+		}
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return def, nil
+		}
+		n, convErr := strconv.Atoi(v)
+		if convErr == nil && n >= 1 && n <= max {
+			return n, nil
+		}
+		fmt.Fprintf(env.Stderr, "  please answer 1-%d (got %q)\n", max, v)
+	}
 }
 
 func normalizeBaseURL(u string) string {
@@ -892,56 +1174,6 @@ func validateAnthropicCustom(baseURL, token string) error {
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("anthropic endpoint %s status %d", baseURL, resp.StatusCode)
-	}
-	return nil
-}
-
-// resolveOpenAICreds is the Phase 5 surface for OpenAI credentials. It
-// mirrors resolveAnthropicCreds but is purely flag-driven (we never
-// prompt for an OpenAI key — Anthropic remains the prompted provider so
-// the existing single-vendor onboarding doesn't grow a second mandatory
-// question per ADR 0020 §UX principles).
-//
-// Precedence:
-//
-//  1. --openai-base-url + --openai-auth-token together set the gateway
-//     and clear any stale OPENAI_API_KEY.
-//  2. --openai-key alone sets the API key against api.openai.com and
-//     clears any stale base_url/token.
-//  3. Neither set: leave any pre-existing secrets in place (re-running
-//     `agentctl init` should not erase a previously configured OpenAI
-//     credential).
-func resolveOpenAICreds(out *secrets.Secrets, f initFlags, skipValidate bool) error {
-	hasCustomEndpoint := f.openaiBaseURL != "" || f.openaiAuthToken != ""
-	if hasCustomEndpoint {
-		if f.openaiBaseURL == "" || f.openaiAuthToken == "" {
-			return fmt.Errorf("--openai-base-url and --openai-auth-token must be set together")
-		}
-		if f.openaiKey != "" {
-			return fmt.Errorf("--openai-key cannot be combined with --openai-base-url/--openai-auth-token")
-		}
-		baseURL := normalizeBaseURL(f.openaiBaseURL)
-		if !skipValidate {
-			if err := validateOpenAICustom(baseURL, f.openaiAuthToken); err != nil {
-				return err
-			}
-		}
-		out.OpenAIBaseURL = baseURL
-		out.OpenAIAuthToken = f.openaiAuthToken
-		out.OpenAIAPIKey = ""
-		out.OpenAIAuthMode = secrets.AuthModeAPIKey
-		return nil
-	}
-	if f.openaiKey != "" {
-		if !skipValidate {
-			if err := validateOpenAI(f.openaiKey); err != nil {
-				return err
-			}
-		}
-		out.OpenAIAPIKey = f.openaiKey
-		out.OpenAIBaseURL = ""
-		out.OpenAIAuthToken = ""
-		out.OpenAIAuthMode = secrets.AuthModeAPIKey
 	}
 	return nil
 }
