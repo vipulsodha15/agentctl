@@ -69,7 +69,14 @@ class CodexConfig:
 
     model: str
     cwd: str = "/work"
-    sandbox: str = "workspace-write"
+    # The outer Docker profile (CapDrop ALL + no-new-privileges + ReadOnlyRootFS
+    # in internal/sm/manager.go) blocks the unshare(CLONE_NEWUSER) that codex's
+    # bwrap-based inner sandbox needs on Linux, so the inner layer runs wide-open
+    # and the container is the trust boundary. Without this, every tool call
+    # aborts with "bwrap: No permissions to create a new namespace" before the
+    # wrapped command runs. ADR-0020 §"Items to verify" pre-authorized the
+    # fallback.
+    sandbox: str = "danger-full-access"
     approval_mode: str = "never"
     resume: Optional[str] = None
     system_prompt: Optional[str] = None
