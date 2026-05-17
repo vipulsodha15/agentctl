@@ -10,6 +10,25 @@ import type {
 
 const GB = 1024 * 1024 * 1024;
 
+// Display labels for the provider selector. Stored values stay as the
+// canonical provider ids.
+const PROVIDER_LABEL: Record<string, string> = {
+  anthropic: "Claude Code",
+  openai: "Codex",
+};
+
+function providerLabel(id: string): string {
+  return PROVIDER_LABEL[id] ?? id;
+}
+
+// pickDefaultProvider prefers Claude Code (anthropic) when enabled so a
+// fresh session lands on the team's primary runtime; otherwise it falls
+// back to the lone enabled provider.
+function pickDefaultProvider(enabled: string[]): string {
+  if (enabled.includes("anthropic")) return "anthropic";
+  return enabled[0] ?? "";
+}
+
 export function NewSession() {
   const navigate = useNavigate();
   const [name, setName] = useState("");
@@ -42,16 +61,16 @@ export function NewSession() {
         );
         const cat = p ?? {};
         setProviders(cat);
-        // Preselect the lone enabled provider so the daemon's resolver
-        // sees a coherent (provider, model) pair on submit. With 2+
-        // enabled we leave provider blank — the resolver picks via
-        // workspace.last_used_provider per ADR 0020 §3.
+        // Always preselect a provider so the form submits a coherent
+        // (provider, model) pair. Default to Claude Code when both are
+        // enabled; otherwise fall back to the single enabled provider.
         const enabled = Object.entries(cat)
           .filter(([, v]) => v?.enabled)
           .map(([k]) => k);
-        if (enabled.length === 1) {
-          setProvider(enabled[0]);
-          setModel(cat[enabled[0]]?.default_model ?? "");
+        const defaultProvider = pickDefaultProvider(enabled);
+        if (defaultProvider) {
+          setProvider(defaultProvider);
+          setModel(cat[defaultProvider]?.default_model ?? "");
         }
       })
       .catch((err) => {
@@ -168,21 +187,15 @@ export function NewSession() {
                 onChange={(e) => {
                   const next = e.target.value;
                   setProvider(next);
-                  // Reset the model when switching providers: pick the new
-                  // provider's default if known, else clear so the user
-                  // sees they need to choose. Avoids sending a claude-*
-                  // model to OpenAI on submit.
-                  if (!next) {
-                    setModel("");
-                  } else {
-                    setModel(providers[next]?.default_model ?? "");
-                  }
+                  // Switching providers: seed the new provider's default
+                  // model so we never submit a claude-* model to OpenAI
+                  // or leave the field empty.
+                  setModel(providers[next]?.default_model ?? "");
                 }}
               >
-                <option value="">Auto (resolver picks)</option>
                 {enabledProviderIds.map((p) => (
                   <option key={p} value={p}>
-                    {p}
+                    {providerLabel(p)}
                   </option>
                 ))}
               </select>
@@ -196,23 +209,19 @@ export function NewSession() {
                 type="text"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder={
-                  showProviderSelector && !provider
-                    ? "Pick a provider above"
-                    : "Default model"
-                }
-                disabled={showProviderSelector && !provider}
+                placeholder={activeProvider ? "Default model" : "Pick a provider above"}
+                disabled={!activeProvider}
               />
             ) : (
               <select
                 id="model"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                disabled={showProviderSelector && !provider}
+                disabled={!activeProvider}
               >
                 <option value="">
                   {activeProvider
-                    ? `Default for ${activeProvider}`
+                    ? `Default for ${providerLabel(activeProvider)}`
                     : "Default"}
                 </option>
                 {modelOptions.map((m) => (

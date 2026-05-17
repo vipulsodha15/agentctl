@@ -34,6 +34,25 @@ function inferProvider(model: string): string {
   return "";
 }
 
+// Display labels for the provider dropdown. The underlying IDs stored in
+// agent YAML / API payloads stay as the canonical provider ids.
+const PROVIDER_LABEL: Record<string, string> = {
+  anthropic: "Claude Code",
+  openai: "Codex",
+};
+
+function providerLabel(id: string): string {
+  return PROVIDER_LABEL[id] ?? id;
+}
+
+// pickDefaultProvider chooses an initial provider when the agent doesn't
+// already pin one: prefer Claude Code (anthropic) when enabled, otherwise
+// fall back to whatever the first enabled provider is.
+function pickDefaultProvider(enabled: string[]): string {
+  if (enabled.includes("anthropic")) return "anthropic";
+  return enabled[0] ?? "";
+}
+
 export function AgentEditor() {
   const navigate = useNavigate();
   const params = useParams<{ name?: string }>();
@@ -88,10 +107,20 @@ export function AgentEditor() {
         setAgents(a.agents ?? []);
         setMcps(m.mcps ?? []);
         setSkills(s.skills ?? []);
-        setProviders(p ?? {});
+        const catalog = p ?? {};
+        setProviders(catalog);
+
+        const enabledIds = Object.entries(catalog)
+          .filter(([, v]) => v?.enabled)
+          .map(([k]) => k);
+        const fallbackProvider = pickDefaultProvider(enabledIds);
+        const fallbackModel = fallbackProvider
+          ? catalog[fallbackProvider]?.default_model ?? ""
+          : "";
 
         const seedFrom = new URLSearchParams(location.search).get("from");
         const seedName = mode === "edit" ? params.name : seedFrom;
+        let seeded = false;
         if (seedName) {
           const src = (a.agents ?? []).find((x) => x.name === seedName);
           if (!src) {
@@ -103,12 +132,20 @@ export function AgentEditor() {
               `"${src.name}" is a built-in agent and cannot be edited. Use Duplicate to make a copy.`,
             );
           } else {
+            seeded = true;
             if (mode === "edit") setName(src.name);
             setDescription(src.description);
             setColour(src.colour || "slate");
             const seededModel = src.model || "";
-            setProvider(src.provider || inferProvider(seededModel));
-            setModel(seededModel);
+            const seededProvider =
+              src.provider || inferProvider(seededModel) || fallbackProvider;
+            setProvider(seededProvider);
+            setModel(
+              seededModel ||
+                (seededProvider
+                  ? catalog[seededProvider]?.default_model ?? ""
+                  : ""),
+            );
             setPrompt(src.prompt);
             const am = src.mcps_allowed ?? [];
             const sa = src.skills_allowed ?? [];
@@ -117,6 +154,10 @@ export function AgentEditor() {
             setMcpsConstrained(am.length > 0);
             setSkillsConstrained(sa.length > 0);
           }
+        }
+        if (!seeded && fallbackProvider) {
+          setProvider(fallbackProvider);
+          setModel(fallbackModel);
         }
         setLoaded(true);
       })
@@ -137,9 +178,9 @@ export function AgentEditor() {
     return s;
   }, [agents]);
 
-  // ADR 0020 §UX: provider dropdown is invisible when only one provider
-  // is enabled. activeProvider is what we filter the model list against —
-  // either the user's pick or the lone enabled provider.
+  // The provider dropdown is hidden when there's only one enabled
+  // provider — there's nothing to choose. The form still carries a
+  // resolved provider value either way (set in the load effect).
   const enabledProviderIds = useMemo(
     () =>
       Object.entries(providers)
@@ -149,9 +190,7 @@ export function AgentEditor() {
     [providers],
   );
   const showProviderSelector = enabledProviderIds.length >= 2;
-  const activeProvider = showProviderSelector
-    ? provider
-    : provider || enabledProviderIds[0] || "";
+  const activeProvider = provider || enabledProviderIds[0] || "";
   const modelOptions = useMemo(() => {
     const base = activeProvider ? providers[activeProvider]?.models ?? [] : [];
     // Preserve the agent's currently-pinned model in the dropdown even if
@@ -339,26 +378,28 @@ export function AgentEditor() {
               <div className="field">
                 <span className="field-label">Provider</span>
                 <span className="field-hint">
-                  Pin this agent to a runtime, or leave as "Any" to let the
-                  workspace resolver pick at session start.
+                  Which runtime this agent uses. Defaults to Claude Code when
+                  available.
                 </span>
                 <select
                   value={provider}
                   onChange={(e) => {
                     const next = e.target.value;
                     setProvider(next);
-                    // Clear a stale model pin when switching providers so
-                    // we don't try to send a claude- model to openai.
-                    if (next && model && !(providers[next]?.models ?? []).includes(model)) {
-                      setModel("");
+                    // Switching providers: drop a model pin that doesn't
+                    // belong to the new provider, then seed the new
+                    // provider's default model so we never submit an
+                    // empty model.
+                    const catalogModels = providers[next]?.models ?? [];
+                    if (!model || !catalogModels.includes(model)) {
+                      setModel(providers[next]?.default_model ?? "");
                     }
                     markDirty();
                   }}
                 >
-                  <option value="">Any (portable)</option>
                   {enabledProviderIds.map((p) => (
                     <option key={p} value={p}>
-                      {p}
+                      {providerLabel(p)}
                     </option>
                   ))}
                 </select>
@@ -368,9 +409,9 @@ export function AgentEditor() {
             <div className="field">
               <span className="field-label">Model</span>
               <span className="field-hint">
-                {showProviderSelector && !provider
-                  ? "Pick a provider above to choose a model. Leaving Any selected keeps the agent portable."
-                  : "Leave as \"Inherit\" to fall back to the default session model."}
+                {activeProvider
+                  ? `Model used by ${providerLabel(activeProvider)} for this agent.`
+                  : "Pick a provider above to choose a model."}
               </span>
               <select
                 value={model}
@@ -378,11 +419,11 @@ export function AgentEditor() {
                   setModel(e.target.value);
                   markDirty();
                 }}
-                disabled={showProviderSelector && !provider}
+                disabled={!activeProvider}
               >
                 <option value="">
                   {activeProvider
-                    ? `Inherit (default for ${activeProvider})`
+                    ? `Inherit (default for ${providerLabel(activeProvider)})`
                     : "Inherit (default session model)"}
                 </option>
                 {modelOptions.map((m) => (
