@@ -51,11 +51,20 @@ from shim.runtime.translate import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Fixture transcript — matches codex-cli 0.130.0 (captured against the
-# pinned CLI in image/Dockerfile). The two function_call frames at the
-# tail are kept on the older shape for forward-compat coverage; they
-# don't appear on a plain assistant turn but exercise the tool-call /
-# tool-result translation paths.
+# Fixture transcripts.
+#
+# ``FIXTURE_LINES`` is a legacy mix: the thread.started / agent_message /
+# turn.completed frames are codex-cli 0.130.0 shapes (text path was
+# verified against the pinned CLI in image/Dockerfile), but the two
+# function_call / function_call_output frames are the *older* OpenAI
+# responses-style shape — they don't appear on a real 0.130.0 turn, but
+# the translator still accepts them and they pin the back-compat path
+# in case a CLI rollback happens.
+#
+# ``FIXTURE_LINES_MODERN_TOOLS`` uses the actual codex-cli 0.130.0 tool
+# item types (``command_execution`` / ``file_change`` / ``mcp_tool_call``
+# / ``web_search`` / ``todo_list``) so the end-to-end driver test covers
+# the path the production CLI exercises.
 # ---------------------------------------------------------------------------
 
 
@@ -96,6 +105,55 @@ FIXTURE_LINES = [
             "input_tokens": 12,
             "output_tokens": 7,
             "cached_input_tokens": 3,
+        },
+    },
+]
+
+
+# Real codex-cli 0.130.0 transcript shape for a turn that runs a shell
+# command. The ThreadItem schema (id on the outer item, type as a
+# flattened discriminator) is verified against
+# codex-rs/exec/src/exec_events.rs in openai/codex.
+FIXTURE_LINES_MODERN_TOOLS = [
+    {"type": "thread.started", "thread_id": "codex-sess-modern"},
+    {"type": "turn.started"},
+    {
+        "type": "item.started",
+        "item": {
+            "id": "cmd-1",
+            "type": "command_execution",
+            "command": "ls /work",
+            "aggregated_output": "",
+            "exit_code": None,
+            "status": "in_progress",
+        },
+    },
+    {
+        "type": "item.completed",
+        "item": {
+            "id": "cmd-1",
+            "type": "command_execution",
+            "command": "ls /work",
+            "aggregated_output": "file.txt\n",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    },
+    {
+        "type": "item.completed",
+        "item": {
+            "id": "msg-1",
+            "type": "agent_message",
+            "text": "Done.",
+        },
+    },
+    {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 5,
+            "cached_input_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_output_tokens": 0,
         },
     },
 ]
@@ -241,6 +299,367 @@ class TranslateCodexEventTests(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class CodexToolItemTranslationTests(unittest.TestCase):
+    """Codex-cli 0.130.0 tool-like item types — verified against the
+    ThreadItemDetails enum in codex-rs/exec/src/exec_events.rs.
+
+    Each tool-like item arrives as ``item.started`` (status=in_progress)
+    followed later by ``item.completed`` with the final status + output.
+    We emit ``tool.call`` on the started frame so the web card opens in
+    the "running" state, then ``tool.result`` on completion keyed back
+    by ``item.id`` so the same row gets the output folded in.
+    """
+
+    # -- command_execution -------------------------------------------
+
+    def test_command_execution_started_emits_pending_bash_call(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "cmd-1",
+                "type": "command_execution",
+                "command": "ls -la /work",
+                "aggregated_output": "",
+                "exit_code": None,
+                "status": "in_progress",
+            },
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        self.assertEqual(len(out), 1)
+        kind, data = out[0]
+        self.assertEqual(kind, EVENT_TOOL_CALL)
+        # ``Bash`` name lets the web's formatToolHeader pick the ⌘ icon
+        # and "Ran <cmd>" verb instead of a generic tool card.
+        self.assertEqual(data["name"], "Bash")
+        self.assertEqual(data["tool_use_id"], "cmd-1")
+        self.assertEqual(data["input"], {"command": "ls -la /work"})
+
+    def test_command_execution_completed_emits_tool_result_with_output(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "cmd-1",
+                "type": "command_execution",
+                "command": "ls -la /work",
+                "aggregated_output": "total 8\ndrwxr-xr-x file.txt\n",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        self.assertEqual(len(out), 1)
+        kind, data = out[0]
+        self.assertEqual(kind, EVENT_TOOL_RESULT)
+        self.assertEqual(data["tool_use_id"], "cmd-1")
+        self.assertEqual(data["content"], "total 8\ndrwxr-xr-x file.txt\n")
+        self.assertFalse(data["is_error"])
+
+    def test_command_execution_failed_status_marks_result_as_error(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "cmd-bad",
+                "type": "command_execution",
+                "command": "false",
+                "aggregated_output": "",
+                "exit_code": 1,
+                "status": "failed",
+            },
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        _, data = out[0]
+        self.assertTrue(data["is_error"])
+        # Empty stdout on a failed run gets a synthetic exit-code hint
+        # so the card isn't a blank red box.
+        self.assertIn("exit code 1", data["content"])
+
+    def test_command_execution_declined_status_is_error_with_hint(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "cmd-decl",
+                "type": "command_execution",
+                "command": "rm -rf /",
+                "aggregated_output": "",
+                "exit_code": None,
+                "status": "declined",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertTrue(data["is_error"])
+        self.assertIn("declined", data["content"])
+
+    # -- file_change -------------------------------------------------
+
+    def test_file_change_single_update_maps_to_edit(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "fc-1",
+                "type": "file_change",
+                "changes": [{"path": "/work/foo.py", "kind": "update"}],
+                "status": "in_progress",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertEqual(data["name"], "Edit")
+        self.assertEqual(data["input"], {"file_path": "/work/foo.py"})
+
+    def test_file_change_single_add_maps_to_write(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "fc-2",
+                "type": "file_change",
+                "changes": [{"path": "/work/new.py", "kind": "add"}],
+                "status": "in_progress",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertEqual(data["name"], "Write")
+        self.assertEqual(data["input"], {"file_path": "/work/new.py"})
+
+    def test_file_change_multi_file_keeps_changes_list(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "fc-3",
+                "type": "file_change",
+                "changes": [
+                    {"path": "/work/a.py", "kind": "update"},
+                    {"path": "/work/b.py", "kind": "add"},
+                ],
+                "status": "in_progress",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        # Multi-file patches fall through to a generic ApplyPatch tool
+        # with the full change list — there's no Claude-equivalent single
+        # tool that touches multiple files at once.
+        self.assertEqual(data["name"], "ApplyPatch")
+        self.assertEqual(len(data["input"]["changes"]), 2)
+
+    def test_file_change_completed_summarizes_paths_in_output(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "fc-4",
+                "type": "file_change",
+                "changes": [{"path": "/work/foo.py", "kind": "update"}],
+                "status": "completed",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertIn("/work/foo.py", data["content"])
+        self.assertFalse(data["is_error"])
+
+    # -- mcp_tool_call -----------------------------------------------
+
+    def test_mcp_tool_call_uses_claude_sdk_naming_convention(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "mcp-1",
+                "type": "mcp_tool_call",
+                "server": "github",
+                "tool": "create_pull_request",
+                "arguments": {"title": "fix"},
+                "result": None,
+                "error": None,
+                "status": "in_progress",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        # The web's MCP_RE matches mcp__<server>__<tool>; emit the same
+        # name so MCP tools get the badge + health pill.
+        self.assertEqual(data["name"], "mcp__github__create_pull_request")
+        self.assertEqual(data["input"], {"title": "fix"})
+
+    def test_mcp_tool_call_completed_extracts_text_from_content_blocks(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "mcp-1",
+                "type": "mcp_tool_call",
+                "server": "github",
+                "tool": "create_pull_request",
+                "arguments": {},
+                "result": {
+                    "content": [
+                        {"type": "text", "text": "PR #42 created"},
+                    ],
+                    "structured_content": None,
+                },
+                "error": None,
+                "status": "completed",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertEqual(data["content"], "PR #42 created")
+        self.assertFalse(data["is_error"])
+
+    def test_mcp_tool_call_error_field_surfaces_as_failure(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "mcp-2",
+                "type": "mcp_tool_call",
+                "server": "github",
+                "tool": "create_pull_request",
+                "arguments": {},
+                "result": None,
+                "error": {"message": "rate limited"},
+                "status": "failed",
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertTrue(data["is_error"])
+        self.assertEqual(data["content"], "rate limited")
+
+    # -- web_search --------------------------------------------------
+
+    def test_web_search_started_emits_websearch_call_with_query(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "ws-1",
+                "type": "web_search",
+                "query": "latest python release",
+                "action": {"type": "search", "query": "latest python release"},
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertEqual(data["name"], "WebSearch")
+        self.assertEqual(data["input"]["query"], "latest python release")
+        self.assertEqual(data["input"]["action"]["type"], "search")
+
+    # -- todo_list ---------------------------------------------------
+
+    def test_todo_list_maps_to_todowrite(self) -> None:
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "todo-1",
+                "type": "todo_list",
+                "items": [
+                    {"text": "step one", "completed": False},
+                    {"text": "step two", "completed": True},
+                ],
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertEqual(data["name"], "TodoWrite")
+        self.assertEqual(len(data["input"]["todos"]), 2)
+
+    def test_todo_list_completed_renders_checklist_in_output(self) -> None:
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "todo-2",
+                "type": "todo_list",
+                "items": [
+                    {"text": "first", "completed": True},
+                    {"text": "second", "completed": False},
+                ],
+            },
+        }
+        _, data = codex_driver.translate_codex_event(event, turn_id="t1")[0]
+        self.assertIn("[x] first", data["content"])
+        self.assertIn("[ ] second", data["content"])
+
+    # -- lifecycle pairing -------------------------------------------
+
+    def test_started_and_completed_share_tool_use_id(self) -> None:
+        # The conversation reducer pairs results back to pending calls
+        # by tool_use_id; the two events emitted from a single codex
+        # item must use the same id (item.id from the outer ThreadItem)
+        # so the web folds them into one row.
+        started = {
+            "type": "item.started",
+            "item": {
+                "id": "shared-id",
+                "type": "command_execution",
+                "command": "echo hi",
+                "aggregated_output": "",
+                "exit_code": None,
+                "status": "in_progress",
+            },
+        }
+        completed = {
+            "type": "item.completed",
+            "item": {
+                "id": "shared-id",
+                "type": "command_execution",
+                "command": "echo hi",
+                "aggregated_output": "hi\n",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+        s = codex_driver.translate_codex_event(started, turn_id="t1")[0]
+        c = codex_driver.translate_codex_event(completed, turn_id="t1")[0]
+        self.assertEqual(s[1]["tool_use_id"], c[1]["tool_use_id"])
+        self.assertEqual(s[0], EVENT_TOOL_CALL)
+        self.assertEqual(c[0], EVENT_TOOL_RESULT)
+
+    def test_tool_item_with_missing_id_is_dropped(self) -> None:
+        # No id means the conversation reducer can't pair the result
+        # back to the call — better to drop than emit an orphan row.
+        event = {
+            "type": "item.started",
+            "item": {"type": "command_execution", "command": "ls"},
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        self.assertEqual(out, [])
+
+    def test_reasoning_item_is_dropped(self) -> None:
+        # Reasoning is the model's internal chain — codex emits it only
+        # at completion. The shared vocabulary has no thinking event
+        # today; drop so we don't fabricate a misleading tool card.
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "r-1",
+                "type": "reasoning",
+                "text": "I should run ls first.",
+            },
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        self.assertEqual(out, [])
+
+    def test_unknown_tool_item_falls_back_to_raw_type_name(self) -> None:
+        # Forward-compat: a future codex revision that adds a new
+        # tool-like item type shouldn't make the call vanish from the
+        # UI. We don't recognize it, so we'd just drop in the normal
+        # path — but if someone extends _TOOL_ITEM_TYPES at the
+        # frontier they get a sensible fallback.
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "future-1",
+                "type": "future_kind",
+                "payload": {"x": 1},
+            },
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        # Not in _TOOL_ITEM_TYPES, so the started branch silently
+        # drops. Item.completed for an unknown type also drops. That
+        # matches Claude's forward-compat behavior.
+        self.assertEqual(out, [])
+
+    def test_turn_failed_with_nested_error_surfaces_message(self) -> None:
+        event = {
+            "type": "turn.failed",
+            "error": {"message": "rate limit hit"},
+        }
+        out = codex_driver.translate_codex_event(event, turn_id="t1")
+        self.assertEqual(len(out), 1)
+        kind, data = out[0]
+        self.assertEqual(kind, EVENT_TURN_END)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "rate limit hit")
+
+
 class CodexDriverFactoryTests(unittest.TestCase):
     """``runtime.get_driver`` dispatches the right concrete class."""
 
@@ -381,6 +800,51 @@ class CodexDriverSubprocessTests(unittest.TestCase):
         # The optional message-record callback gets every JSONL line
         # verbatim — agentd dedups on the daemon side.
         self.assertEqual(len(records), len(FIXTURE_LINES))
+
+    def test_one_turn_translates_modern_tool_shapes(self) -> None:
+        # Exercises the actual codex-cli 0.130.0 tool item shapes
+        # (command_execution start/complete pair) end-to-end so a
+        # regression where item.started gets dropped — leaving tool
+        # cards invisible in the web UI — fails this test.
+        fake_codex = _write_fake_codex(self.tmp.name, FIXTURE_LINES_MODERN_TOOLS)
+        events, sids, _records, emit_event, emit_sid, emit_record = self._collector()
+
+        cfg = codex_driver.CodexConfig(
+            model="gpt-5.5",
+            cwd=self.tmp.name,
+            codex_bin=fake_codex,
+        )
+        drv = codex_driver.CodexDriver(
+            cfg,
+            emit_event=emit_event,
+            emit_session_id=emit_sid,
+            emit_message_record=emit_record,
+        )
+        drv.start()
+        try:
+            drv.submit_turn(turn_id="t-modern", content="run ls")
+            self._wait_for_turn_end(events)
+        finally:
+            drv.shutdown(grace_seconds=2.0)
+
+        self.assertEqual(sids, ["codex-sess-modern"])
+        # The tool.call must arrive *before* tool.result so the web
+        # opens the card in the pending state, then folds the result in.
+        kinds = [k for k, _ in events]
+        call_idx = kinds.index(EVENT_TOOL_CALL)
+        result_idx = kinds.index(EVENT_TOOL_RESULT)
+        self.assertLess(call_idx, result_idx)
+        # Same item id on both events so the conversation reducer pairs
+        # them into a single collapsed row.
+        self.assertEqual(events[call_idx][1]["tool_use_id"], "cmd-1")
+        self.assertEqual(events[result_idx][1]["tool_use_id"], "cmd-1")
+        # Bash naming so the web's formatToolHeader picks ⌘ "Ran ls /work".
+        self.assertEqual(events[call_idx][1]["name"], "Bash")
+        self.assertEqual(events[result_idx][1]["content"], "file.txt\n")
+        self.assertFalse(events[result_idx][1]["is_error"])
+        self.assertIn(EVENT_ASSISTANT_MESSAGE, kinds)
+        self.assertIn(EVENT_USAGE, kinds)
+        self.assertEqual(kinds[-1], EVENT_TURN_END)
 
     def test_nonzero_exit_emits_failed_turn_end(self) -> None:
         # Subset of the transcript followed by a nonzero exit: the
