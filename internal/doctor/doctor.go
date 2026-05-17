@@ -86,6 +86,7 @@ func Run(opts RunOptions) Result {
 	r.Add(checkFSPerms(opts))
 	r.Add(checkDBIntegrity(opts.DBPath))
 	r.Add(checkBuildContext(opts.Home))
+	r.Add(checkBuildContextDrift(opts.Home))
 	r.Add(checkImageBuilt(opts.ConfigPath))
 	r.Add(checkServiceActive(opts.Home))
 	r.Add(checkAgentdHealth(opts.SocketPath, opts.WebAddr))

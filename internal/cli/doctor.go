@@ -6,6 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -26,9 +28,9 @@ func runDoctor(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Runs install + connectivity checks against the local agentctl install:")
 		fmt.Fprintln(env.Stderr, "  bin.versions, fs.perms, db.integrity, service.active, agentd.health,")
-		fmt.Fprintln(env.Stderr, "  docker.reachable, docker.api, image.built, image.build_context, image.present,")
-		fmt.Fprintln(env.Stderr, "  skills.builtin, skills.custom, mcp.registry, secrets.fresh,")
-		fmt.Fprintln(env.Stderr, "  network.peer_isolation, volumes.disk.")
+		fmt.Fprintln(env.Stderr, "  docker.reachable, docker.api, image.built, image.build_context,")
+		fmt.Fprintln(env.Stderr, "  image.build_context_drift, image.present, skills.builtin, skills.custom,")
+		fmt.Fprintln(env.Stderr, "  mcp.registry, secrets.fresh, network.peer_isolation, volumes.disk.")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "  --fix         apply known fixes (alias for `agentctl init --repair`).")
 		fmt.Fprintln(env.Stderr, "  --repair-db   sqlite VACUUM; aborts if integrity_check still fails.")
@@ -129,7 +131,12 @@ func firstFailedName(res doctor.Result) string {
 func applyFixes(ctx context.Context, env *Env, res doctor.Result) int {
 	fixed := 0
 	for _, c := range res.Checks {
-		if c.Status != doctor.StatusFail {
+		// image.build_context_drift surfaces as a warning, not a failure,
+		// because a stale build context only matters on the next image
+		// rebuild — the running install still works. Treat its warn the
+		// same as a failure for --fix purposes so a single
+		// `doctor --fix` clears it.
+		if c.Status != doctor.StatusFail && !(c.Status == doctor.StatusWarn && c.Name == "image.build_context_drift") {
 			continue
 		}
 		switch c.Name {
@@ -146,6 +153,14 @@ func applyFixes(ctx context.Context, env *Env, res doctor.Result) int {
 				fmt.Fprintf(env.Stderr, "image fix: %v\n", err)
 				return ExitGeneric
 			}
+			fixed++
+		case "image.build_context_drift":
+			n, err := syncBuildContextShim(env)
+			if err != nil {
+				fmt.Fprintf(env.Stderr, "build_context_drift: %v\n", err)
+				continue
+			}
+			fmt.Fprintf(env.Stdout, "  build_context_drift  synced %d shim file(s); run `agentctl update --yes` to rebuild\n", n)
 			fixed++
 		case "mcp.registry":
 			fmt.Fprintln(env.Stdout, "  mcp.registry no automatic fix; edit rows manually")
@@ -187,6 +202,90 @@ func fixFSPerms(env *Env) error {
 		}
 	}
 	return nil
+}
+
+// syncBuildContextShim copies <source_url>/image/shim/ over the top of
+// the build-context shim at <home>/.local/share/agentctl/image/shim/.
+// Returns the number of files written. Files present only in the
+// destination (and not the source) are not removed — keeping
+// __pycache__ etc. avoids surprising the user, and they don't end up
+// in the docker image anyway.
+func syncBuildContextShim(env *Env) (int, error) {
+	metaPath := env.Layout.InstallMeta
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", metaPath, err)
+	}
+	var meta struct {
+		SourceURL string `json:"source_url"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return 0, fmt.Errorf("parse %s: %w", metaPath, err)
+	}
+	if meta.SourceURL == "" {
+		return 0, fmt.Errorf("no source_url recorded in %s", metaPath)
+	}
+	src := filepath.Join(meta.SourceURL, "image", "shim")
+	dst := filepath.Join(env.Layout.ImageDir, "shim")
+	if _, err := os.Stat(src); err != nil {
+		return 0, fmt.Errorf("source shim missing: %w", err)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		return 0, fmt.Errorf("build-context shim missing: %w", err)
+	}
+	count := 0
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if d.Name() == "__pycache__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		out := filepath.Join(dst, rel)
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			return err
+		}
+		if err := copyFile(path, out); err != nil {
+			return fmt.Errorf("copy %s: %w", rel, err)
+		}
+		count++
+		return nil
+	})
+	if err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func runInitRepair(ctx context.Context, env *Env) error {
