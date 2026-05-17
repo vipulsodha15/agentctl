@@ -67,7 +67,7 @@ func TestCheckBuildContextDriftWarnsOnDivergence(t *testing.T) {
 	home := t.TempDir()
 	source := t.TempDir()
 	seedShim(t, source, map[string]string{
-		"runtime/codex_driver.py": "new-fixed-shim",
+		"runtime/codex_driver.py":  "new-fixed-shim",
 		"runtime/claude_driver.py": "same",
 	})
 	// Build context lags behind: codex_driver differs, plus an extra
