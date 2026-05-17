@@ -21,6 +21,7 @@ import type {
   TaskStatus,
 } from "../types";
 import { ConversationView } from "../components/ConversationView";
+import { TaskTodoRail } from "../components/TaskTodoRail";
 import {
   INITIAL_CONVERSATION_STATE,
   conversationReducer,
@@ -432,6 +433,7 @@ export function TaskDetail() {
               usageByTurn={convState.usageByTurn}
               filter="all"
             />
+            <TaskTodoRail messages={convState.messages} />
           </div>
         )}
       </div>

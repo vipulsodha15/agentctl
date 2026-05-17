@@ -3890,6 +3890,252 @@ form .checkbox-row {
  * latest content as the user scrolls naturally. */
 .task-detail .jump-pill { display: none; }
 
+/* ── Task chat: floating plan rail ──────────────────────────────
+ * Lives outside the centered 980px .task-detail box so it can sit
+ * in the viewport's right gutter without disturbing the chat
+ * layout. Auto-collapses to a small edge chip on narrow viewports.
+ */
+.task-todo-rail {
+  position: fixed;
+  top: 96px;
+  bottom: 96px;
+  right: 16px;
+  width: 240px;
+  z-index: 6;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  animation: todo-rail-in 200ms var(--ease-out) both;
+}
+@keyframes todo-rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.task-todo-rail.collapsed {
+  width: auto;
+  max-width: 80px;
+  top: 116px;
+  bottom: auto;
+  padding: 6px 10px;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--c-fg-mute);
+  background: var(--c-surface);
+}
+.task-todo-rail.collapsed:hover {
+  color: var(--c-fg);
+  border-color: var(--c-border-strong);
+}
+.task-todo-rail-chip-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.task-todo-rail-chip-progress {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.task-todo-rail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--c-border-soft);
+  flex: 0 0 auto;
+}
+.task-todo-rail-title {
+  font-weight: 600;
+  color: var(--c-fg);
+  font-size: var(--text-sm);
+  letter-spacing: -0.005em;
+}
+.task-todo-rail-count {
+  font-size: var(--text-2xs);
+  color: var(--c-fg-subtle);
+  letter-spacing: 0.02em;
+}
+.task-todo-rail-collapse {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: var(--c-fg-subtle);
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  transition:
+    background var(--transition),
+    color var(--transition);
+}
+.task-todo-rail-collapse:hover {
+  background: var(--c-surface-2);
+  color: var(--c-fg);
+}
+
+.task-todo-rail-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-group {
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--c-canvas);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.plan-group.is-latest {
+  border-color: var(--c-border);
+}
+
+.plan-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--c-fg);
+  font: inherit;
+  text-align: left;
+}
+.plan-group-caret {
+  color: var(--c-fg-subtle);
+  font-size: 9px;
+  width: 10px;
+  display: inline-block;
+  transition: transform var(--transition);
+}
+.plan-group-caret.open {
+  transform: rotate(90deg);
+}
+.plan-group-label {
+  font-weight: 500;
+  font-size: var(--text-xs);
+  color: var(--c-fg-2);
+}
+.plan-group-progress {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-fg-mute);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+}
+
+.plan-group-active {
+  font-size: var(--text-2xs);
+  color: var(--c-fg-mute);
+  margin-left: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-group-progress-bar {
+  height: 2px;
+  background: var(--c-surface-3);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+.plan-group-progress-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--c-accent);
+  transition: width var(--duration-slow) var(--ease-out);
+}
+
+.plan-group-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 2px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.plan-group-list .todo-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  font-size: var(--text-2xs);
+  line-height: 1.35;
+  color: var(--c-fg-2);
+}
+.plan-group-list .todo-icon {
+  font-family: var(--font-mono);
+  width: 0.9em;
+  flex: 0 0 auto;
+  color: var(--c-fg-subtle);
+  font-size: 10px;
+}
+.plan-group-list .todo-row.todo-completed {
+  color: var(--c-fg-mute);
+}
+.plan-group-list .todo-row.todo-completed .todo-text {
+  text-decoration: line-through;
+}
+.plan-group-list .todo-row.todo-completed .todo-icon {
+  color: var(--c-success);
+}
+.plan-group-list .todo-row.todo-in_progress {
+  font-weight: 500;
+  color: var(--c-fg);
+}
+.plan-group-list .todo-row.todo-in_progress .todo-icon {
+  color: var(--c-accent);
+  animation: todo-pulse 1.6s ease-in-out infinite;
+}
+@keyframes todo-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-group-list .todo-row.todo-in_progress .todo-icon {
+    animation: none;
+  }
+}
+
+@media (max-width: 1100px) {
+  .task-todo-rail:not(.collapsed) {
+    /* Narrow viewports: shrink so the rail doesn't overlap the chat. */
+    width: 200px;
+  }
+}
+@media (max-width: 880px) {
+  .task-todo-rail {
+    display: none;
+  }
+}
+
 .task-stage-header {
   display: flex;
   align-items: center;
