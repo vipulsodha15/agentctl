@@ -1,17 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, apiJson, jsonBody } from "../api";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
   McpEntry,
+  ProvidersResponse,
 } from "../types";
-
-const MODELS = [
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-];
 
 const GB = 1024 * 1024 * 1024;
 
@@ -19,7 +14,9 @@ export function NewSession() {
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [reposText, setReposText] = useState("");
-  const [model, setModel] = useState(MODELS[0]);
+  const [providers, setProviders] = useState<ProvidersResponse>({});
+  const [provider, setProvider] = useState<string>("");
+  const [model, setModel] = useState<string>("");
   const [memGb, setMemGb] = useState<number>(4);
   const [cpuCores, setCpuCores] = useState<number>(2);
   const [mcps, setMcps] = useState<McpEntry[]>([]);
@@ -30,14 +27,32 @@ export function NewSession() {
 
   useEffect(() => {
     let cancelled = false;
-    apiJson<{ mcps: McpEntry[] }>("/v1/mcps")
-      .then((r) => {
+    Promise.all([
+      apiJson<{ mcps: McpEntry[] }>("/v1/mcps"),
+      apiJson<ProvidersResponse>("/v1/providers").catch(
+        () => ({}) as ProvidersResponse,
+      ),
+    ])
+      .then(([r, p]) => {
         if (cancelled) return;
         const list = r.mcps ?? [];
         setMcps(list);
         setSelectedMcps(
           new Set(list.filter((m) => m.default_enabled).map((m) => m.name)),
         );
+        const cat = p ?? {};
+        setProviders(cat);
+        // Preselect the lone enabled provider so the daemon's resolver
+        // sees a coherent (provider, model) pair on submit. With 2+
+        // enabled we leave provider blank — the resolver picks via
+        // workspace.last_used_provider per ADR 0020 §3.
+        const enabled = Object.entries(cat)
+          .filter(([, v]) => v?.enabled)
+          .map(([k]) => k);
+        if (enabled.length === 1) {
+          setProvider(enabled[0]);
+          setModel(cat[enabled[0]]?.default_model ?? "");
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -51,6 +66,24 @@ export function NewSession() {
       cancelled = true;
     };
   }, []);
+
+  const enabledProviderIds = useMemo(
+    () =>
+      Object.entries(providers)
+        .filter(([, p]) => p?.enabled)
+        .map(([k]) => k)
+        .sort(),
+    [providers],
+  );
+  const showProviderSelector = enabledProviderIds.length >= 2;
+  const activeProvider = showProviderSelector
+    ? provider
+    : provider || enabledProviderIds[0] || "";
+  const modelOptions = useMemo(() => {
+    const base = activeProvider ? providers[activeProvider]?.models ?? [] : [];
+    if (model && !base.includes(model)) return [model, ...base];
+    return base;
+  }, [providers, activeProvider, model]);
 
   function toggleMcp(name: string) {
     setSelectedMcps((prev) => {
@@ -74,10 +107,11 @@ export function NewSession() {
         name: name.trim() || `session-${Date.now()}`,
         mcps: Array.from(selectedMcps),
         repos,
-        model,
         mem_limit_bytes: Math.round(memGb * GB),
         cpu_limit_cores: cpuCores,
       };
+      if (provider.trim()) req.provider = provider.trim();
+      if (model.trim()) req.model = model.trim();
       const res = await apiJson<CreateSessionResponse>(
         "/v1/sessions",
         { method: "POST", ...jsonBody(req) },
@@ -125,19 +159,69 @@ export function NewSession() {
               placeholder="https://github.com/me/foo.git"
             />
           </div>
+          {showProviderSelector && (
+            <div className="field">
+              <label htmlFor="provider">Provider</label>
+              <select
+                id="provider"
+                value={provider}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setProvider(next);
+                  // Reset the model when switching providers: pick the new
+                  // provider's default if known, else clear so the user
+                  // sees they need to choose. Avoids sending a claude-*
+                  // model to OpenAI on submit.
+                  if (!next) {
+                    setModel("");
+                  } else {
+                    setModel(providers[next]?.default_model ?? "");
+                  }
+                }}
+              >
+                <option value="">Auto (resolver picks)</option>
+                {enabledProviderIds.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="field" style={{ marginBottom: 0 }}>
             <label htmlFor="model">Model</label>
-            <select
-              id="model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            >
-              {MODELS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+            {modelOptions.length === 0 ? (
+              <input
+                id="model"
+                type="text"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={
+                  showProviderSelector && !provider
+                    ? "Pick a provider above"
+                    : "Default model"
+                }
+                disabled={showProviderSelector && !provider}
+              />
+            ) : (
+              <select
+                id="model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={showProviderSelector && !provider}
+              >
+                <option value="">
+                  {activeProvider
+                    ? `Default for ${activeProvider}`
+                    : "Default"}
                 </option>
-              ))}
-            </select>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
 

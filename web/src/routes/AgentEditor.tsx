@@ -8,6 +8,7 @@ import type {
   ListAgentsResponse,
   ListSkillsResponse,
   McpEntry,
+  ProvidersResponse,
   SkillEntry,
 } from "../types";
 
@@ -23,13 +24,15 @@ const COLOURS: ReadonlyArray<Agent["colour"]> = [
   "slate",
 ];
 
-const MODELS = [
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-];
-
 type Mode = "new" | "edit";
+
+// Built-in models prefixes can hint provider for legacy agent YAMLs that
+// were written before the editor learned to set `provider:` explicitly.
+function inferProvider(model: string): string {
+  if (model.startsWith("claude-")) return "anthropic";
+  if (model.startsWith("gpt-")) return "openai";
+  return "";
+}
 
 export function AgentEditor() {
   const navigate = useNavigate();
@@ -40,12 +43,14 @@ export function AgentEditor() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [mcps, setMcps] = useState<McpEntry[]>([]);
   const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [providers, setProviders] = useState<ProvidersResponse>({});
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [colour, setColour] = useState<string>("slate");
+  const [provider, setProvider] = useState<string>("");
   const [model, setModel] = useState<string>("");
   const [prompt, setPrompt] = useState("");
   const [mcpsAllowed, setMcpsAllowed] = useState<Set<string>>(new Set());
@@ -76,12 +81,14 @@ export function AgentEditor() {
       apiJson<ListAgentsResponse>("/v1/agents"),
       apiJson<{ mcps: McpEntry[] }>("/v1/mcps"),
       apiJson<ListSkillsResponse>("/v1/skills"),
+      apiJson<ProvidersResponse>("/v1/providers").catch(() => ({}) as ProvidersResponse),
     ])
-      .then(([a, m, s]) => {
+      .then(([a, m, s, p]) => {
         if (cancelled) return;
         setAgents(a.agents ?? []);
         setMcps(m.mcps ?? []);
         setSkills(s.skills ?? []);
+        setProviders(p ?? {});
 
         const seedFrom = new URLSearchParams(location.search).get("from");
         const seedName = mode === "edit" ? params.name : seedFrom;
@@ -99,7 +106,9 @@ export function AgentEditor() {
             if (mode === "edit") setName(src.name);
             setDescription(src.description);
             setColour(src.colour || "slate");
-            setModel(src.model || "");
+            const seededModel = src.model || "";
+            setProvider(src.provider || inferProvider(seededModel));
+            setModel(seededModel);
             setPrompt(src.prompt);
             const am = src.mcps_allowed ?? [];
             const sa = src.skills_allowed ?? [];
@@ -127,6 +136,30 @@ export function AgentEditor() {
     for (const a of agents) s.add(a.name);
     return s;
   }, [agents]);
+
+  // ADR 0020 §UX: provider dropdown is invisible when only one provider
+  // is enabled. activeProvider is what we filter the model list against —
+  // either the user's pick or the lone enabled provider.
+  const enabledProviderIds = useMemo(
+    () =>
+      Object.entries(providers)
+        .filter(([, p]) => p?.enabled)
+        .map(([k]) => k)
+        .sort(),
+    [providers],
+  );
+  const showProviderSelector = enabledProviderIds.length >= 2;
+  const activeProvider = showProviderSelector
+    ? provider
+    : provider || enabledProviderIds[0] || "";
+  const modelOptions = useMemo(() => {
+    const base = activeProvider ? providers[activeProvider]?.models ?? [] : [];
+    // Preserve the agent's currently-pinned model in the dropdown even if
+    // it's no longer in the catalog (e.g. pricing-table churn) so we don't
+    // silently mutate it on save.
+    if (model && !base.includes(model)) return [model, ...base];
+    return base;
+  }, [providers, activeProvider, model]);
 
   const nameError = useMemo(() => {
     if (mode === "edit") return null;
@@ -162,6 +195,7 @@ export function AgentEditor() {
         colour,
         prompt,
       };
+      if (provider.trim()) body.provider = provider.trim();
       if (model.trim()) body.model = model.trim();
       if (mcpsConstrained) {
         body.mcps_allowed = Array.from(mcpsAllowed);
@@ -292,10 +326,42 @@ export function AgentEditor() {
               </div>
             </div>
 
+            {showProviderSelector && (
+              <div className="field">
+                <span className="field-label">Provider</span>
+                <span className="field-hint">
+                  Pin this agent to a runtime, or leave as "Any" to let the
+                  workspace resolver pick at session start.
+                </span>
+                <select
+                  value={provider}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setProvider(next);
+                    // Clear a stale model pin when switching providers so
+                    // we don't try to send a claude- model to openai.
+                    if (next && model && !(providers[next]?.models ?? []).includes(model)) {
+                      setModel("");
+                    }
+                    markDirty();
+                  }}
+                >
+                  <option value="">Any (portable)</option>
+                  {enabledProviderIds.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             <div className="field" style={{ marginBottom: 0 }}>
               <span className="field-label">Model</span>
               <span className="field-hint">
-                Leave as "Inherit" to fall back to the default session model.
+                {showProviderSelector && !provider
+                  ? "Pick a provider above to choose a model. Leaving Any selected keeps the agent portable."
+                  : "Leave as \"Inherit\" to fall back to the default session model."}
               </span>
               <select
                 value={model}
@@ -303,9 +369,14 @@ export function AgentEditor() {
                   setModel(e.target.value);
                   markDirty();
                 }}
+                disabled={showProviderSelector && !provider}
               >
-                <option value="">Inherit (default session model)</option>
-                {MODELS.map((m) => (
+                <option value="">
+                  {activeProvider
+                    ? `Inherit (default for ${activeProvider})`
+                    : "Inherit (default session model)"}
+                </option>
+                {modelOptions.map((m) => (
                   <option key={m} value={m}>
                     {m}
                   </option>

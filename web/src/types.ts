@@ -36,10 +36,9 @@ export interface ListSessionsResponse {
   next_cursor?: string | null;
 }
 
-// Provider catalog returned by GET /v1/providers. The session header's
-// model dropdown filters to the entry keyed by the session's provider —
-// today that's always "anthropic" since the Codex split (ADR 0020
-// Phase 1) hasn't landed in this build. Shape is the JSON the daemon's
+// Provider catalog returned by GET /v1/providers. Drives the provider /
+// model selectors in NewSession, AgentEditor, and the session header's
+// mid-session model swap. Shape is the JSON the daemon's
 // websrv.ProviderEntry marshals; SPA tolerates the map being empty (no
 // dropdown rendered) so installs without a pricing-table model list
 // keep the pre-Phase-4 behavior.
@@ -66,6 +65,7 @@ export interface CreateSessionRequest {
   mcps?: string[] | null;
   exclude_mcps?: string[];
   repos?: string[];
+  provider?: string | null;
   model?: string | null;
   mem_limit_bytes?: number | null;
   cpu_limit_cores?: number | null;
@@ -343,6 +343,7 @@ export interface Agent {
   name: string;
   description: string;
   colour: string;
+  provider?: string;
   model?: string;
   prompt: string;
   mcps_allowed?: string[];
