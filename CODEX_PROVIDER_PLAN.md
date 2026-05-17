@@ -158,7 +158,7 @@ completes one full turn including a tool call against
     ```
     codex exec --json \
       --model <M> \
-      --sandbox workspace-write \
+      --sandbox danger-full-access \
       --ask-for-approval never \
       --cd /work \
       [--resume <sid>] \
@@ -528,8 +528,13 @@ no traffic to `api.openai.com`.
 2. **`--device-auth` stability** — verified in phase 2. Fallback: ship
    phase 2 as "API key only for OpenAI" if upstream isn't ready.
 3. **`--sandbox workspace-write --ask-for-approval never` agent stalls**
-   — verified in phase 1. Fallback: `--sandbox danger-full-access`
-   (the container is itself the sandbox).
+   — **resolved (fallback adopted).** codex 0.130.0 on Linux requires
+   `bwrap` (or its bundled namespacer) for any sandbox mode other than
+   `danger-full-access`, and the session container's `--cap-drop ALL`
+   + `no-new-privileges` profile blocks the `unshare(CLONE_NEWUSER)`
+   both code paths need — every tool call aborted with `bwrap: No
+   permissions to create a new namespace`. The driver now ships
+   `--sandbox danger-full-access`; the container is the sandbox.
 4. **Codex JSONL event-schema stability** — pin
    `CODEX_CLI_VERSION` and watch upstream for breakage, same pattern
    as `claude-agent-sdk==0.1.80`.

@@ -233,7 +233,7 @@ subprocess per turn:
 ```
 codex exec --json \
   --model <M> \
-  --sandbox workspace-write \
+  --sandbox danger-full-access \
   --ask-for-approval never \
   --cd /work \
   [--resume <sid>] \
@@ -350,10 +350,16 @@ collides with the bind-mount strategy. Two viable shapes:
 - That `--device-auth` ships stably in the pinned `@openai/codex`
   version. If not, phase 2 (OAuth) falls back to "API-key only for
   OpenAI" until the upstream stabilizes.
-- That `--sandbox workspace-write --ask-for-approval never` gives
+- ~~That `--sandbox workspace-write --ask-for-approval never` gives
   Claude-`bypassPermissions`-equivalent behaviour with no agent stalls
-  on approval. If it doesn't, fall back to `--sandbox
-  danger-full-access` since the container is itself the sandbox.
+  on approval.~~ **Resolved (fallback adopted):** codex 0.130.0 on
+  Linux requires `bwrap` (or its bundled namespacer) for any sandbox
+  mode other than `danger-full-access`, and the session container's
+  `--cap-drop ALL` + `no-new-privileges` profile blocks the
+  `unshare(CLONE_NEWUSER)` both code paths need. Every tool call
+  aborted with `bwrap: No permissions to create a new namespace`. The
+  driver now ships `--sandbox danger-full-access` since the container
+  is itself the sandbox, per this bullet's pre-authorized fallback.
 - Codex JSONL event-schema stability — pin a CLI version, watch for
   breaking changes the same way we pin `claude-agent-sdk`.
 

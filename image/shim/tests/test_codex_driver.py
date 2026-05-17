@@ -491,7 +491,7 @@ class CodexDriverArgvTests(unittest.TestCase):
         self.assertIn("--json", argv)
         self.assertIn("--skip-git-repo-check", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.5")
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "danger-full-access")
         self.assertEqual(argv[argv.index("--cd") + 1], "/work")
         self.assertEqual(argv[-1], "hello world")
         # No resume subcommand on a fresh session.
