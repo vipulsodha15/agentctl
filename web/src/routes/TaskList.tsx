@@ -12,10 +12,28 @@ const COLUMNS: { status: TaskStatus; label: string; hint: string }[] = [
   { status: "abandoned", label: "Abandoned", hint: "Nothing abandoned" },
 ];
 
+type ViewMode = "board" | "list";
+const VIEW_MODE_KEY = "agentctl.tasks.viewMode";
+
+function loadViewMode(): ViewMode {
+  if (typeof window === "undefined") return "board";
+  const v = window.localStorage.getItem(VIEW_MODE_KEY);
+  return v === "list" ? "list" : "board";
+}
+
 export function TaskList() {
   const [rows, setRows] = useState<Task[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(VIEW_MODE_KEY, viewMode);
+    } catch {
+      // ignore storage errors (private mode, quota, etc.)
+    }
+  }, [viewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,18 +89,48 @@ export function TaskList() {
     return map;
   }, [rows]);
 
+  const summary =
+    rows === null
+      ? "Loading…"
+      : rows.length === 0
+        ? "No tasks yet"
+        : viewMode === "board"
+          ? `${rows.length} task${rows.length === 1 ? "" : "s"} across ${COLUMNS.length} lanes`
+          : `${rows.length} task${rows.length === 1 ? "" : "s"}`;
+
   return (
     <section className="page task-board-page">
       <div className="page-header">
         <div style={{ flex: 1 }}>
           <h2>Tasks</h2>
-          <div className="muted" style={{ marginTop: 4 }}>
-            {rows === null
-              ? "Loading…"
-              : rows.length === 0
-                ? "No tasks yet"
-                : `${rows.length} task${rows.length === 1 ? "" : "s"} across ${COLUMNS.length} lanes`}
-          </div>
+          <div className="muted" style={{ marginTop: 4 }}>{summary}</div>
+        </div>
+        <div
+          className="segmented"
+          role="tablist"
+          aria-label="Task view"
+          style={{ alignSelf: "center" }}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={viewMode === "board"}
+            className={`segmented-btn${viewMode === "board" ? " active" : ""}`}
+            onClick={() => setViewMode("board")}
+            title="Board view"
+          >
+            <BoardIcon /> Board
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={viewMode === "list"}
+            className={`segmented-btn${viewMode === "list" ? " active" : ""}`}
+            onClick={() => setViewMode("list")}
+            title="List view"
+          >
+            <ListIcon /> List
+          </button>
         </div>
         <Link to="/tasks/new">
           <button className="primary">+ New task</button>
@@ -117,7 +165,7 @@ export function TaskList() {
         </div>
       )}
 
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && viewMode === "board" && (
         <div className="task-board" role="list" aria-label="Task board">
           {COLUMNS.map((col) => (
             <BoardColumn
@@ -131,7 +179,156 @@ export function TaskList() {
           ))}
         </div>
       )}
+
+      {rows && rows.length > 0 && viewMode === "list" && (
+        <TaskListTable
+          tasks={rows}
+          onOpen={(t) => navigate(`/tasks/${t.task_id}`)}
+        />
+      )}
     </section>
+  );
+}
+
+function TaskListTable({
+  tasks,
+  onOpen,
+}: {
+  tasks: Task[];
+  onOpen: (t: Task) => void;
+}) {
+  const sorted = useMemo(() => {
+    return [...tasks].sort((a, b) => {
+      const ta = Date.parse(a.created_at) || 0;
+      const tb = Date.parse(b.created_at) || 0;
+      return tb - ta;
+    });
+  }, [tasks]);
+
+  return (
+    <table className="session-table task-list-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Assembly line</th>
+          <th>Stage</th>
+          <th>Progress</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {sorted.map((task) => {
+          const stages = task.stages ?? [];
+          const activeIdx = stages.findIndex((s) => s.status === "active");
+          const currentAgent =
+            activeIdx >= 0
+              ? stages[activeIdx]
+              : stages.length > 0
+                ? stages[stages.length - 1]
+                : undefined;
+          const doneCount = stages.filter((s) => s.status === "done").length;
+          const progress =
+            stages.length === 0
+              ? "—"
+              : task.status === "working"
+                ? `${Math.min(doneCount + 1, stages.length)}/${stages.length}`
+                : `${doneCount}/${stages.length}`;
+          return (
+            <tr
+              key={task.task_id}
+              className="row-link"
+              onClick={() => onOpen(task)}
+            >
+              <td className="id-cell">#{task.task_id.slice(-6)}</td>
+              <td style={{ fontWeight: 500 }}>{task.name}</td>
+              <td>
+                <span className={`status-badge status-${task.status}`}>
+                  {task.status.replace("-", " ")}
+                </span>
+              </td>
+              <td style={{ color: "var(--c-fg-mute)" }}>
+                {task.assembly_line_name ? (
+                  <span className="task-card-assembly-line">
+                    <AssemblyLineGlyph />
+                    {task.assembly_line_name}
+                  </span>
+                ) : (
+                  "—"
+                )}
+              </td>
+              <td>
+                {currentAgent ? (
+                  <span
+                    className={`task-card-agent swatch-${currentAgent.colour ?? "slate"}`}
+                  >
+                    <span className="task-card-agent-dot" aria-hidden />
+                    <span className="task-card-agent-name">
+                      {currentAgent.agent_name}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="muted">—</span>
+                )}
+              </td>
+              <td
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12.5,
+                  color: "var(--c-fg-mute)",
+                }}
+              >
+                {progress}
+              </td>
+              <td style={{ color: "var(--c-fg-mute)" }}>
+                {formatRelative(task.created_at)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function BoardIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="12"
+      height="12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ marginRight: 5, verticalAlign: "-2px" }}
+    >
+      <rect x="3" y="4" width="6" height="16" rx="1.5" />
+      <rect x="11" y="4" width="6" height="10" rx="1.5" />
+      <rect x="19" y="4" width="2" height="13" rx="1" />
+    </svg>
+  );
+}
+
+function ListIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="12"
+      height="12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ marginRight: 5, verticalAlign: "-2px" }}
+    >
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
   );
 }
 

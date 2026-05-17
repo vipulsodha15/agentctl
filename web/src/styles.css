@@ -3278,6 +3278,14 @@ form .checkbox-row {
   }
 }
 
+/* List view — reuses .session-table layout with a few tweaks */
+.task-list-table td {
+  vertical-align: middle;
+}
+.task-list-table .task-card-assembly-line {
+  max-width: 220px;
+}
+
 .task-empty {
   padding: 56px 32px;
   text-align: center;
