@@ -40,21 +40,21 @@ type initFlags struct {
 	// shape: either an OPENAI_API_KEY against api.openai.com, or a
 	// custom OPENAI_BASE_URL + bearer token for an OpenAI-compatible
 	// gateway (Azure OpenAI, vLLM, etc.). Phase 5 of CODEX_PROVIDER_PLAN.
-	openaiKey       string
-	openaiBaseURL   string
-	openaiAuthToken string
-	githubPAT            string
-	noImportSkills       bool
-	importSkills         bool
-	claudePath           string
-	noImportCodexSkills  bool
-	importCodexSkills    bool
-	codexPath            string
-	foreground      bool
-	resetToken      string
-	resetWebToken   bool
-	repair          bool
-	skipBuild       bool
+	openaiKey           string
+	openaiBaseURL       string
+	openaiAuthToken     string
+	githubPAT           string
+	noImportSkills      bool
+	importSkills        bool
+	claudePath          string
+	noImportCodexSkills bool
+	importCodexSkills   bool
+	codexPath           string
+	foreground          bool
+	resetToken          string
+	resetWebToken       bool
+	repair              bool
+	skipBuild           bool
 }
 
 func runInit(ctx context.Context, env *Env, args []string) int {
