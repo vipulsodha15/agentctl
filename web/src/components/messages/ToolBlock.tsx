@@ -51,9 +51,7 @@ export function ToolBlock({ message, mcps }: Props) {
   );
   const status = message.status ?? (message.is_error ? "error" : "done");
 
-  // Auto-expand failures, sensitive results (skills), and the still-running
-  // call; auto-collapse routine successes so the transcript stays scannable.
-  const [open, setOpen] = useState(status === "error" || status === "pending");
+  const [open, setOpen] = useState(false);
 
   const mcpHealth = header.isMcp && header.mcpServer
     ? mcps.find((m) => m.name === header.mcpServer)?.status
