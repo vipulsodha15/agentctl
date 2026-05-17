@@ -96,10 +96,9 @@ func Default() Config {
 			// sets `anthropic_default = "..."` explicitly overrides this
 			// path. See applyDefaults() and the legacy-fallback test.
 			AnthropicDefault: "",
-			// TODO(verify-at-impl): confirm the exact OpenAI Codex model id
-			// shipped at the time phase 1 lands — OpenAI dev docs currently
-			// reference gpt-5.4 / gpt-5.3-codex; the ADR targets gpt-5.5
-			// (ADR 0020 §Items to verify).
+			// gpt-5.5 is OpenAI's top frontier coding model as of the
+			// screenshot-sourced refresh on 2026-05-17. The full lineup
+			// is enumerated in [pricing.tables.models] below.
 			OpenAIDefault: "gpt-5.5",
 		},
 		Pricing: PricingSection{
@@ -109,12 +108,30 @@ func Default() Config {
 					"claude-opus-4-7":   {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
 					"claude-sonnet-4-6": {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
 					"claude-haiku-4-5":  {Input: 0.80, Output: 4.00, CacheRead: 0.08, CacheWrite: 1.00},
-					// TODO(verify-at-impl): gpt-5.5 list pricing — these
-					// numbers are placeholders pending confirmation
-					// (ADR 0020 §Items to verify, CODEX_PROVIDER_PLAN
-					// risks #1). The structure is what matters in phase 1;
-					// numbers are easy to update once OpenAI publishes them.
-					"gpt-5.5": {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
+					// OpenAI frontier lineup + Codex-tuned variants
+					// snapshotted from platform.openai.com/docs/models
+					// and platform.openai.com/docs/codex on 2026-05-17.
+					// IDs are stable; the rates below are TIER-RELATIVE
+					// PLACEHOLDERS pending live pricing — OpenAI's
+					// pricing page is bot-blocked, so users running
+					// cost reports against these models should override
+					// the entries in their own config.toml until we
+					// wire a pricing refresh path. CostFor() returns
+					// has_unknown_model=false once a row is in this
+					// table, so do NOT zero these out: zeros would
+					// silently report $0 cost.
+					"gpt-5.5":             {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
+					"gpt-5.5-pro":         {Input: 10.00, Output: 50.00, CacheRead: 1.00, CacheWrite: 12.50},
+					"gpt-5.4":             {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
+					"gpt-5.4-pro":         {Input: 10.00, Output: 50.00, CacheRead: 1.00, CacheWrite: 12.50},
+					"gpt-5.4-mini":        {Input: 1.00, Output: 5.00, CacheRead: 0.10, CacheWrite: 1.25},
+					"gpt-5.4-nano":        {Input: 0.25, Output: 1.25, CacheRead: 0.025, CacheWrite: 0.3125},
+					"gpt-5":               {Input: 2.50, Output: 12.50, CacheRead: 0.25, CacheWrite: 3.125},
+					"gpt-5-mini":          {Input: 0.50, Output: 2.50, CacheRead: 0.05, CacheWrite: 0.625},
+					"gpt-5-nano":          {Input: 0.125, Output: 0.625, CacheRead: 0.0125, CacheWrite: 0.15625},
+					"gpt-4.1":             {Input: 1.50, Output: 7.50, CacheRead: 0.15, CacheWrite: 1.875},
+					"gpt-5.3-codex":       {Input: 2.50, Output: 12.50, CacheRead: 0.25, CacheWrite: 3.125},
+					"gpt-5.3-codex-spark": {Input: 1.00, Output: 5.00, CacheRead: 0.10, CacheWrite: 1.25},
 				},
 			},
 		},
