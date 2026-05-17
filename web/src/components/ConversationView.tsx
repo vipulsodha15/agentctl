@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type { ConversationMessage, McpStatus, UsageTotals } from "../types";
 import { UserMessage } from "./messages/UserMessage";
 import { AssistantMessage } from "./messages/AssistantMessage";
@@ -29,21 +29,31 @@ export function ConversationView({
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
+  // Tracks scrolls we initiated so the onScroll handler doesn't mistake
+  // them for the user scrolling away from the bottom. The CSS sets
+  // `scroll-behavior: smooth`, so each programmatic scroll can dispatch
+  // multiple intermediate scroll events; we explicitly use `behavior:
+  // "instant"` below to land in one go and clear the guard on the next
+  // tick (scroll events are dispatched asynchronously).
+  const programmaticScrollRef = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
   const [newSinceScroll, setNewSinceScroll] = useState(0);
   const last = messages[messages.length - 1];
 
   // Auto-scroll on every new message / streaming update unless the user has
   // actively scrolled up to read. Sending a new user message always re-pins
-  // to the bottom.
-  useEffect(() => {
+  // to the bottom. useLayoutEffect + instant scroll keeps the bottom pinned
+  // synchronously as deltas arrive — useEffect + smooth scroll would race
+  // the streaming updates and stall the auto-scroll.
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     if (last?.kind === "user") {
       userScrolledUpRef.current = false;
     }
     if (!userScrolledUpRef.current) {
-      el.scrollTop = el.scrollHeight;
+      programmaticScrollRef.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior });
       setNewSinceScroll(0);
     } else {
       setNewSinceScroll((n) => n + 1);
@@ -54,6 +64,10 @@ export function ConversationView({
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false;
+      return;
+    }
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     userScrolledUpRef.current = !nearBottom;
     setAtBottom(nearBottom);
@@ -68,7 +82,10 @@ export function ConversationView({
 
   const jumpToBottom = () => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) {
+      programmaticScrollRef.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior });
+    }
     userScrolledUpRef.current = false;
   };
 
