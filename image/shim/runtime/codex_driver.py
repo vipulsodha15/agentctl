@@ -438,34 +438,48 @@ class CodexDriver:
 # Codex JSONL → internal-vocabulary translation
 # ---------------------------------------------------------------------------
 #
-# TODO(verify-codex-jsonl): every shape below is the project's best-effort
-# read of ``codex exec --json`` as of the ADR. The CLI's JSONL is
-# documented at developers.openai.com/codex/cli/reference, but the schema
-# has shifted between versions; pin the CLI version (ADR-0020 §6) and
-# re-verify these mappings against a live run before phase 1 ships.
+# codex-cli 0.130.0 JSONL schema (verified against
+# codex-rs/exec/src/exec_events.rs in the openai/codex repo). The
+# ThreadEvent enum is tagged on ``type``; ThreadItem carries an outer
+# ``id`` plus a flattened ``type`` discriminator for the inner item kind.
 #
-# The shapes assumed here:
+#   {"type": "thread.started", "thread_id": "<uuid>"}
+#   {"type": "turn.started"}
+#   {"type": "item.started", "item": {"id": "...", "type": "<kind>", ...}}
+#   {"type": "item.updated", "item": {...}}
+#   {"type": "item.completed", "item": {...}}
+#   {"type": "turn.completed", "usage": {
+#       "input_tokens": N, "cached_input_tokens": K,
+#       "output_tokens": M, "reasoning_output_tokens": R
+#   }}
+#   {"type": "turn.failed", "error": {"message": "..."}}
+#   {"type": "error", "message": "..."}
+#
+# Tool-like items emit started → completed; AgentMessage / Reasoning /
+# Error emit completed only. The tool-like item shapes are:
+#
+#   agent_message:    {"text": "..."}
+#   reasoning:        {"text": "..."}
+#   command_execution:{"command": "ls", "aggregated_output": "...",
+#                      "exit_code": 0, "status": "completed"}
+#   file_change:      {"changes": [{"path": "foo", "kind": "add"}],
+#                      "status": "completed"}
+#   mcp_tool_call:    {"server": "...", "tool": "...", "arguments": {...},
+#                      "result": {"content": [...]}|null,
+#                      "error": {"message": "..."}|null,
+#                      "status": "completed"}
+#   web_search:       {"query": "...", "action": {"type": "search", ...}}
+#   todo_list:        {"items": [{"text": "...", "completed": false}, ...]}
+#
+# Legacy shapes still accepted for back-compat with older CLI revisions
+# that emitted OpenAI-responses-style frames:
 #
 #   {"type": "session.created", "session_id": "..."}
-#   {"type": "item.started",   "item": {"id": "...", "type": "message", ...}}
-#   {"type": "item.delta",     "item_id": "...", "delta": {"text": "..."}}
-#   {"type": "item.completed", "item": {
-#       "id": "...", "type": "message", "content":
-#           [{"type": "output_text", "text": "..."}]
-#   }}
-#   {"type": "item.completed", "item": {
-#       "id": "...", "type": "function_call",
-#       "name": "shell", "arguments": "{\"cmd\":\"ls\"}"
-#   }}
-#   {"type": "item.completed", "item": {
-#       "id": "...", "type": "function_call_output",
-#       "call_id": "...", "output": "...", "is_error": false
-#   }}
-#   {"type": "turn.completed", "usage": {
-#       "input_tokens": N, "output_tokens": M,
-#       "cached_input_tokens": K
-#   }, "model": "gpt-5.5"}
-#   {"type": "error", "message": "..."}
+#   {"type": "item.delta", "delta": {"text": "..."}}
+#   {"type": "item.completed", "item": {"type": "function_call",
+#                                       "name": "...", "arguments": "..."}}
+#   {"type": "item.completed", "item": {"type": "function_call_output",
+#                                       "call_id": "...", "output": "..."}}
 
 
 def _extract_codex_session_id(event: dict) -> Optional[str]:
@@ -494,6 +508,20 @@ def _extract_codex_session_id(event: dict) -> Optional[str]:
     return None
 
 
+# Item types that map to the shared tool.call / tool.result vocabulary.
+# Anything in this set gets a tool.call on item.started and a tool.result
+# on item.completed so the web/CLI renders a collapsed tool card. Items
+# outside the set (agent_message, reasoning) take their own paths.
+_TOOL_ITEM_TYPES = frozenset({
+    "command_execution",
+    "file_change",
+    "mcp_tool_call",
+    "web_search",
+    "todo_list",
+    "collab_tool_call",
+})
+
+
 def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]]:
     """Map a single Codex JSONL event into shared-vocabulary tuples.
 
@@ -505,10 +533,9 @@ def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]
     out: list[tuple[str, dict]] = []
     etype = event.get("type") or ""
 
-    # TODO(verify-codex-jsonl): the ``item.delta`` shape with a nested
-    # ``delta.text`` mirrors the OpenAI responses-API streaming format,
-    # which the Codex CLI is reported to forward; verify on the pinned
-    # version.
+    # Legacy responses-API streaming shape — codex-cli 0.130.0 doesn't
+    # emit this on plain turns, but older revisions did and a future one
+    # may bring it back. Forward whatever text we can extract.
     if etype == "item.delta":
         delta = event.get("delta") or {}
         text = ""
@@ -518,6 +545,23 @@ def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]
             text = delta
         if text:
             out.append((EVENT_ASSISTANT_DELTA, {"turn_id": turn_id, "delta": text}))
+        return out
+
+    if etype == "item.started":
+        item = event.get("item") or {}
+        if not isinstance(item, dict):
+            return out
+        itype = item.get("type") or ""
+        # Tool-like items (command_execution, file_change, …) get a
+        # tool.call here so the web card opens in the "running" state;
+        # item.completed below fills it in with status + output.
+        if itype in _TOOL_ITEM_TYPES:
+            call = _tool_call_from_codex_item(item, itype, turn_id)
+            if call is not None:
+                out.append(call)
+        # Legacy back-compat: older codex revisions emitted function_call
+        # at item.completed time only, so the started branch here is a
+        # no-op for them. Nothing else to do.
         return out
 
     if etype == "item.completed":
@@ -540,10 +584,28 @@ def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]
                 }))
             return out
 
-        # TODO(verify-codex-jsonl): tool call shape. Codex uses
-        # OpenAI-function-style ``function_call`` items with the arg
-        # blob serialized as a string under ``arguments``; decode it
-        # before forwarding so the renderer can introspect it.
+        # Reasoning items are the model's internal chain — codex emits
+        # them only on completion. The shared vocabulary has no
+        # thinking-block event today, so drop them for now (the JSONL
+        # mirror still preserves the raw record for replay).
+        if itype == "reasoning":
+            return out
+
+        # Tool-like items (codex-cli 0.130.0): emit tool.result paired
+        # back to the tool.call we emitted at item.started time. The
+        # web's conversation reducer keys on tool_use_id == item.id and
+        # folds the result into the pending row.
+        if itype in _TOOL_ITEM_TYPES:
+            result = _tool_result_from_codex_item(item, itype, turn_id)
+            if result is not None:
+                out.append(result)
+            return out
+
+        # Legacy responses-API tool shape: older codex revisions packed
+        # tool calls as ``function_call`` items with a string-encoded
+        # ``arguments`` blob, and results as separate
+        # ``function_call_output`` items keyed by ``call_id``. Keep
+        # accepting these so a CLI rollback doesn't blank out tool cards.
         if itype in ("function_call", "tool_call"):
             args_raw = item.get("arguments")
             if isinstance(args_raw, str):
@@ -563,9 +625,6 @@ def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]
             }))
             return out
 
-        # TODO(verify-codex-jsonl): tool-result shape. Codex pairs
-        # ``function_call_output`` items with the originating call's
-        # ``call_id``; the result text is under ``output``.
         if itype in ("function_call_output", "tool_call_output", "tool_result"):
             content = item.get("output")
             if content is None:
@@ -592,19 +651,254 @@ def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]
             }))
         return out
 
-    if etype == "error":
-        # TODO(verify-codex-jsonl): error frames don't have a documented
-        # canonical shape yet; surface the message as a failed turn.end
-        # so agentd settles the in-flight state. The driver caller logs
-        # the underlying stderr separately.
+    if etype in ("error", "turn.failed"):
+        # codex-cli 0.130.0 emits turn.failed with {"error": {"message":
+        # "..."}} on a model/CLI error; older revisions used a top-level
+        # ``error`` frame. Surface both as a failed turn.end so agentd
+        # settles the in-flight state. The driver caller logs the
+        # underlying stderr separately.
+        err = event.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("error") or ""
+        else:
+            msg = err or event.get("message") or ""
         out.append((EVENT_TURN_END, {
             "turn_id": turn_id,
             "ok": False,
-            "error": str(event.get("message") or event.get("error") or "codex error"),
+            "error": str(msg or "codex error"),
         }))
         return out
 
     return out
+
+
+def _tool_call_from_codex_item(
+    item: dict, itype: str, turn_id: str,
+) -> Optional[tuple[str, dict]]:
+    """Build a ``tool.call`` event from a codex-cli 0.130.0 tool-like item.
+
+    Returns ``None`` if the item has no id (the conversation reducer
+    keys results back to calls by ``tool_use_id``, so a missing id would
+    leave the row orphaned). Tool names match the Claude SDK's vocabulary
+    where the input shape lines up (``Bash`` for shells, ``Edit``/``Write``
+    for file patches, ``WebSearch``/``TodoWrite`` for the obvious ones)
+    so the existing web ``formatToolHeader`` renders nice verbs/icons
+    instead of falling back to the raw item type.
+    """
+
+    item_id = str(item.get("id") or "")
+    if not item_id:
+        return None
+    name, tinput = _codex_tool_name_and_input(item, itype)
+    return (EVENT_TOOL_CALL, {
+        "turn_id": turn_id,
+        "tool_use_id": item_id,
+        "name": name,
+        "input": tinput,
+    })
+
+
+def _tool_result_from_codex_item(
+    item: dict, itype: str, turn_id: str,
+) -> Optional[tuple[str, dict]]:
+    """Build a ``tool.result`` event paired with the call's item id."""
+
+    item_id = str(item.get("id") or "")
+    if not item_id:
+        return None
+    content, is_error = _codex_tool_output(item, itype)
+    return (EVENT_TOOL_RESULT, {
+        "turn_id": turn_id,
+        "tool_use_id": item_id,
+        "content": content,
+        "is_error": is_error,
+    })
+
+
+def _codex_tool_name_and_input(item: dict, itype: str) -> tuple[str, dict]:
+    """Map a codex item to a (tool_name, input_dict) pair the web renders.
+
+    The names mirror Claude SDK tool names where the shape matches so
+    ``formatToolHeader`` picks the right verb/icon (``Bash`` → ⌘ "Ran …",
+    ``Edit`` → ✎ "Edited …"). Items without a Claude analog fall back to
+    a readable label like ``ApplyPatch`` and use the default renderer.
+    """
+
+    if itype == "command_execution":
+        cmd = item.get("command")
+        return ("Bash", {
+            "command": cmd if isinstance(cmd, str) else "",
+        })
+
+    if itype == "file_change":
+        changes = item.get("changes")
+        if not isinstance(changes, list):
+            changes = []
+        # Single-file patches map onto the Edit/Write shape so the web
+        # shows "Edited foo.py" / "Wrote new.py" instead of a generic
+        # tool card. Multi-file patches keep the changes list intact
+        # under a generic ``ApplyPatch`` name (no special formatter).
+        if len(changes) == 1 and isinstance(changes[0], dict):
+            path = str(changes[0].get("path") or "")
+            kind = str(changes[0].get("kind") or "").lower()
+            if kind == "add":
+                return ("Write", {"file_path": path})
+            if kind == "delete":
+                return ("Delete", {"file_path": path})
+            # Default (update / unknown): Edit.
+            return ("Edit", {"file_path": path})
+        # Multi-file: surface the full list under input.changes so a
+        # power user can inspect the raw patch in the "Input" panel.
+        return ("ApplyPatch", {"changes": [c for c in changes if isinstance(c, dict)]})
+
+    if itype == "mcp_tool_call":
+        server = str(item.get("server") or "")
+        tool = str(item.get("tool") or "")
+        args = item.get("arguments")
+        if not isinstance(args, dict):
+            args = {} if args is None else {"_raw": args}
+        # The web's ``MCP_RE`` matches the Claude SDK convention
+        # ``mcp__<server>__<tool>``; emit the same shape so MCP tools
+        # render with the MCP badge and the server's health pill.
+        full_name = f"mcp__{server}__{tool}" if server and tool else (tool or "mcp_tool")
+        return (full_name, args)
+
+    if itype == "web_search":
+        query = item.get("query")
+        action = item.get("action")
+        tinput: dict = {}
+        if isinstance(query, str) and query:
+            tinput["query"] = query
+        if isinstance(action, dict):
+            tinput["action"] = action
+        return ("WebSearch", tinput)
+
+    if itype == "todo_list":
+        items = item.get("items")
+        if not isinstance(items, list):
+            items = []
+        return ("TodoWrite", {"todos": items})
+
+    if itype == "collab_tool_call":
+        # Multi-agent coordination — keep the raw shape under a clear
+        # name so the web shows it as a tool card without trying to
+        # format it.
+        return ("CollabTool", {k: v for k, v in item.items() if k not in ("id", "type")})
+
+    # Defensive fallback for any new tool-like item type we forgot to
+    # special-case: keep the original item type as the tool name and
+    # forward all non-meta fields so the user still sees the call.
+    return (itype or "tool", {
+        k: v for k, v in item.items() if k not in ("id", "type", "status")
+    })
+
+
+def _codex_tool_output(item: dict, itype: str) -> tuple[str, bool]:
+    """Build the (output_text, is_error) pair for a completed item.
+
+    ``status`` is the cross-item-type signal codex uses for success vs
+    failure ("completed" / "failed" / "declined"); we surface the body
+    in a per-type-aware way (aggregated stdout for shells, change list
+    for patches, structured/text content for MCP).
+    """
+
+    status = str(item.get("status") or "").lower()
+    is_error = status in ("failed", "declined")
+
+    if itype == "command_execution":
+        out_str = item.get("aggregated_output")
+        text = out_str if isinstance(out_str, str) else ""
+        exit_code = item.get("exit_code")
+        # On declined/failed runs with no stdout, give the user a hint
+        # rather than an empty card.
+        if not text and is_error:
+            if status == "declined":
+                text = "(command declined by sandbox)"
+            elif isinstance(exit_code, int) and exit_code != 0:
+                text = f"(exit code {exit_code})"
+            else:
+                text = "(command failed)"
+        return (text, is_error)
+
+    if itype == "file_change":
+        changes = item.get("changes")
+        if not isinstance(changes, list):
+            changes = []
+        # Human-readable summary; the structured input still carries the
+        # full change list for any consumer that wants it.
+        parts: list[str] = []
+        for c in changes:
+            if not isinstance(c, dict):
+                continue
+            path = str(c.get("path") or "")
+            kind = str(c.get("kind") or "")
+            if path or kind:
+                parts.append(f"{kind}: {path}".strip(": ").strip())
+        body = "\n".join(parts)
+        if not body and is_error:
+            body = f"(patch {status})"
+        return (body, is_error)
+
+    if itype == "mcp_tool_call":
+        # mcp errors come on a dedicated ``error`` field; result has a
+        # ``content`` array of JSON values plus optional
+        # ``structured_content``. Prefer the text body, fall through to
+        # JSON-stringified blocks when the content isn't plain text.
+        err = item.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return (str(err.get("message")), True)
+        result = item.get("result")
+        if isinstance(result, dict):
+            content = result.get("content")
+            if isinstance(content, list):
+                text_parts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict) and isinstance(block.get("text"), str):
+                        text_parts.append(block["text"])
+                    else:
+                        text_parts.append(json.dumps(_to_jsonable(block), sort_keys=True))
+                joined = "\n".join(p for p in text_parts if p)
+                if joined:
+                    return (joined, is_error)
+            structured = result.get("structured_content")
+            if structured is not None:
+                return (json.dumps(_to_jsonable(structured), sort_keys=True), is_error)
+        return ("", is_error)
+
+    if itype == "web_search":
+        # Codex doesn't ship search hits in the item itself (the model
+        # consumes them internally); close the card cleanly with an
+        # empty body unless the run was declined/failed.
+        if is_error:
+            return (f"(web_search {status})", True)
+        return ("", False)
+
+    if itype == "todo_list":
+        items = item.get("items")
+        if not isinstance(items, list):
+            return ("", is_error)
+        lines: list[str] = []
+        for t in items:
+            if not isinstance(t, dict):
+                continue
+            mark = "x" if t.get("completed") else " "
+            text = str(t.get("text") or "")
+            lines.append(f"- [{mark}] {text}")
+        return ("\n".join(lines), is_error)
+
+    # Fallback: anything else the JSONL surfaces — emit an empty body
+    # and trust ``status`` for the error chip.
+    return ("", is_error)
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    return repr(value)
 
 
 def _coerce_codex_text(item: dict) -> str:
