@@ -7,6 +7,10 @@ import { FileDiffView, type DiffViewMode } from "./FileDiffView";
 
 interface Props {
   sessionId: string;
+  // Bump to force a re-fetch of the active repo's diff without unmounting
+  // the panel. Used by the task page to refresh the drawer after each turn
+  // ends, so the tree reflects files just written.
+  refreshKey?: number;
 }
 
 interface PushOutcome {
@@ -23,7 +27,7 @@ interface RepoDiff {
   error?: string;
 }
 
-export function ChangesPanel({ sessionId }: Props) {
+export function ChangesPanel({ sessionId, refreshKey }: Props) {
   const [repos, setRepos] = useState<RepoInfo[] | null>(null);
   const [diffs, setDiffs] = useState<Record<string, RepoDiff>>({});
   const [activeRepo, setActiveRepo] = useState<string | null>(null);
@@ -109,6 +113,18 @@ export function ChangesPanel({ sessionId }: Props) {
     if (diffs[activeRepo]) return;
     void fetchRepoDiff(activeRepo);
   }, [activeRepo, diffs, fetchRepoDiff]);
+
+  // Re-fetch the active repo's diff when the parent bumps refreshKey. Skip
+  // the initial mount (refreshKey === undefined or 0 and no prior diff) so
+  // we don't double-fetch alongside the lazy effect above.
+  useEffect(() => {
+    if (refreshKey === undefined) return;
+    if (!activeRepo) return;
+    void fetchRepoDiff(activeRepo);
+    // Intentionally exclude activeRepo/fetchRepoDiff — they're stable for a
+    // given sessionId and we only want this firing on refreshKey changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   // When the active repo's diff finishes loading, auto-select the first
   // file so the right pane isn't blank.
