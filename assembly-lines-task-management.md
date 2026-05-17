@@ -437,17 +437,23 @@ GitHub, not in any local volume.
    session:
 
    ```
-   Produce your synthesis for the next stage now using this structure:
+   Produce your handoff for the next stage now. The next agent only
+   receives this document — your chat history is not carried forward,
+   so anything you want them to have must appear below.
 
-   ## Summary
-   What you did and what you found, in 2–4 sentences.
+   ## Deliverable
+   Your role's actual output — the plan, RCA, findings, review, design
+   notes, patch summary, whatever you were asked to produce. Reproduce
+   it here in full; do not compress or paraphrase. If you already wrote
+   it earlier in chat, restate it here so this document stands alone.
 
    ## Key evidence
    Concrete pointers — file:line refs, log excerpts, repro steps, links.
    Be specific.
 
    ## Recommendation for the next stage
-   What the next agent should do with what you've handed over.
+   What the next agent should do first, what to be careful about, what
+   not to redo.
 
    ## Open questions
    Anything you could not resolve.
@@ -527,7 +533,7 @@ switcher exposes Diff and Cost views.
 │  ▌   I'm ready to hand off.                 │                │
 │                                             │                │
 │  ▌🟦 bug-investigator (synthesis)           │                │
-│  ▌   ## Summary …                           │                │
+│  ▌   ## Deliverable …                       │                │
 │  ▌   ## Key evidence …                      │                │
 │  ▌   ## Recommendation …                    │                │
 │  ▌   ## Open questions …                    │                │
