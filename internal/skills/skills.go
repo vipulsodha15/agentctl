@@ -379,6 +379,9 @@ func (m *manager) ImportDirectory(rootDir string, opts ImportOptions) ([]string,
 		if !ent.IsDir() {
 			continue
 		}
+		if strings.HasPrefix(ent.Name(), ".") {
+			continue
+		}
 		full := filepath.Join(rootDir, ent.Name())
 		res, err := m.Import(full, ent.Name(), opts)
 		if err != nil {

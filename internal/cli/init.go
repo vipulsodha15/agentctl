@@ -42,10 +42,13 @@ type initFlags struct {
 	openaiKey       string
 	openaiBaseURL   string
 	openaiAuthToken string
-	githubPAT       string
-	noImportSkills  bool
-	importSkills    bool
-	claudePath      string
+	githubPAT            string
+	noImportSkills       bool
+	importSkills         bool
+	claudePath           string
+	noImportCodexSkills  bool
+	importCodexSkills    bool
+	codexPath            string
 	foreground      bool
 	resetToken      string
 	resetWebToken   bool
@@ -67,6 +70,9 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	fs.BoolVar(&f.noImportSkills, "no-import-claude-skills", false, "skip the Claude Code skills import step")
 	fs.BoolVar(&f.importSkills, "import-claude-skills", false, "force the Claude Code skills import step")
 	fs.StringVar(&f.claudePath, "claude-path", "", "override the Claude Code skills source path")
+	fs.BoolVar(&f.noImportCodexSkills, "no-import-codex-skills", false, "skip the Codex CLI skills import step")
+	fs.BoolVar(&f.importCodexSkills, "import-codex-skills", false, "force the Codex CLI skills import step")
+	fs.StringVar(&f.codexPath, "codex-path", "", "override the Codex CLI skills source path")
 	fs.BoolVar(&f.foreground, "foreground", false, "skip system-service install and run agentd in foreground")
 	fs.StringVar(&f.resetToken, "reset-token", "", "force re-prompt for a token kind: anthropic|github")
 	fs.BoolVar(&f.resetWebToken, "reset-web-token", false, "regenerate the web bearer token")
@@ -214,6 +220,12 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 	if !f.noImportSkills {
 		if err := importClaudeSkillsAtInit(env, layout, f); err != nil {
 			fmt.Fprintf(env.Stderr, "skills import: %v\n", err)
+		}
+	}
+
+	if !f.noImportCodexSkills {
+		if err := importCodexSkillsAtInit(env, layout, f); err != nil {
+			fmt.Fprintf(env.Stderr, "codex skills import: %v\n", err)
 		}
 	}
 
@@ -413,6 +425,8 @@ type installMetadata struct {
 	SourceURL             string   `json:"source_url,omitempty"`
 	ClaudeImportOfferedAt *string  `json:"claude_import_offered_at"`
 	ClaudeImportedSkills  []string `json:"claude_imported_skills"`
+	CodexImportOfferedAt  *string  `json:"codex_import_offered_at"`
+	CodexImportedSkills   []string `json:"codex_imported_skills"`
 }
 
 func writeInstallMetadata(layout paths.Layout) error {
@@ -425,6 +439,8 @@ func writeInstallMetadata(layout paths.Layout) error {
 		InstalledAt:           time.Now().UTC().Format(time.RFC3339),
 		ClaudeImportOfferedAt: nil,
 		ClaudeImportedSkills:  []string{},
+		CodexImportOfferedAt:  nil,
+		CodexImportedSkills:   []string{},
 	}
 	data, _ := json.MarshalIndent(meta, "", "  ")
 	return os.WriteFile(layout.InstallMeta, data, 0o644)
@@ -454,6 +470,60 @@ func recordClaudeImportedSkills(layout paths.Layout, names []string, offeredAt t
 	return os.WriteFile(layout.InstallMeta, out, 0o644)
 }
 
+func loadInstallMetadata(layout paths.Layout) installMetadata {
+	var meta installMetadata
+	data, err := os.ReadFile(layout.InstallMeta)
+	if err != nil {
+		return meta
+	}
+	_ = json.Unmarshal(data, &meta)
+	return meta
+}
+
+func claudeImportAlreadyOffered(layout paths.Layout) bool {
+	meta := loadInstallMetadata(layout)
+	return meta.ClaudeImportOfferedAt != nil && *meta.ClaudeImportOfferedAt != ""
+}
+
+func codexImportAlreadyOffered(layout paths.Layout) bool {
+	meta := loadInstallMetadata(layout)
+	return meta.CodexImportOfferedAt != nil && *meta.CodexImportOfferedAt != ""
+}
+
+func recordCodexImportedSkills(layout paths.Layout, names []string, offeredAt time.Time) error {
+	meta := loadInstallMetadata(layout)
+	at := offeredAt.UTC().Format(time.RFC3339)
+	meta.CodexImportOfferedAt = &at
+	for _, n := range names {
+		seen := false
+		for _, existing := range meta.CodexImportedSkills {
+			if existing == n {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			meta.CodexImportedSkills = append(meta.CodexImportedSkills, n)
+		}
+	}
+	out, _ := json.MarshalIndent(meta, "", "  ")
+	return os.WriteFile(layout.InstallMeta, out, 0o644)
+}
+
+func countSkillDirs(root string) (int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, ent := range entries {
+		if ent.IsDir() {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func importClaudeSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error {
 	src := f.claudePath
 	if src == "" {
@@ -464,6 +534,29 @@ func importClaudeSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error 
 			return nil
 		}
 		return err
+	}
+	if !f.importSkills {
+		if claudeImportAlreadyOffered(layout) {
+			return nil
+		}
+		count, err := countSkillDirs(src)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			_ = recordClaudeImportedSkills(layout, nil, time.Now())
+			return nil
+		}
+		prompt := fmt.Sprintf("Import %d Claude Code skill(s) from %s? [y/N]: ", count, src)
+		ok, err := promptYesNo(env, prompt, false)
+		if err != nil {
+			return err
+		}
+		_ = recordClaudeImportedSkills(layout, nil, time.Now())
+		if !ok {
+			fmt.Fprintln(env.Stdout, "claude skills: import skipped.")
+			return nil
+		}
 	}
 	mgr := skills.NewManager(skills.Options{
 		BuiltinDir: layout.BuiltinSkills,
@@ -484,6 +577,75 @@ func importClaudeSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error 
 	}
 	if len(imported) > 0 {
 		_ = recordClaudeImportedSkills(layout, imported, time.Now())
+	}
+	return nil
+}
+
+func importCodexSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error {
+	src := f.codexPath
+	if src == "" {
+		codexHome := os.Getenv("CODEX_HOME")
+		if codexHome == "" {
+			codexHome = filepath.Join(layout.Home, ".codex")
+		}
+		src = filepath.Join(codexHome, "skills")
+	}
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !f.importCodexSkills {
+		if codexImportAlreadyOffered(layout) {
+			return nil
+		}
+		count, err := countSkillDirs(src)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			_ = recordCodexImportedSkills(layout, nil, time.Now())
+			return nil
+		}
+		prompt := fmt.Sprintf("Import %d Codex CLI skill(s) from %s? [y/N]: ", count, src)
+		ok, err := promptYesNo(env, prompt, false)
+		if err != nil {
+			return err
+		}
+		_ = recordCodexImportedSkills(layout, nil, time.Now())
+		if !ok {
+			fmt.Fprintln(env.Stdout, "codex skills: import skipped.")
+			return nil
+		}
+	}
+	mgr := skills.NewManager(skills.Options{
+		BuiltinDir: layout.BuiltinSkills,
+		CustomDir:  layout.CustomSkills,
+	})
+	imported, skipped, err := mgr.ImportDirectory(src, skills.ImportOptions{Force: f.importCodexSkills})
+	if err != nil {
+		return err
+	}
+	if len(imported) == 0 && len(skipped) == 0 {
+		fmt.Fprintln(env.Stdout, "codex skills: nothing to import.")
+	}
+	claudeSet := map[string]bool{}
+	for _, n := range loadInstallMetadata(layout).ClaudeImportedSkills {
+		claudeSet[n] = true
+	}
+	for _, im := range imported {
+		fmt.Fprintf(env.Stdout, "codex skills: imported %s\n", im)
+	}
+	for _, sk := range skipped {
+		reason := sk.Reason
+		if reason == "already in custom-skills" && claudeSet[sk.Name] {
+			reason = "already imported from claude — pass --import-codex-skills to overwrite"
+		}
+		fmt.Fprintf(env.Stderr, "codex skills: skipped %s (%s)\n", sk.Name, reason)
+	}
+	if len(imported) > 0 {
+		_ = recordCodexImportedSkills(layout, imported, time.Now())
 	}
 	return nil
 }
