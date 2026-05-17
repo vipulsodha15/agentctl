@@ -1,12 +1,17 @@
 """Tests for the Codex driver — JSONL translation and per-turn lifecycle.
 
-The Codex CLI JSONL schema is the per-ADR (0020 §"verify at impl")
-unknown. The fixtures here encode the project's best-effort reading of
-``codex exec --json`` as of refactor time; every shape that depends on
-a guessed event field is also marked ``TODO(verify-codex-jsonl)`` in
-the driver. Once we can run the pinned CLI version, swap these
-fixtures for captured real output and the assertions should still
-hold without code changes.
+The fixtures here mirror the JSONL schema codex-cli 0.130.0 actually
+emits (captured against the pinned CLI in the container image):
+
+  * ``thread.started`` (with ``thread_id``) instead of the older
+    ``session.created`` shape.
+  * ``item.completed`` with ``item.type == "agent_message"`` and text on
+    a top-level ``text`` field.
+
+Older shapes (``session.created`` / ``message`` items / ``content[]``
+blocks / ``prompt_tokens`` usage keys) are still covered in dedicated
+back-compat tests so a CLI revision flip is caught by CI rather than in
+production.
 
 Two layers of coverage:
 
@@ -46,29 +51,23 @@ from shim.runtime.translate import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Fixture transcript — TODO(verify-codex-jsonl): synthesized from public
-# docs; replace with a captured run once the CLI version is pinned.
+# Fixture transcript — matches codex-cli 0.130.0 (captured against the
+# pinned CLI in image/Dockerfile). The two function_call frames at the
+# tail are kept on the older shape for forward-compat coverage; they
+# don't appear on a plain assistant turn but exercise the tool-call /
+# tool-result translation paths.
 # ---------------------------------------------------------------------------
 
 
 FIXTURE_LINES = [
-    {"type": "session.created", "session": {"id": "codex-sess-123"}},
-    {
-        "type": "item.delta",
-        "item_id": "msg_1",
-        "delta": {"text": "Hello"},
-    },
-    {
-        "type": "item.delta",
-        "item_id": "msg_1",
-        "delta": {"text": ", world"},
-    },
+    {"type": "thread.started", "thread_id": "codex-sess-123"},
+    {"type": "turn.started"},
     {
         "type": "item.completed",
         "item": {
-            "id": "msg_1",
-            "type": "message",
-            "content": [{"type": "output_text", "text": "Hello, world"}],
+            "id": "item_0",
+            "type": "agent_message",
+            "text": "Hello, world",
         },
     },
     {
@@ -105,18 +104,65 @@ FIXTURE_LINES = [
 class TranslateCodexEventTests(unittest.TestCase):
     """Pure-translation coverage — no subprocess, no driver."""
 
-    def test_session_created_yields_no_event(self) -> None:
+    def test_thread_started_yields_no_event(self) -> None:
         out = codex_driver.translate_codex_event(
             FIXTURE_LINES[0], turn_id="t1",
         )
-        # The session id is consumed via _extract_codex_session_id; the
-        # translator itself emits nothing for the bare session frame.
+        # The thread id is consumed via _extract_codex_session_id; the
+        # translator itself emits nothing for the bare start frame.
         self.assertEqual(out, [])
 
-    def test_item_delta_emits_assistant_delta_with_delta_key(self) -> None:
-        out = codex_driver.translate_codex_event(
-            FIXTURE_LINES[1], turn_id="t1",
+    def test_extract_session_id_from_thread_started(self) -> None:
+        sid = codex_driver._extract_codex_session_id(FIXTURE_LINES[0])
+        self.assertEqual(sid, "codex-sess-123")
+
+    def test_extract_session_id_back_compat_session_created(self) -> None:
+        # Older CLI revisions used `session.created` — keep the fallback
+        # so a build flip in either direction doesn't silently break.
+        sid = codex_driver._extract_codex_session_id(
+            {"type": "session.created", "session": {"id": "legacy-sid"}},
         )
+        self.assertEqual(sid, "legacy-sid")
+
+    def test_item_completed_agent_message_emits_assistant_message(self) -> None:
+        out = codex_driver.translate_codex_event(
+            FIXTURE_LINES[2], turn_id="t1",
+        )
+        self.assertEqual(len(out), 1)
+        kind, data = out[0]
+        self.assertEqual(kind, EVENT_ASSISTANT_MESSAGE)
+        self.assertEqual(data["content"], "Hello, world")
+        self.assertNotIn("text", data)
+
+    def test_item_completed_legacy_message_shape_still_works(self) -> None:
+        # Back-compat: older CLI revisions emitted item.type == "message"
+        # with text in a content[] block list. Keep the translator
+        # accepting that shape so a revision rollback doesn't blank out
+        # assistant rendering.
+        legacy = {
+            "type": "item.completed",
+            "item": {
+                "id": "msg_1",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "legacy"}],
+            },
+        }
+        out = codex_driver.translate_codex_event(legacy, turn_id="t1")
+        self.assertEqual(len(out), 1)
+        kind, data = out[0]
+        self.assertEqual(kind, EVENT_ASSISTANT_MESSAGE)
+        self.assertEqual(data["content"], "legacy")
+
+    def test_item_delta_emits_assistant_delta(self) -> None:
+        # codex-cli 0.130.0 doesn't stream `item.delta` on plain
+        # assistant turns, but the translator still accepts the shape so
+        # we're forward-compatible if a future revision adds streaming.
+        delta_event = {
+            "type": "item.delta",
+            "item_id": "msg_1",
+            "delta": {"text": "Hello"},
+        }
+        out = codex_driver.translate_codex_event(delta_event, turn_id="t1")
         self.assertEqual(len(out), 1)
         kind, data = out[0]
         self.assertEqual(kind, EVENT_ASSISTANT_DELTA)
@@ -126,19 +172,9 @@ class TranslateCodexEventTests(unittest.TestCase):
         # isn't named `delta`, same as the Claude assistant.delta frame.
         self.assertNotIn("text", data)
 
-    def test_item_completed_message_emits_assistant_message(self) -> None:
-        out = codex_driver.translate_codex_event(
-            FIXTURE_LINES[3], turn_id="t1",
-        )
-        self.assertEqual(len(out), 1)
-        kind, data = out[0]
-        self.assertEqual(kind, EVENT_ASSISTANT_MESSAGE)
-        self.assertEqual(data["content"], "Hello, world")
-        self.assertNotIn("text", data)
-
     def test_function_call_emits_tool_call_with_decoded_input(self) -> None:
         out = codex_driver.translate_codex_event(
-            FIXTURE_LINES[4], turn_id="t1",
+            FIXTURE_LINES[3], turn_id="t1",
         )
         self.assertEqual(len(out), 1)
         kind, data = out[0]
@@ -149,7 +185,7 @@ class TranslateCodexEventTests(unittest.TestCase):
 
     def test_function_call_output_emits_tool_result(self) -> None:
         out = codex_driver.translate_codex_event(
-            FIXTURE_LINES[5], turn_id="t1",
+            FIXTURE_LINES[4], turn_id="t1",
         )
         self.assertEqual(len(out), 1)
         kind, data = out[0]
@@ -160,7 +196,7 @@ class TranslateCodexEventTests(unittest.TestCase):
 
     def test_turn_completed_emits_usage(self) -> None:
         out = codex_driver.translate_codex_event(
-            FIXTURE_LINES[6], turn_id="t1",
+            FIXTURE_LINES[5], turn_id="t1",
         )
         self.assertEqual(len(out), 1)
         kind, data = out[0]
@@ -328,12 +364,11 @@ class CodexDriverSubprocessTests(unittest.TestCase):
             drv.shutdown(grace_seconds=2.0)
 
         kinds = [k for k, _ in events]
-        # First turn captures the session id from session.created.
+        # First turn captures the thread id from thread.started.
         self.assertEqual(sids, ["codex-sess-123"])
-        # Deltas, the completed message, the tool call+result, usage,
-        # then turn.end. The exact ordering within a turn is preserved
-        # by the line-by-line consumer.
-        self.assertIn(EVENT_ASSISTANT_DELTA, kinds)
+        # Completed message, tool call+result, usage, then turn.end.
+        # codex-cli 0.130.0 doesn't stream item.delta on plain messages,
+        # so the assistant text only arrives via item.completed.
         self.assertIn(EVENT_ASSISTANT_MESSAGE, kinds)
         self.assertIn(EVENT_TOOL_CALL, kinds)
         self.assertIn(EVENT_TOOL_RESULT, kinds)
@@ -433,9 +468,14 @@ class CodexDriverSubprocessTests(unittest.TestCase):
 
 
 class CodexDriverArgvTests(unittest.TestCase):
-    """Argv assembly per ADR 0020 §7 — keeps the codex CLI contract crisp."""
+    """Argv assembly verified against codex-cli 0.130.0.
 
-    def test_argv_includes_all_required_flags(self) -> None:
+    The 0.130.0 CLI rejects `--ask-for-approval` after `exec` and has no
+    top-level `--resume` flag (resume is the `exec resume` subcommand).
+    These tests pin both invariants.
+    """
+
+    def test_argv_first_turn_has_global_approval_and_exec_options(self) -> None:
         cfg = codex_driver.CodexConfig(model="gpt-5.5", cwd="/work")
         drv = codex_driver.CodexDriver(
             cfg,
@@ -443,19 +483,23 @@ class CodexDriverArgvTests(unittest.TestCase):
             emit_session_id=lambda *_a, **_kw: None,
         )
         argv = drv._build_argv("hello world")
-        self.assertEqual(argv[0:2], [codex_driver.CODEX_BIN_DEFAULT, "exec"])
+        # `--ask-for-approval` is global and must precede `exec`.
+        self.assertEqual(
+            argv[0:4],
+            [codex_driver.CODEX_BIN_DEFAULT, "--ask-for-approval", "never", "exec"],
+        )
         self.assertIn("--json", argv)
-        # Model, sandbox, ask-for-approval, cd — these are the four
-        # things ADR-0020 §7 says every Codex turn must carry.
+        self.assertIn("--skip-git-repo-check", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.5")
         self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
-        self.assertEqual(argv[argv.index("--ask-for-approval") + 1], "never")
         self.assertEqual(argv[argv.index("--cd") + 1], "/work")
         self.assertEqual(argv[-1], "hello world")
-        # No --resume flag on a fresh session (resume=None).
+        # No resume subcommand on a fresh session.
+        self.assertNotIn("resume", argv)
+        # No top-level --resume flag (the 0.130.0 CLI doesn't accept it).
         self.assertNotIn("--resume", argv)
 
-    def test_argv_resume_appended_when_session_id_known(self) -> None:
+    def test_argv_resume_uses_exec_resume_subcommand(self) -> None:
         cfg = codex_driver.CodexConfig(
             model="gpt-5.5", cwd="/work", resume="codex-sess-existing",
         )
@@ -465,7 +509,55 @@ class CodexDriverArgvTests(unittest.TestCase):
             emit_session_id=lambda *_a, **_kw: None,
         )
         argv = drv._build_argv("continue")
-        self.assertEqual(argv[argv.index("--resume") + 1], "codex-sess-existing")
+        # `exec resume <SID>` is positional; sandbox/cd are inherited
+        # from the recorded session and must be omitted on resume.
+        exec_idx = argv.index("exec")
+        self.assertEqual(argv[exec_idx + 1], "resume")
+        self.assertEqual(argv[exec_idx + 2], "codex-sess-existing")
+        self.assertNotIn("--sandbox", argv)
+        self.assertNotIn("--cd", argv)
+        # Model and --json still carry through on resume.
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.5")
+        self.assertIn("--json", argv)
+
+    def test_argv_system_prompt_passes_model_instructions_file(self) -> None:
+        cfg = codex_driver.CodexConfig(
+            model="gpt-5.5", cwd="/work", system_prompt="be terse",
+        )
+        drv = codex_driver.CodexDriver(
+            cfg,
+            emit_event=lambda *_a, **_kw: None,
+            emit_session_id=lambda *_a, **_kw: None,
+        )
+        try:
+            argv = drv._build_argv("hi")
+            # The override sits behind a `-c` config flag; the value is
+            # TOML so the path is double-quoted.
+            self.assertIn("-c", argv)
+            override = argv[argv.index("-c") + 1]
+            self.assertTrue(
+                override.startswith('model_instructions_file="')
+                and override.endswith('"'),
+                f"unexpected override shape: {override!r}",
+            )
+            # And the file was actually written with the prompt.
+            path = override[len('model_instructions_file="'):-1]
+            with open(path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "be terse")
+        finally:
+            drv.shutdown(grace_seconds=1.0)
+
+    def test_argv_no_system_prompt_omits_override(self) -> None:
+        cfg = codex_driver.CodexConfig(model="gpt-5.5", cwd="/work")
+        drv = codex_driver.CodexDriver(
+            cfg,
+            emit_event=lambda *_a, **_kw: None,
+            emit_session_id=lambda *_a, **_kw: None,
+        )
+        argv = drv._build_argv("hi")
+        # Without a system prompt we don't add a `-c` config override —
+        # the codex CLI's defaults (AGENTS.md, etc.) take over.
+        self.assertNotIn("-c", argv)
 
 
 class CodexDriverSetModelTests(unittest.TestCase):

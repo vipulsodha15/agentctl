@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import tempfile
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -59,10 +61,10 @@ class CodexConfig:
     """Per-session config for the Codex driver.
 
     Mirrors :class:`shim.runtime.claude_driver.RuntimeConfig` where the
-    fields make sense for the Codex CLI. ``system_prompt`` is forwarded
-    via ``--instructions`` when set (TODO(verify-codex-jsonl): the exact
-    flag name on the pinned CLI version — current docs reference
-    ``--instructions`` / ``-i``, double-check before phase 1 ships).
+    fields make sense for the Codex CLI. ``system_prompt``, when set, is
+    written to a temp file at driver init and referenced via the
+    ``model_instructions_file`` config override (the bare ``instructions``
+    key is reserved per the 0.130.0 config reference).
     """
 
     model: str
@@ -119,10 +121,27 @@ class CodexDriver:
         self._stopping = threading.Event()
         # First-encounter flag for the session-id extractor — drops one
         # warn-log if a turn completes with no recognizable session id, so
-        # silently-broken --resume doesn't go unnoticed. Subsequent turns
+        # silently-broken resume doesn't go unnoticed. Subsequent turns
         # stay quiet to avoid log flooding when the upstream JSONL schema
         # genuinely doesn't expose one.
         self._sid_warned = False
+        # System prompt file: codex 0.130.0's `instructions` config key is
+        # reserved; `model_instructions_file` is the documented path. Write
+        # once at init and reference the stable file on every turn.
+        self._instructions_file: Optional[str] = None
+        if cfg.system_prompt:
+            try:
+                fd, path = tempfile.mkstemp(
+                    prefix="agentctl-codex-instr-", suffix=".md",
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(cfg.system_prompt)
+                self._instructions_file = path
+            except OSError as exc:
+                _log.warning(
+                    "codex_driver: failed to materialize system_prompt file "
+                    "(running without instructions): %s", exc,
+                )
 
     # -- lifecycle ------------------------------------------------------
 
@@ -143,6 +162,12 @@ class CodexDriver:
         t = self._turn_thread
         if t is not None:
             t.join(timeout=grace_seconds)
+        if self._instructions_file:
+            try:
+                os.unlink(self._instructions_file)
+            except OSError:
+                pass
+            self._instructions_file = None
 
     # -- per-turn entry points -----------------------------------------
 
@@ -209,32 +234,44 @@ class CodexDriver:
         with self._state_lock:
             model = self._cfg.model
             sdk_session_id = self._sdk_session_id
+        # codex-cli 0.130.0 argv shape (verified against the pinned CLI
+        # and developers.openai.com/codex/cli/reference):
+        #   * `--ask-for-approval` is a *global* flag — must precede the
+        #     subcommand. Putting it after `exec` errors with
+        #     "unexpected argument".
+        #   * Resume uses the `exec resume <SID>` subcommand; there is no
+        #     top-level `--resume` flag. `exec resume` inherits the
+        #     recorded session's `--sandbox` / `--cd` so we don't repeat
+        #     them on resumed turns.
+        #   * The bare `instructions` config key is reserved; the
+        #     documented path for a caller-supplied system prompt is
+        #     `model_instructions_file` pointing at a file on disk.
         argv: list[str] = [
             self._cfg.codex_bin,
-            "exec",
-            "--json",
-            "--model",
-            model,
-            "--sandbox",
-            self._cfg.sandbox,
             "--ask-for-approval",
             self._cfg.approval_mode,
-            "--cd",
-            self._cfg.cwd,
+            "exec",
         ]
         if sdk_session_id:
-            # TODO(verify-codex-jsonl): confirm ``--resume <id>`` is the
-            # right flag on the pinned CLI version. The ADR specifies it
-            # but the current upstream docs sometimes call it
-            # ``--continue`` or ``--session``; pin once verified.
-            argv.extend(["--resume", sdk_session_id])
-        if self._cfg.system_prompt:
-            # TODO(verify-codex-jsonl): the exact CLI flag for a
-            # caller-supplied system prompt — current docs reference
-            # ``--instructions`` / ``-i`` but this may change. The Claude
-            # driver forwards ``RuntimeConfig.system_prompt`` for the
-            # task-chat per-stage prompt; mirror that here.
-            argv.extend(["--instructions", self._cfg.system_prompt])
+            argv.extend(["resume", sdk_session_id])
+        argv.extend([
+            "--json",
+            "--skip-git-repo-check",
+            "--model",
+            model,
+        ])
+        if not sdk_session_id:
+            argv.extend([
+                "--sandbox",
+                self._cfg.sandbox,
+                "--cd",
+                self._cfg.cwd,
+            ])
+        if self._instructions_file:
+            argv.extend([
+                "-c",
+                f'model_instructions_file="{self._instructions_file}"',
+            ])
         argv.extend(self._cfg.extra_args)
         argv.append(prompt)
         return argv
@@ -434,15 +471,17 @@ class CodexDriver:
 def _extract_codex_session_id(event: dict) -> Optional[str]:
     """Pull the Codex session id out of any frame that carries it.
 
-    Multiple frame shapes are known to surface this — the explicit
-    ``session.created`` event on the first turn, and an inline
-    ``session_id`` field on later events. Try both so the caller doesn't
-    have to special-case.
+    codex-cli 0.130.0 emits the id once at turn start as
+    ``{"type":"thread.started","thread_id":"<uuid>"}``. Older / future
+    revisions have used ``session.created`` / ``session_id`` shapes;
+    accept all of them so a CLI revision flip doesn't silently break
+    resume.
     """
 
-    # TODO(verify-codex-jsonl): confirm the canonical field name. Past
-    # versions have used ``session_id``, ``id``, and ``conversation_id``
-    # in different frames.
+    if event.get("type") == "thread.started":
+        tid = event.get("thread_id")
+        if isinstance(tid, str) and tid:
+            return tid
     sid = event.get("session_id")
     if isinstance(sid, str) and sid:
         return sid
@@ -487,10 +526,12 @@ def translate_codex_event(event: dict, *, turn_id: str) -> list[tuple[str, dict]
             return out
         itype = item.get("type") or ""
 
-        # TODO(verify-codex-jsonl): assistant message shape. We expect
-        # either ``content`` (list of typed blocks) or a flat ``text``
-        # field; handle both defensively.
-        if itype in ("message", "assistant_message", "output_message"):
+        # Assistant message shape: codex-cli 0.130.0 uses item type
+        # ``agent_message`` with text on a top-level ``text`` field
+        # (``_coerce_codex_text`` already prefers that). Older shapes
+        # (``message`` / ``assistant_message`` / ``output_message`` with
+        # a ``content[]`` block list) are kept for forward/back compat.
+        if itype in ("agent_message", "message", "assistant_message", "output_message"):
             text = _coerce_codex_text(item)
             if text:
                 out.append((EVENT_ASSISTANT_MESSAGE, {
