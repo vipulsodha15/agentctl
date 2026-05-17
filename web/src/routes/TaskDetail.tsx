@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useReducer,
   useRef,
   useState,
@@ -66,15 +67,31 @@ export function TaskDetail() {
   // reading. The active stage's ConversationView no longer has its
   // own scroll inside the task page, so this is the one place the
   // behavior lives.
+  //
+  // We measure `nearBottom` against the previous scroll/content state
+  // (captured in a ref before the DOM updates) so a streaming delta that
+  // just appended content doesn't push us past the threshold and stall
+  // the auto-scroll. The scroll itself uses `behavior: "instant"` to
+  // override the container's CSS `scroll-behavior: smooth` — rapid
+  // streaming updates would otherwise keep interrupting an in-flight
+  // smooth animation and the bottom would never be reached.
   const lastMsg = convState.messages[convState.messages.length - 1];
+  const stickToBottomRef = useRef(true);
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
-    const nearBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 200;
-    if (nearBottom) {
-      el.scrollTop = el.scrollHeight;
-    }
+    const onScroll = () => {
+      stickToBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+  useLayoutEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    if (!stickToBottomRef.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior });
   }, [convState.messages.length, lastMsg?.text, lastMsg?.output, convState.inFlight]);
 
   const load = useCallback(async () => {
