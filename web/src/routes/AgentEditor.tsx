@@ -298,7 +298,16 @@ export function AgentEditor() {
             </label>
           </div>
 
-          <div className="panel" style={{ padding: "20px 22px", marginTop: 16 }}>
+          <div
+            className="panel"
+            style={{
+              padding: "20px 22px",
+              marginTop: 16,
+              display: "flex",
+              flexDirection: "column",
+              gap: 18,
+            }}
+          >
             <div className="field">
               <span className="field-label">Colour</span>
               <span className="field-hint">
@@ -356,7 +365,7 @@ export function AgentEditor() {
               </div>
             )}
 
-            <div className="field" style={{ marginBottom: 0 }}>
+            <div className="field">
               <span className="field-label">Model</span>
               <span className="field-hint">
                 {showProviderSelector && !provider
@@ -386,7 +395,7 @@ export function AgentEditor() {
           </div>
 
           <div className="panel" style={{ padding: "20px 22px", marginTop: 16 }}>
-            <div className="field" style={{ marginBottom: 0 }}>
+            <div className="field">
               <span className="field-label">Prompt</span>
               <span className="field-hint">
                 System instructions for this agent's role in an assembly line stage.

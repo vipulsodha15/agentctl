@@ -4355,14 +4355,34 @@ button.back-link:hover:not(:disabled) {
 
 .assembly-line-editor-meta {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-  gap: 20px 28px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto;
+  column-gap: 28px;
+  row-gap: 6px;
   padding: 22px 24px;
   margin-bottom: 18px;
 }
 .assembly-line-editor-meta:hover { border-color: var(--c-border); }
+/* Subgrid keeps label / hint / input / error rows aligned across both
+ * columns even when one hint wraps to a different number of lines. */
+.assembly-line-editor-meta .field {
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-row: span 4;
+  gap: 0;
+}
 @media (max-width: 720px) {
-  .assembly-line-editor-meta { grid-template-columns: 1fr; }
+  .assembly-line-editor-meta {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    row-gap: 18px;
+  }
+  .assembly-line-editor-meta .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    grid-row: auto;
+  }
 }
 
 .assembly-line-canvas-panel {
