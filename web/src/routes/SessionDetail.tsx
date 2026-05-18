@@ -11,7 +11,6 @@ import type {
 import { ConversationView, type TranscriptFilter } from "../components/ConversationView";
 import { MessageInput } from "../components/MessageInput";
 import { McpPanel } from "../components/McpPanel";
-import { StopButton } from "../components/StopButton";
 import { CostPanel } from "../components/CostPanel";
 import { ChangesPanel } from "../components/ChangesPanel";
 import {
@@ -239,7 +238,6 @@ export function SessionDetail() {
           </span>
         )}
         <span className="actions">
-          <StopButton sessionId={id} inFlight={state.inFlight} />
           <button className="danger" onClick={onEnd} disabled={endBusy}>
             {endBusy ? "Ending…" : "End session"}
           </button>
