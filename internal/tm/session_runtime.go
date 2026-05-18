@@ -54,7 +54,8 @@ type sessionStage struct {
 	sessionID string
 
 	cbAssistant func(content string)
-	cbTool      func(tool string, input json.RawMessage)
+	cbTool      func(tool, toolUseID string, input json.RawMessage)
+	cbToolRes   func(tool, toolUseID string, output json.RawMessage, isError bool)
 	cbErr       func(message string)
 
 	stream fan.Stream
@@ -144,7 +145,7 @@ func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (St
 		return StartStageResult{}, fmt.Errorf("session runtime: create: %w", err)
 	}
 
-	if _, err := r.attach(ctx, in.StageID, res.SessionID, in.OnAssistantMessage, in.OnToolUse, in.OnError); err != nil {
+	if _, err := r.attach(ctx, in.StageID, res.SessionID, in.OnAssistantMessage, in.OnToolUse, in.OnToolResult, in.OnError); err != nil {
 		_ = r.sm.Terminate(context.Background(), res.SessionID)
 		return StartStageResult{}, err
 	}
@@ -296,7 +297,7 @@ func (r *SessionRuntime) EnsureAttached(ctx context.Context, in AttachInput) err
 		return nil
 	}
 	r.mu.Unlock()
-	_, err := r.attach(ctx, in.StageID, in.SessionID, in.OnAssistantMessage, in.OnToolUse, in.OnError)
+	_, err := r.attach(ctx, in.StageID, in.SessionID, in.OnAssistantMessage, in.OnToolUse, in.OnToolResult, in.OnError)
 	return err
 }
 
@@ -305,7 +306,14 @@ func (r *SessionRuntime) EnsureAttached(ctx context.Context, in AttachInput) err
 // creates a sessionStage entry. The map is not consulted for routing
 // decisions — it exists solely so events from the container flow through
 // the manager's callbacks into the chat thread.
-func (r *SessionRuntime) attach(ctx context.Context, stageID, sessionID string, cbAssistant func(string), cbTool func(string, json.RawMessage), cbErr func(string)) (*sessionStage, error) {
+func (r *SessionRuntime) attach(
+	ctx context.Context,
+	stageID, sessionID string,
+	cbAssistant func(string),
+	cbTool func(tool, toolUseID string, input json.RawMessage),
+	cbToolRes func(tool, toolUseID string, output json.RawMessage, isError bool),
+	cbErr func(string),
+) (*sessionStage, error) {
 	stream, err := r.sm.Attach(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session runtime: attach: %w", err)
@@ -315,6 +323,7 @@ func (r *SessionRuntime) attach(ctx context.Context, stageID, sessionID string, 
 		sessionID:   sessionID,
 		cbAssistant: cbAssistant,
 		cbTool:      cbTool,
+		cbToolRes:   cbToolRes,
 		cbErr:       cbErr,
 		stream:      stream,
 	}
@@ -382,7 +391,21 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 			}
 			var d proto.ToolCallData
 			_ = json.Unmarshal(ev.Data, &d)
-			s.cbTool(d.Tool, d.Input)
+			s.cbTool(d.Tool, d.ToolUseID, d.Input)
+		case proto.EventToolResult:
+			if s.cbToolRes == nil {
+				continue
+			}
+			var d proto.ToolResultData
+			_ = json.Unmarshal(ev.Data, &d)
+			// Shim emits `content`; older payloads use `output`. Prefer the
+			// new field but fall back so a shim/daemon version skew keeps
+			// the result panel populated.
+			body := d.Content
+			if len(body) == 0 {
+				body = d.Output
+			}
+			s.cbToolRes(d.Tool, d.ToolUseID, body, d.IsError)
 		case proto.EventSessionError:
 			if s.cbErr == nil {
 				continue

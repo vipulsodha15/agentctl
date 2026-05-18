@@ -85,8 +85,13 @@ type StartStageInput struct {
 	// emits while the stage is active. The manager uses these to populate
 	// the task chat thread and to lock the synthesis on handoff.
 	OnAssistantMessage func(content string)
-	// OnToolUse is invoked with each tool call (optional).
-	OnToolUse func(tool string, input json.RawMessage)
+	// OnToolUse is invoked with each tool call. The manager persists it as
+	// a task_message (role=tool) so the call survives a page refresh.
+	OnToolUse func(tool, toolUseID string, input json.RawMessage)
+	// OnToolResult is invoked with each tool result. The manager persists
+	// it as a task_message (role=tool, phase=result) so the result panel
+	// can be re-rendered after a refresh.
+	OnToolResult func(tool, toolUseID string, output json.RawMessage, isError bool)
 	// OnError is invoked when the runtime surfaces an inline error.
 	OnError func(message string)
 }
@@ -112,7 +117,8 @@ type AttachInput struct {
 	StageID            string
 	SessionID          string
 	OnAssistantMessage func(content string)
-	OnToolUse          func(tool string, input json.RawMessage)
+	OnToolUse          func(tool, toolUseID string, input json.RawMessage)
+	OnToolResult       func(tool, toolUseID string, output json.RawMessage, isError bool)
 	OnError            func(message string)
 }
 
@@ -764,6 +770,56 @@ func (m *Manager) handleError(stageID, message string) {
 	m.recordMessage(context.Background(), taskID, stageID, agent, RoleError, message)
 }
 
+// toolCallPayload / toolResultPayload are the on-disk shape for role=tool
+// rows in task_messages. The web client mirrors these names; keep the JSON
+// keys stable.
+type toolCallPayload struct {
+	Phase     string          `json:"phase"`
+	Tool      string          `json:"tool"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+}
+
+type toolResultPayload struct {
+	Phase     string          `json:"phase"`
+	Tool      string          `json:"tool,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+func (m *Manager) handleToolUse(stageID, tool, toolUseID string, input json.RawMessage) {
+	var taskID, agent string
+	row := m.opts.Store.DB().QueryRow(`SELECT task_id, agent_name FROM stages WHERE stage_id=?`, stageID)
+	if err := row.Scan(&taskID, &agent); err != nil {
+		return
+	}
+	body, err := json.Marshal(toolCallPayload{
+		Phase: "call", Tool: tool, ToolUseID: toolUseID, Input: input,
+	})
+	if err != nil {
+		m.logger.Warn("tool_call.marshal_failed", slog.String("error", err.Error()))
+		return
+	}
+	m.recordMessage(context.Background(), taskID, stageID, agent, RoleTool, string(body))
+}
+
+func (m *Manager) handleToolResult(stageID, tool, toolUseID string, output json.RawMessage, isError bool) {
+	var taskID, agent string
+	row := m.opts.Store.DB().QueryRow(`SELECT task_id, agent_name FROM stages WHERE stage_id=?`, stageID)
+	if err := row.Scan(&taskID, &agent); err != nil {
+		return
+	}
+	body, err := json.Marshal(toolResultPayload{
+		Phase: "result", Tool: tool, ToolUseID: toolUseID, Output: output, IsError: isError,
+	})
+	if err != nil {
+		m.logger.Warn("tool_result.marshal_failed", slog.String("error", err.Error()))
+		return
+	}
+	m.recordMessage(context.Background(), taskID, stageID, agent, RoleTool, string(body))
+}
+
 func (m *Manager) lockSynthesisAndAdvance(ctx context.Context, taskID, stageID, synthesis string, isFinal bool) {
 	now := m.now()
 	tx, err := m.opts.Store.DB().BeginTx(ctx, nil)
@@ -871,6 +927,12 @@ func (m *Manager) attachInputFor(stageID, sessionID, taskID string) AttachInput 
 		OnAssistantMessage: func(content string) {
 			m.handleAssistantMessage(stageID, content)
 		},
+		OnToolUse: func(tool, toolUseID string, input json.RawMessage) {
+			m.handleToolUse(stageID, tool, toolUseID, input)
+		},
+		OnToolResult: func(tool, toolUseID string, output json.RawMessage, isError bool) {
+			m.handleToolResult(stageID, tool, toolUseID, output, isError)
+		},
 		OnError: func(message string) {
 			m.handleError(stageID, message)
 		},
@@ -948,6 +1010,12 @@ func (m *Manager) spawnStage(ctx context.Context, task *Task, stage *Stage, prev
 		BaseSHA:       task.BaseSHA,
 		OnAssistantMessage: func(content string) {
 			m.handleAssistantMessage(stageRef.ID, content)
+		},
+		OnToolUse: func(tool, toolUseID string, input json.RawMessage) {
+			m.handleToolUse(stageRef.ID, tool, toolUseID, input)
+		},
+		OnToolResult: func(tool, toolUseID string, output json.RawMessage, isError bool) {
+			m.handleToolResult(stageRef.ID, tool, toolUseID, output, isError)
 		},
 		OnError: func(message string) {
 			m.handleError(stageRef.ID, message)

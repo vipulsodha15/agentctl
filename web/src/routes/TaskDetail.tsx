@@ -467,23 +467,31 @@ export function TaskDetail() {
           />
         ))}
 
-        {activeStage && activeSessionID && (
-          <div className="task-active-thread">
-            <ConversationView
-              messages={mergeTranscript(
-                convState.messages,
-                taskMessages,
-                activeStage.stage_id,
-              )}
-              warnings={convState.warnings}
-              inFlight={convState.inFlight}
-              mcps={convState.mcps}
-              usageByTurn={convState.usageByTurn}
-              filter="all"
-            />
-            <TaskTodoRail messages={convState.messages} />
-          </div>
-        )}
+        {activeStage && activeSessionID && (() => {
+          // Compute the merged transcript once so the rail and the
+          // ConversationView see the same set of tool entries. Without
+          // this the rail reads convState directly and loses TodoWrite
+          // tool calls on refresh — exactly the bug the task_messages
+          // mirror was added to fix.
+          const merged = mergeTranscript(
+            convState.messages,
+            taskMessages,
+            activeStage.stage_id,
+          );
+          return (
+            <div className="task-active-thread">
+              <ConversationView
+                messages={merged}
+                warnings={convState.warnings}
+                inFlight={convState.inFlight}
+                mcps={convState.mcps}
+                usageByTurn={convState.usageByTurn}
+                filter="all"
+              />
+              <TaskTodoRail messages={merged} />
+            </div>
+          );
+        })()}
       </div>
 
       {terminal ? (
@@ -1063,18 +1071,19 @@ function safeJson<T = unknown>(s: string): T | null {
 // widgets, thinking blocks, MCP/skill notices, cost chips. It's authoritative
 // once the SDK's JSONL has been flushed (end-of-turn) and the snapshot lands.
 //
-// task_messages is the durable text-only chat log written eagerly on every
-// send / handoff / synthesis / error. It covers two holes the JSONL doesn't:
+// task_messages is the durable chat log written eagerly on every send /
+// handoff / synthesis / error, AND on every tool call / tool result (role
+// "tool"). It covers holes the JSONL doesn't:
 //   1. Stages whose container pre-dates the JSONL mirror — no JSONL exists.
 //   2. Mid-turn refresh on a fresh stage — JSONL hasn't been flushed yet.
-// It has no tool/thinking rows because task_messages doesn't persist those.
+//   3. Tool entries on providers whose JSONL the snapshot path can't
+//      normalize (e.g. Codex's CLI shape).
 //
 // Strategy: if convState carries any text bubbles, trust it as the canonical
 // transcript (the snapshot landed). Otherwise render the task_messages
-// fallback for text history AND append any rich rows convState has accrued
-// from live events (tool calls, thinking, MCP notices) so the user still
-// sees tools, skills, and thinking as collapsed widgets even while the
-// JSONL snapshot is empty.
+// fallback — which already includes tool entries — and append any extra
+// rich rows convState has from live events so a turn that arrived between
+// the snapshot and now is still visible.
 function mergeTranscript(
   convMessages: ConversationMessage[],
   taskMessages: TaskMessage[],
@@ -1093,13 +1102,33 @@ function mergeTranscript(
     : [...fallback, ...richExtras];
 }
 
+// Wire shape of role=tool task_messages — written by tm.Manager's
+// handleToolUse / handleToolResult. Two rows per tool exchange (call +
+// result), paired by tool_use_id so re-rendering after a refresh produces
+// the same single tool widget the live stream did.
+interface ToolCallPayload {
+  phase: "call";
+  tool: string;
+  tool_use_id?: string;
+  input?: unknown;
+}
+interface ToolResultPayload {
+  phase: "result";
+  tool?: string;
+  tool_use_id?: string;
+  output?: unknown;
+  is_error?: boolean;
+}
+
 // taskMessagesAsConversation maps the flat task_messages log into the same
-// ConversationMessage shape the session WS produces.
+// ConversationMessage shape the session WS produces. Tool entries are paired
+// by tool_use_id so a call+result becomes a single tool widget.
 function taskMessagesAsConversation(
   msgs: TaskMessage[],
   activeStageID: string,
 ): ConversationMessage[] {
   const out: ConversationMessage[] = [];
+  const toolIndexById: Record<string, number> = {};
   for (const m of msgs) {
     // Only carry the active stage's history into the live thread; prior
     // stages render via PriorStageCard. Cross-stage system rows (seam,
@@ -1121,9 +1150,65 @@ function taskMessagesAsConversation(
       case "seam":
         out.push({ id, kind: "notice", text: m.content, notice_level: "info" });
         break;
+      case "tool": {
+        const payload = safeJson<ToolCallPayload | ToolResultPayload>(m.content);
+        if (!payload) break;
+        if (payload.phase === "call") {
+          const useId = payload.tool_use_id ?? "";
+          const idx = out.length;
+          if (useId) toolIndexById[useId] = idx;
+          out.push({
+            id: useId ? `tm-tc-${useId}` : id,
+            kind: "tool",
+            tool: payload.tool || "?",
+            tool_use_id: useId || undefined,
+            input: payload.input ?? {},
+            text: stableStringify(payload.input ?? {}),
+            status: "pending",
+          });
+        } else {
+          const useId = payload.tool_use_id ?? "";
+          const outputText =
+            typeof payload.output === "string"
+              ? payload.output
+              : stableStringify(payload.output ?? "");
+          const isErr = !!payload.is_error;
+          const idx = useId ? toolIndexById[useId] : undefined;
+          if (idx !== undefined && out[idx]?.kind === "tool") {
+            const prev = out[idx];
+            out[idx] = {
+              ...prev,
+              output: outputText,
+              is_error: isErr,
+              status: isErr ? "error" : "done",
+            };
+          } else {
+            out.push({
+              id: useId ? `tm-tr-${useId}` : id,
+              kind: "tool",
+              tool: payload.tool ?? "",
+              tool_use_id: useId || undefined,
+              input: undefined,
+              text: "",
+              output: outputText,
+              is_error: isErr,
+              status: isErr ? "error" : "done",
+            });
+          }
+        }
+        break;
+      }
     }
   }
   return out;
+}
+
+function stableStringify(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
 }
 
 function BackArrow() {

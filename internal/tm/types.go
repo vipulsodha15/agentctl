@@ -29,6 +29,10 @@ const (
 	RoleSeam      = "seam"
 	RoleSynthesis = "synthesis"
 	RoleError     = "error"
+	// RoleTool persists tool calls and tool results into task_messages so
+	// the task chat can re-render them after a page refresh. Content is a
+	// JSON blob — see tm.manager.handleToolUse / handleToolResult.
+	RoleTool = "tool"
 )
 
 // Task is the in-memory view of a task row joined with its stages.

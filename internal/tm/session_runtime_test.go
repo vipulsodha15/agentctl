@@ -333,6 +333,65 @@ func TestSessionRuntime_AssistantMessage_FansToCallback(t *testing.T) {
 	}, "OnAssistantMessage callback")
 }
 
+func TestSessionRuntime_ToolEvents_FanOutToCallbacks(t *testing.T) {
+	// Tool callbacks back the durable task_messages mirror (role=tool) so
+	// tool entries survive a page refresh. Without this fan-out the
+	// snapshot path is the only source for tools, and that's lossy for
+	// non-Anthropic JSONL shapes.
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	var mu sync.Mutex
+	type call struct{ tool, useID string }
+	type result struct {
+		tool, useID string
+		body        string
+		isErr       bool
+	}
+	var calls []call
+	var results []result
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{Name: "a"}, IssueMD: "hi",
+		OnToolUse: func(tool, useID string, input json.RawMessage) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, call{tool, useID})
+		},
+		OnToolResult: func(tool, useID string, output json.RawMessage, isErr bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			results = append(results, result{tool, useID, string(output), isErr})
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	st := api.stream("sess-1")
+	st.push(proto.EventToolCall, proto.ToolCallData{
+		TurnID: "T1", Tool: "Read", ToolUseID: "tu_1", Input: json.RawMessage(`{"path":"/x"}`),
+	})
+	st.push(proto.EventToolResult, proto.ToolResultData{
+		TurnID: "T1", Tool: "Read", ToolUseID: "tu_1", Content: json.RawMessage(`"file contents"`),
+	})
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls) == 1 && len(results) == 1
+	}, "tool callbacks")
+	mu.Lock()
+	defer mu.Unlock()
+	if calls[0].tool != "Read" || calls[0].useID != "tu_1" {
+		t.Errorf("call mismatch: %+v", calls[0])
+	}
+	if results[0].useID != "tu_1" || !strings.Contains(results[0].body, "file contents") {
+		t.Errorf("result mismatch: %+v", results[0])
+	}
+	if results[0].isErr {
+		t.Errorf("result should not be error")
+	}
+}
+
 func TestSessionRuntime_Synthesize_CorrelatesByMessageIDAndSkipsCallback(t *testing.T) {
 	api := newFakeSessionAPI()
 	r := NewSessionRuntime(api, nil)
