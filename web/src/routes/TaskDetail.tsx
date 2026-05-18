@@ -22,11 +22,14 @@ import type {
 } from "../types";
 import { ConversationView } from "../components/ConversationView";
 import { TaskTodoRail } from "../components/TaskTodoRail";
+import { ChangesPanel } from "../components/ChangesPanel";
 import {
   INITIAL_CONVERSATION_STATE,
   conversationReducer,
   normalizeConversation,
 } from "../lib/conversation";
+
+const DIFF_DRAWER_OPEN_KEY = "agentctl.task.diffDrawer";
 
 type WSStatus = "connecting" | "live" | "reconnecting" | "offline";
 
@@ -61,6 +64,35 @@ export function TaskDetail() {
     conversationReducer,
     INITIAL_CONVERSATION_STATE,
   );
+
+  // Diff drawer state. The drawer lives on the right side of the task page
+  // and shows the active stage's session diff via ChangesPanel. Persisted to
+  // localStorage so it stays open across navigations within a session.
+  const [diffOpen, setDiffOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(DIFF_DRAWER_OPEN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(DIFF_DRAWER_OPEN_KEY, diffOpen ? "1" : "0");
+    } catch {
+      // ignore — storage may be disabled
+    }
+  }, [diffOpen]);
+  // Bump on every turn end so the drawer's diff tree refreshes after files
+  // are likely written. Edge → low signal-to-noise to refresh on every WS
+  // event; once per turn is the right granularity.
+  const [diffRefreshKey, setDiffRefreshKey] = useState(0);
+  const inFlightRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (inFlightRef.current && !convState.inFlight) {
+      setDiffRefreshKey((k) => k + 1);
+    }
+    inFlightRef.current = convState.inFlight;
+  }, [convState.inFlight]);
 
   // Auto-scroll the outer thread container to the bottom when new live
   // messages arrive, but only if the user is already near the bottom —
@@ -328,8 +360,11 @@ export function TaskDetail() {
   const apiKeyMissing =
     error?.toLowerCase().includes("anthropic_api_key") ?? false;
 
+  const drawerVisible = diffOpen && !!activeSessionID;
+
   return (
-    <section className="task-detail">
+    <section className={`task-detail${drawerVisible ? " diff-open" : ""}`}>
+      <div className="task-main">
       <header className="task-topbar">
         <div className="task-topbar-left">
           <Link to="/tasks" className="back-link" title="Back to tasks">
@@ -351,6 +386,19 @@ export function TaskDetail() {
         </div>
         <div className="task-topbar-right">
           <WSStatusBadge status={wsStatus} />
+          {activeSessionID && (
+            <button
+              type="button"
+              className={`diff-toggle-chip${diffOpen ? " active" : ""}`}
+              onClick={() => setDiffOpen((v) => !v)}
+              aria-pressed={diffOpen}
+              title={diffOpen ? "Hide changed files" : "Show changed files"}
+            >
+              <FilesIcon />
+              <span>Files</span>
+              <DrawerChevron open={diffOpen} />
+            </button>
+          )}
           <IssueSeedChip
             task={task}
             open={issueOpen}
@@ -473,6 +521,30 @@ export function TaskDetail() {
             <span>to send</span>
           </span>
         </div>
+      )}
+      </div>
+
+      {drawerVisible && (
+        <aside className="task-diff-drawer" aria-label="Changed files">
+          <div className="task-diff-drawer-header">
+            <strong>Changes</strong>
+            <button
+              type="button"
+              className="task-diff-drawer-close"
+              onClick={() => setDiffOpen(false)}
+              aria-label="Close changes drawer"
+              title="Close"
+            >
+              <CloseIcon />
+            </button>
+          </div>
+          <div className="task-diff-drawer-body">
+            <ChangesPanel
+              sessionId={activeSessionID}
+              refreshKey={diffRefreshKey}
+            />
+          </div>
+        </aside>
       )}
 
       {confirmAbandon && (
@@ -1126,6 +1198,46 @@ function ChevronIcon({ direction }: { direction: "down" | "right" }) {
       ) : (
         <polyline points="9 6 15 12 9 18" />
       )}
+    </svg>
+  );
+}
+
+function FilesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h6l2 2h10v11a1 1 0 0 1-1 1H3z" />
+      <line x1="3" y1="11" x2="21" y2="11" />
+    </svg>
+  );
+}
+
+function DrawerChevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="11"
+      height="11"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{
+        transition: "transform 180ms var(--ease-out)",
+        transform: open ? "rotate(180deg)" : "rotate(0deg)",
+      }}
+    >
+      <polyline points="15 6 9 12 15 18" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <line x1="6" y1="6" x2="18" y2="18" />
+      <line x1="18" y1="6" x2="6" y2="18" />
     </svg>
   );
 }
