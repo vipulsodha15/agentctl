@@ -2505,6 +2505,76 @@ form .checkbox-row {
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  Tool group — consecutive tool calls collapsed into one row
+ * ════════════════════════════════════════════════════════════════ */
+
+.msg.tool-group .avatar {
+  background: var(--c-surface-2);
+  color: var(--c-fg-mute);
+}
+.tool-group-progress {
+  display: inline-flex;
+  flex: 1 1 auto;
+  min-width: 60px;
+  max-width: 220px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--c-surface-2);
+  overflow: hidden;
+  margin: 0 4px;
+}
+.tool-group-pip {
+  height: 100%;
+}
+.tool-group-pip-done {
+  background: var(--c-success-fg);
+  opacity: 0.7;
+}
+.tool-group-pip-error {
+  background: var(--c-err-fg);
+}
+.tool-group-pip-pending {
+  background: var(--c-accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.tool-group-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  overflow: hidden;
+  animation: card-in 180ms var(--ease-out) both;
+}
+.tool-group-list .msg.tool {
+  padding: 0;
+  animation: none;
+}
+.tool-group-list .msg.tool + .msg.tool {
+  border-top: 1px solid var(--c-border-soft);
+}
+.tool-group-list .msg.tool .avatar {
+  display: none;
+}
+.tool-group-list .msg.tool .body {
+  gap: 0;
+}
+.tool-group-list .msg.tool .tool-header {
+  border: none;
+  border-radius: 0;
+  padding: 8px 12px;
+  background: transparent;
+}
+.tool-group-list .msg.tool .tool-header:hover {
+  background: var(--c-surface-2);
+}
+.tool-group-list .msg.tool .tool-card {
+  border: none;
+  border-top: 1px solid var(--c-border-soft);
+  border-radius: 0;
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  Diff preview
  * ════════════════════════════════════════════════════════════════ */
 
