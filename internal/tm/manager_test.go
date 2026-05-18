@@ -2,6 +2,7 @@ package tm
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -177,6 +178,68 @@ func TestSpawnStage_PullsProviderModelFromAssemblyLineYAML(t *testing.T) {
 	if rec.starts[2].StageProvider != "openai" {
 		t.Errorf("executor stage: want StageProvider=openai got %q", rec.starts[2].StageProvider)
 	}
+}
+
+// TestToolCallsPersistToTaskMessages verifies the durable mirror added to
+// fix the "refresh wipes the tool call window" bug. Tool calls used to
+// live only in the per-session SDK JSONL snapshot, which is lossy across
+// providers (Codex JSONL isn't in the shape the web normalizer parses);
+// the manager now records each tool call + result into task_messages with
+// role=tool so the chat thread can rebuild the widget on refresh.
+func TestToolCallsPersistToTaskMessages(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(store.Options{Path: filepath.Join(dir, "tm.db")})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := st.DB().Exec(`INSERT INTO tasks
+        (task_id, name, source_kind, issue_md, status, created_at)
+        VALUES ('task-1','t','freeform','x','working',?)`, now); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	if _, err := st.DB().Exec(`INSERT INTO stages
+        (stage_id, task_id, position, agent_name, status, started_at)
+        VALUES ('stg-1','task-1',1,'a','active',?)`, now); err != nil {
+		t.Fatalf("insert stage: %v", err)
+	}
+	lib := newEmptyLibrary(t)
+	mgr := New(Options{Store: st, Library: lib, Runtime: noopRuntime{}})
+
+	mgr.handleToolUse("stg-1", "Read", "tu_1", json.RawMessage(`{"path":"/x"}`))
+	mgr.handleToolResult("stg-1", "Read", "tu_1", json.RawMessage(`"hi"`), false)
+
+	msgs, err := mgr.TaskMessages(context.Background(), "task-1")
+	if err != nil {
+		t.Fatalf("TaskMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 tool messages, got %d", len(msgs))
+	}
+	for i, want := range []string{`"phase":"call"`, `"phase":"result"`} {
+		if msgs[i].Role != RoleTool {
+			t.Errorf("msg %d: role=%q want tool", i, msgs[i].Role)
+		}
+		if !contains(msgs[i].Content, want) {
+			t.Errorf("msg %d content missing %q: %s", i, want, msgs[i].Content)
+		}
+		if !contains(msgs[i].Content, `"tool_use_id":"tu_1"`) {
+			t.Errorf("msg %d missing tool_use_id: %s", i, msgs[i].Content)
+		}
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // recordingRuntime captures StartStageInput payloads for assertion. All

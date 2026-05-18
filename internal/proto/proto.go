@@ -328,15 +328,20 @@ type AssistantMessageData struct {
 }
 
 type ToolCallData struct {
-	TurnID string          `json:"turn_id"`
-	Tool   string          `json:"tool"`
-	Input  json.RawMessage `json:"input,omitempty"`
+	TurnID    string          `json:"turn_id"`
+	Tool      string          `json:"tool"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
 }
 
 type ToolResultData struct {
-	TurnID  string          `json:"turn_id"`
-	Tool    string          `json:"tool"`
+	TurnID    string          `json:"turn_id"`
+	Tool      string          `json:"tool"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	// Shim emits the body as `content`; older daemons used `output`. Accept
+	// both so a shim/agentd version skew doesn't blank the result panel.
 	Output  json.RawMessage `json:"output,omitempty"`
+	Content json.RawMessage `json:"content,omitempty"`
 	IsError bool            `json:"is_error"`
 }
 
