@@ -328,10 +328,24 @@ type AssistantMessageData struct {
 }
 
 type ToolCallData struct {
-	TurnID    string          `json:"turn_id"`
-	Tool      string          `json:"tool"`
+	TurnID string `json:"turn_id"`
+	// Shim emits the tool identifier as `name` (mirroring the SDK's
+	// tool_use block); older agentd payloads used `tool`. Accept both so
+	// a shim/agentd version skew doesn't drop the tool label and surface
+	// as "?" once the entry is rehydrated from task_messages on refresh.
+	Tool      string          `json:"tool,omitempty"`
+	Name      string          `json:"name,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
+}
+
+// ToolName returns the tool identifier, preferring the daemon's `tool`
+// field but falling back to the shim's `name` field.
+func (d ToolCallData) ToolName() string {
+	if d.Tool != "" {
+		return d.Tool
+	}
+	return d.Name
 }
 
 type ToolResultData struct {

@@ -391,7 +391,7 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 			}
 			var d proto.ToolCallData
 			_ = json.Unmarshal(ev.Data, &d)
-			s.cbTool(d.Tool, d.ToolUseID, d.Input)
+			s.cbTool(d.ToolName(), d.ToolUseID, d.Input)
 		case proto.EventToolResult:
 			if s.cbToolRes == nil {
 				continue
