@@ -1085,6 +1085,35 @@ input[type="checkbox"] {
   width: 13px;
   height: 13px;
 }
+.input-shell .stop-btn {
+  background: #d33f3f;
+  border: 1px solid #d33f3f;
+  color: #fff;
+  font-weight: 500;
+  font-size: 13px;
+  padding: 7px 15px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: var(--radius-sm);
+  transition:
+    background var(--transition),
+    border-color var(--transition);
+}
+.input-shell .stop-btn:hover:not(:disabled) {
+  background: #b22f2f;
+  border-color: #b22f2f;
+}
+.input-shell .stop-btn:disabled {
+  background: var(--c-surface-3);
+  border-color: var(--c-surface-3);
+  color: var(--c-fg-faint);
+  opacity: 1;
+}
+.input-shell .stop-btn svg {
+  width: 12px;
+  height: 12px;
+}
 .input-area .input-error {
   margin-top: 10px;
 }

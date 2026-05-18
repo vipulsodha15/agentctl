@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, apiJson, jsonBody } from "../api";
-import type { SendMessageRequest, SendMessageResponse } from "../types";
+import type {
+  InterruptResponse,
+  SendMessageRequest,
+  SendMessageResponse,
+} from "../types";
 import { SkillAutocomplete, getSkillNav } from "./SkillAutocomplete";
 
 interface Props {
@@ -27,6 +31,7 @@ export function MessageInput({
 }: Props) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -101,6 +106,26 @@ export function MessageInput({
     }
   }
 
+  async function stopTurn() {
+    if (stopping) return;
+    setStopping(true);
+    setError(null);
+    try {
+      await apiJson<InterruptResponse>(
+        `/v1/sessions/${encodeURIComponent(sessionId)}/interrupt`,
+        { method: "POST", ...jsonBody({ clear_queue: false }) },
+      );
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? `${err.code ?? err.status}: ${err.message}`
+          : String(err),
+      );
+    } finally {
+      setStopping(false);
+    }
+  }
+
   function onPickSkill(name: string) {
     const rest = value.includes(" ") ? value.slice(value.indexOf(" ")) : "";
     const next = `/${name} ${rest.trimStart()}`.replace(/\s+$/, " ");
@@ -138,7 +163,7 @@ export function MessageInput({
     }
   }
 
-  const disabled = sending || inFlight || value.trim() === "";
+  const sendDisabled = sending || inFlight || value.trim() === "";
 
   return (
     <div className="input-area">
@@ -166,26 +191,42 @@ export function MessageInput({
           {queueDepth > 0 && (
             <span className="queue-indicator">{queueDepth} queued</span>
           )}
-          <button
-            className="send-btn"
-            onClick={() => void send()}
-            disabled={disabled}
-          >
-            {sending ? "Sending…" : "Send"}
-            {!sending && (
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden
-              >
-                <path d="M5 12h14M13 5l7 7-7 7" />
-              </svg>
-            )}
-          </button>
+          {inFlight ? (
+            <button
+              className="stop-btn"
+              onClick={() => void stopTurn()}
+              disabled={stopping}
+              title="Stop the current turn"
+            >
+              {stopping ? "Stopping…" : "Stop"}
+              {!stopping && (
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                </svg>
+              )}
+            </button>
+          ) : (
+            <button
+              className="send-btn"
+              onClick={() => void send()}
+              disabled={sendDisabled}
+            >
+              {sending ? "Sending…" : "Send"}
+              {!sending && (
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M5 12h14M13 5l7 7-7 7" />
+                </svg>
+              )}
+            </button>
+          )}
         </div>
       </div>
       {error && <div className="error-text input-error">{error}</div>}
