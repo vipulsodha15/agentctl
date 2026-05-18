@@ -85,8 +85,10 @@ type StartStageInput struct {
 	// emits while the stage is active. The manager uses these to populate
 	// the task chat thread and to lock the synthesis on handoff.
 	OnAssistantMessage func(content string)
-	// OnToolUse is invoked with each tool call (optional).
-	OnToolUse func(tool string, input json.RawMessage)
+	// OnToolUse is invoked with each tool call (optional). toolUseID is the
+	// SDK's stable id for the call so consumers can pair the call with a
+	// later result, or dedupe against the JSONL snapshot once it lands.
+	OnToolUse func(toolUseID, tool string, input json.RawMessage)
 	// OnError is invoked when the runtime surfaces an inline error.
 	OnError func(message string)
 }
@@ -112,7 +114,7 @@ type AttachInput struct {
 	StageID            string
 	SessionID          string
 	OnAssistantMessage func(content string)
-	OnToolUse          func(tool string, input json.RawMessage)
+	OnToolUse          func(toolUseID, tool string, input json.RawMessage)
 	OnError            func(message string)
 }
 
@@ -755,6 +757,32 @@ func (m *Manager) handleAssistantMessage(stageID string, content string) {
 	m.recordMessage(context.Background(), taskID, stageID, agent, RoleAssistant, content)
 }
 
+// handleToolUse persists a tool invocation to task_messages so the rendered
+// tool widgets survive a page refresh. Without this, tool history lives only
+// in the live event stream and the SDK JSONL mirror (flushed at turn end),
+// which leaves a gap mid-turn and any time the JSONL hasn't been written yet.
+// toolUseID is the SDK's stable id, surfaced to the frontend so it can dedupe
+// against the JSONL snapshot once that lands.
+func (m *Manager) handleToolUse(stageID, toolUseID, tool string, input json.RawMessage) {
+	var taskID, agent string
+	row := m.opts.Store.DB().QueryRow(`SELECT task_id, agent_name FROM stages WHERE stage_id=?`, stageID)
+	if err := row.Scan(&taskID, &agent); err != nil {
+		return
+	}
+	payload := map[string]any{"tool": tool}
+	if toolUseID != "" {
+		payload["tool_use_id"] = toolUseID
+	}
+	if len(input) > 0 {
+		payload["input"] = json.RawMessage(input)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	m.recordMessage(context.Background(), taskID, stageID, agent, RoleTool, string(body))
+}
+
 func (m *Manager) handleError(stageID, message string) {
 	var taskID, agent string
 	row := m.opts.Store.DB().QueryRow(`SELECT task_id, agent_name FROM stages WHERE stage_id=?`, stageID)
@@ -871,6 +899,9 @@ func (m *Manager) attachInputFor(stageID, sessionID, taskID string) AttachInput 
 		OnAssistantMessage: func(content string) {
 			m.handleAssistantMessage(stageID, content)
 		},
+		OnToolUse: func(toolUseID, tool string, input json.RawMessage) {
+			m.handleToolUse(stageID, toolUseID, tool, input)
+		},
 		OnError: func(message string) {
 			m.handleError(stageID, message)
 		},
@@ -948,6 +979,9 @@ func (m *Manager) spawnStage(ctx context.Context, task *Task, stage *Stage, prev
 		BaseSHA:       task.BaseSHA,
 		OnAssistantMessage: func(content string) {
 			m.handleAssistantMessage(stageRef.ID, content)
+		},
+		OnToolUse: func(toolUseID, tool string, input json.RawMessage) {
+			m.handleToolUse(stageRef.ID, toolUseID, tool, input)
 		},
 		OnError: func(message string) {
 			m.handleError(stageRef.ID, message)

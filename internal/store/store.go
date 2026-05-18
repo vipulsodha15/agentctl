@@ -15,7 +15,7 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-const SchemaMaxVersion = 5
+const SchemaMaxVersion = 6
 
 type Store struct {
 	db   *sql.DB

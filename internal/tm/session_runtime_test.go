@@ -333,6 +333,51 @@ func TestSessionRuntime_AssistantMessage_FansToCallback(t *testing.T) {
 	}, "OnAssistantMessage callback")
 }
 
+// TestSessionRuntime_ToolCall_FansToCallback verifies that EventToolCall
+// frames from the shim (which use {tool_use_id, name, input}) are decoded
+// and surfaced via OnToolUse with the SDK's tool_use_id preserved — the
+// tm.Manager uses that id to dedupe persisted tool rows against the JSONL
+// snapshot on refresh.
+func TestSessionRuntime_ToolCall_FansToCallback(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	type call struct {
+		useID, tool string
+		input       string
+	}
+	var gotMu sync.Mutex
+	var got []call
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{Name: "a"}, IssueMD: "hi",
+		OnAssistantMessage: func(string) {},
+		OnToolUse: func(useID, tool string, input json.RawMessage) {
+			gotMu.Lock()
+			defer gotMu.Unlock()
+			got = append(got, call{useID: useID, tool: tool, input: string(input)})
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	st := api.stream("sess-1")
+	st.push(proto.EventToolCall, map[string]any{
+		"turn_id":     "turn-1",
+		"tool_use_id": "tu_abc",
+		"name":        "Bash",
+		"input":       map[string]string{"cmd": "ls"},
+	})
+
+	waitFor(t, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) == 1 &&
+			got[0].useID == "tu_abc" &&
+			got[0].tool == "Bash" &&
+			strings.Contains(got[0].input, `"cmd":"ls"`)
+	}, "OnToolUse callback")
+}
+
 func TestSessionRuntime_Synthesize_CorrelatesByMessageIDAndSkipsCallback(t *testing.T) {
 	api := newFakeSessionAPI()
 	r := NewSessionRuntime(api, nil)

@@ -29,6 +29,11 @@ const (
 	RoleSeam      = "seam"
 	RoleSynthesis = "synthesis"
 	RoleError     = "error"
+	// RoleTool records a tool invocation in the durable task chat log so
+	// the per-turn tool widgets survive a page refresh. content is a JSON
+	// envelope: {"tool":string,"tool_use_id":string?,"input":any}. See
+	// taskMessagesAsConversation in TaskDetail.tsx for the consumer.
+	RoleTool = "tool"
 )
 
 // Task is the in-memory view of a task row joined with its stages.

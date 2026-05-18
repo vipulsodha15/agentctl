@@ -54,7 +54,7 @@ type sessionStage struct {
 	sessionID string
 
 	cbAssistant func(content string)
-	cbTool      func(tool string, input json.RawMessage)
+	cbTool      func(toolUseID, tool string, input json.RawMessage)
 	cbErr       func(message string)
 
 	stream fan.Stream
@@ -305,7 +305,7 @@ func (r *SessionRuntime) EnsureAttached(ctx context.Context, in AttachInput) err
 // creates a sessionStage entry. The map is not consulted for routing
 // decisions — it exists solely so events from the container flow through
 // the manager's callbacks into the chat thread.
-func (r *SessionRuntime) attach(ctx context.Context, stageID, sessionID string, cbAssistant func(string), cbTool func(string, json.RawMessage), cbErr func(string)) (*sessionStage, error) {
+func (r *SessionRuntime) attach(ctx context.Context, stageID, sessionID string, cbAssistant func(string), cbTool func(string, string, json.RawMessage), cbErr func(string)) (*sessionStage, error) {
 	stream, err := r.sm.Attach(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session runtime: attach: %w", err)
@@ -380,9 +380,23 @@ func (r *SessionRuntime) runReader(s *sessionStage) {
 			if s.cbTool == nil {
 				continue
 			}
-			var d proto.ToolCallData
+			// The shim emits {turn_id, tool_use_id, name, input} but
+			// proto.ToolCallData uses the older `tool` tag, so we decode
+			// locally to pick up the populated `name` field. See the same
+			// pattern in internal/cli/tui/model.go.
+			var d struct {
+				TurnID    string          `json:"turn_id"`
+				ToolUseID string          `json:"tool_use_id"`
+				Name      string          `json:"name"`
+				Tool      string          `json:"tool"`
+				Input     json.RawMessage `json:"input,omitempty"`
+			}
 			_ = json.Unmarshal(ev.Data, &d)
-			s.cbTool(d.Tool, d.Input)
+			name := d.Name
+			if name == "" {
+				name = d.Tool
+			}
+			s.cbTool(d.ToolUseID, name, d.Input)
 		case proto.EventSessionError:
 			if s.cbErr == nil {
 				continue

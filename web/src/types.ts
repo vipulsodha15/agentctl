@@ -412,7 +412,8 @@ export type TaskMessageRole =
   | "system"
   | "seam"
   | "synthesis"
-  | "error";
+  | "error"
+  | "tool";
 
 export interface TaskMessage {
   task_id: string;

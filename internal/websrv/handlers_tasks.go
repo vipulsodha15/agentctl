@@ -276,7 +276,11 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
 		return
 	}
-	msgs, _ := s.tasks.TaskMessages(r.Context(), id)
+	msgs, err := s.tasks.TaskMessages(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, proto.ErrInternal, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"task": task, "messages": msgs})
 }
 

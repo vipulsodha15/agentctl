@@ -1063,11 +1063,13 @@ function safeJson<T = unknown>(s: string): T | null {
 // widgets, thinking blocks, MCP/skill notices, cost chips. It's authoritative
 // once the SDK's JSONL has been flushed (end-of-turn) and the snapshot lands.
 //
-// task_messages is the durable text-only chat log written eagerly on every
-// send / handoff / synthesis / error. It covers two holes the JSONL doesn't:
+// task_messages is the durable chat log written eagerly on every
+// send / handoff / synthesis / error / tool call. It covers two holes the
+// JSONL doesn't:
 //   1. Stages whose container pre-dates the JSONL mirror — no JSONL exists.
 //   2. Mid-turn refresh on a fresh stage — JSONL hasn't been flushed yet.
-// It has no tool/thinking rows because task_messages doesn't persist those.
+// Tool rows here carry the call (name + input); the result is paired in from
+// the JSONL snapshot once it lands. Thinking rows are still snapshot-only.
 //
 // Strategy: if convState carries any text bubbles, trust it as the canonical
 // transcript (the snapshot landed). Otherwise render the task_messages
@@ -1083,7 +1085,22 @@ function mergeTranscript(
   const convHasText = convMessages.some(
     (m) => m.kind === "user" || m.kind === "assistant",
   );
-  if (convHasText) return convMessages;
+  if (convHasText) {
+    // The snapshot landed. Trust convMessages for the bulk of the transcript,
+    // but still pull in any task_messages tool rows the snapshot doesn't yet
+    // know about — the JSONL mirror is flushed at turn end, so a mid-turn
+    // refresh can see prior-turn text in the snapshot while the current
+    // turn's tools live only in task_messages.
+    const knownToolIDs = new Set<string>();
+    for (const m of convMessages) {
+      if (m.kind === "tool" && m.tool_use_id) knownToolIDs.add(m.tool_use_id);
+    }
+    const fresh = taskMessagesAsConversation(taskMessages, activeStageID).filter(
+      (m) =>
+        m.kind === "tool" && (!m.tool_use_id || !knownToolIDs.has(m.tool_use_id)),
+    );
+    return fresh.length === 0 ? convMessages : [...convMessages, ...fresh];
+  }
   const fallback = taskMessagesAsConversation(taskMessages, activeStageID);
   const richExtras = convMessages.filter(
     (m) => m.kind === "tool" || m.kind === "thinking" || m.kind === "notice",
@@ -1121,6 +1138,32 @@ function taskMessagesAsConversation(
       case "seam":
         out.push({ id, kind: "notice", text: m.content, notice_level: "info" });
         break;
+      case "tool": {
+        // content is a JSON envelope written by tm.Manager.handleToolUse:
+        // { "tool": string, "tool_use_id"?: string, "input"?: any }.
+        const parsed = safeJson<{
+          tool?: string;
+          tool_use_id?: string;
+          input?: unknown;
+        }>(m.content);
+        const tool = parsed?.tool ?? "";
+        const inputText =
+          parsed?.input === undefined
+            ? ""
+            : typeof parsed.input === "string"
+              ? parsed.input
+              : JSON.stringify(parsed.input, null, 2);
+        out.push({
+          id: parsed?.tool_use_id || id,
+          kind: "tool",
+          tool,
+          tool_use_id: parsed?.tool_use_id,
+          input: parsed?.input,
+          text: inputText,
+          status: "pending",
+        });
+        break;
+      }
     }
   }
   return out;
