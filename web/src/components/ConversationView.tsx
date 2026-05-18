@@ -4,6 +4,7 @@ import { UserMessage } from "./messages/UserMessage";
 import { AssistantMessage } from "./messages/AssistantMessage";
 import { ThinkingBlock } from "./messages/ThinkingBlock";
 import { ToolBlock } from "./messages/ToolBlock";
+import { ToolGroup } from "./messages/ToolGroup";
 import { SystemNotice } from "./messages/SystemNotice";
 
 interface Props {
@@ -181,6 +182,38 @@ function groupByTurn(messages: ConversationMessage[]): Group[] {
   return out;
 }
 
+type RenderRow =
+  | { kind: "message"; message: ConversationMessage }
+  | { kind: "tool-group"; key: string; items: ConversationMessage[] };
+
+function collapseToolRuns(items: ConversationMessage[]): RenderRow[] {
+  // Merge consecutive tool messages into a single render row so the
+  // transcript shows one collapsible group per run instead of one bubble
+  // per call. Runs of length 1 fall back to the unwrapped ToolBlock to
+  // avoid adding a header where there's nothing to group.
+  const out: RenderRow[] = [];
+  let buf: ConversationMessage[] = [];
+  const flush = () => {
+    if (buf.length === 0) return;
+    if (buf.length === 1) {
+      out.push({ kind: "message", message: buf[0] });
+    } else {
+      out.push({ kind: "tool-group", key: `tg-${buf[0].id}`, items: buf });
+    }
+    buf = [];
+  };
+  for (const m of items) {
+    if (m.kind === "tool") {
+      buf.push(m);
+    } else {
+      flush();
+      out.push({ kind: "message", message: m });
+    }
+  }
+  flush();
+  return out;
+}
+
 function TurnGroup({
   group,
   mcps,
@@ -192,11 +225,16 @@ function TurnGroup({
   usage: UsageTotals | undefined;
   isLast: boolean;
 }) {
+  const rows = collapseToolRuns(group.items);
   return (
     <div className="turn-group">
-      {group.items.map((m) => (
-        <MessageRow key={m.id} message={m} mcps={mcps} />
-      ))}
+      {rows.map((row) =>
+        row.kind === "message" ? (
+          <MessageRow key={row.message.id} message={row.message} mcps={mcps} />
+        ) : (
+          <ToolGroup key={row.key} items={row.items} mcps={mcps} />
+        ),
+      )}
       {(usage || (!isLast && group.items.length > 0)) && (
         <div className="turn-divider">
           {usage && (
