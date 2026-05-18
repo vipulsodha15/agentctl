@@ -467,23 +467,31 @@ export function TaskDetail() {
           />
         ))}
 
-        {activeStage && activeSessionID && (
-          <div className="task-active-thread">
-            <ConversationView
-              messages={mergeTranscript(
-                convState.messages,
-                taskMessages,
-                activeStage.stage_id,
-              )}
-              warnings={convState.warnings}
-              inFlight={convState.inFlight}
-              mcps={convState.mcps}
-              usageByTurn={convState.usageByTurn}
-              filter="all"
-            />
-            <TaskTodoRail messages={convState.messages} />
-          </div>
-        )}
+        {activeStage && activeSessionID && (() => {
+          // Compute the merged transcript once so the rail and the
+          // ConversationView see the same set of tool entries. Without
+          // this the rail reads convState directly and loses TodoWrite
+          // tool calls on refresh — exactly the bug the task_messages
+          // mirror was added to fix.
+          const merged = mergeTranscript(
+            convState.messages,
+            taskMessages,
+            activeStage.stage_id,
+          );
+          return (
+            <div className="task-active-thread">
+              <ConversationView
+                messages={merged}
+                warnings={convState.warnings}
+                inFlight={convState.inFlight}
+                mcps={convState.mcps}
+                usageByTurn={convState.usageByTurn}
+                filter="all"
+              />
+              <TaskTodoRail messages={merged} />
+            </div>
+          );
+        })()}
       </div>
 
       {terminal ? (
