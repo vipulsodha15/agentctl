@@ -3,13 +3,16 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/agentctl/agentctl/internal/cliclient"
+	"github.com/agentctl/agentctl/internal/mcpimport"
 	"github.com/agentctl/agentctl/internal/proto"
 )
 
@@ -31,6 +34,8 @@ func runMCP(ctx context.Context, env *Env, args []string) int {
 		return runMCPSetDefault(ctx, env, rest)
 	case "update":
 		return runMCPUpdate(ctx, env, rest)
+	case "import":
+		return runMCPImport(ctx, env, rest)
 	case "-h", "--help", "help":
 		mcpUsage(env)
 		return ExitOK
@@ -53,6 +58,7 @@ func mcpUsage(env *Env) {
 	fmt.Fprintln(env.Stderr, "  update <name>              Update fields of an MCP entry.")
 	fmt.Fprintln(env.Stderr, "  remove <name>              Remove an MCP entry.")
 	fmt.Fprintln(env.Stderr, "  set-default <name> on|off  Toggle default-enabled.")
+	fmt.Fprintln(env.Stderr, "  import [claude|codex]      Import MCP servers from Claude Code or Codex CLI.")
 }
 
 func dialAgentd(env *Env) (*cliclient.Client, int) {
@@ -340,4 +346,147 @@ func unwrap(err error) error {
 		return u.Unwrap()
 	}
 	return nil
+}
+
+func runMCPImport(_ context.Context, env *Env, args []string) int {
+	fs := flag.NewFlagSet("mcp import", flag.ContinueOnError)
+	fs.SetOutput(env.Stderr)
+	path := fs.String("path", "", "explicit source file (overrides the default for the chosen source)")
+	force := fs.Bool("force", false, "overwrite existing registry entries with the same name")
+	dryRun := fs.Bool("dry-run", false, "report what would be imported without writing")
+	defaultEnabled := fs.Bool("default-enabled", false, "mark imported entries as default-enabled")
+	fs.Usage = func() {
+		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp import [claude|codex] [--path <file>] [--force] [--dry-run] [--default-enabled]")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Reads MCP servers from Claude Code (~/.claude.json) or Codex CLI")
+		fmt.Fprintln(env.Stderr, "(~/.codex/config.toml) and adds matching entries to the registry.")
+		fmt.Fprintln(env.Stderr, "stdio servers are reported and skipped (the registry only supports")
+		fmt.Fprintln(env.Stderr, "http/sse today).")
+		fmt.Fprintln(env.Stderr, "")
+		fmt.Fprintln(env.Stderr, "Flags:")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(reorderArgs(args)); err != nil {
+		return ExitUsage
+	}
+	source := strings.ToLower(fs.Arg(0))
+	if source == "" {
+		source = "claude"
+	}
+	src, entries, code := loadMCPImportSource(env, source, *path)
+	if code != ExitOK {
+		return code
+	}
+	if len(entries) == 0 {
+		fmt.Fprintf(env.Stdout, "mcp import: no MCP servers found in %s\n", src)
+		return ExitOK
+	}
+	return applyMCPImport(env, src, entries, *force, *dryRun, *defaultEnabled)
+}
+
+// loadMCPImportSource resolves the source path and parses it. It returns
+// the resolved path so callers can include it in user-facing messages.
+func loadMCPImportSource(env *Env, source, override string) (string, []mcpimport.ParsedEntry, int) {
+	var (
+		path    string
+		entries []mcpimport.ParsedEntry
+		err     error
+	)
+	switch source {
+	case "claude":
+		path = override
+		if path == "" {
+			path = mcpimport.DefaultClaudePath(env.Layout.Home)
+		}
+		entries, err = mcpimport.ParseClaude(path)
+	case "codex":
+		path = override
+		if path == "" {
+			path = mcpimport.DefaultCodexPath(env.Layout.Home)
+		}
+		entries, err = mcpimport.ParseCodex(path)
+	default:
+		fmt.Fprintf(env.Stderr, "mcp import: unknown source %q (want claude|codex)\n", source)
+		return "", nil, ExitUsage
+	}
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.Stdout, "mcp import: %s not found, nothing to import.\n", path)
+			return path, nil, ExitOK
+		}
+		fmt.Fprintf(env.Stderr, "mcp import: %v\n", err)
+		return path, nil, ExitGeneric
+	}
+	return path, entries, ExitOK
+}
+
+// applyMCPImport pushes each parsed entry into the registry via the
+// existing AddMCP / UpdateMCP RPCs. With --force, conflicting names are
+// updated in place; without it, they are reported as skipped.
+func applyMCPImport(env *Env, src string, entries []mcpimport.ParsedEntry, force, dryRun, defaultEnabled bool) int {
+	var c *cliclient.Client
+	if !dryRun {
+		var code int
+		c, code = dialAgentd(env)
+		if c == nil {
+			return code
+		}
+		defer func() { _ = c.Close() }()
+	}
+	var imported, skipped int
+	for _, e := range entries {
+		if e.Skip != "" {
+			fmt.Fprintf(env.Stderr, "skipped %s: %s\n", e.Name, e.Skip)
+			skipped++
+			continue
+		}
+		if dryRun {
+			fmt.Fprintf(env.Stdout, "would import %s (%s, %s)\n", e.Name, e.URL, e.Transport)
+			imported++
+			continue
+		}
+		var resp proto.AddMCPResponse
+		err := c.Call(proto.OpAddMCP, proto.AddMCPRequest{
+			Name:           e.Name,
+			URL:            e.URL,
+			Transport:      e.Transport,
+			Kind:           "none",
+			DefaultEnabled: defaultEnabled,
+			Description:    e.Description,
+		}, &resp, 5*time.Second)
+		if err == nil {
+			fmt.Fprintf(env.Stdout, "imported %s\n", e.Name)
+			imported++
+			continue
+		}
+		var apiErr *cliclient.APIError
+		if isAPIError(err, &apiErr) && apiErr.Code == proto.ErrConflict {
+			if !force {
+				fmt.Fprintf(env.Stderr, "skipped %s: already in registry (use --force to overwrite)\n", e.Name)
+				skipped++
+				continue
+			}
+			url, transport, kind, desc := e.URL, e.Transport, "none", e.Description
+			var upResp proto.UpdateMCPResponse
+			upErr := c.Call(proto.OpUpdateMCP, proto.UpdateMCPRequest{
+				Name:        e.Name,
+				URL:         &url,
+				Transport:   &transport,
+				Kind:        &kind,
+				Description: &desc,
+			}, &upResp, 5*time.Second)
+			if upErr != nil {
+				fmt.Fprintf(env.Stderr, "mcp import: update %s: %v\n", e.Name, upErr)
+				skipped++
+				continue
+			}
+			fmt.Fprintf(env.Stdout, "updated %s\n", e.Name)
+			imported++
+			continue
+		}
+		fmt.Fprintf(env.Stderr, "mcp import: add %s: %v\n", e.Name, err)
+		skipped++
+	}
+	fmt.Fprintf(env.Stdout, "mcp import: %d imported, %d skipped from %s\n", imported, skipped, src)
+	return ExitOK
 }

@@ -23,7 +23,9 @@ import (
 	"github.com/agentctl/agentctl/internal/cliclient"
 	"github.com/agentctl/agentctl/internal/config"
 	"github.com/agentctl/agentctl/internal/mcp"
+	"github.com/agentctl/agentctl/internal/mcpimport"
 	"github.com/agentctl/agentctl/internal/paths"
+	"github.com/agentctl/agentctl/internal/proto"
 	"github.com/agentctl/agentctl/internal/secrets"
 	"github.com/agentctl/agentctl/internal/service"
 	"github.com/agentctl/agentctl/internal/skills"
@@ -50,6 +52,12 @@ type initFlags struct {
 	noImportCodexSkills bool
 	importCodexSkills   bool
 	codexPath           string
+	noImportClaudeMCPs  bool
+	importClaudeMCPs    bool
+	claudeMCPPath       string
+	noImportCodexMCPs   bool
+	importCodexMCPs     bool
+	codexMCPPath        string
 	foreground          bool
 	resetToken          string
 	resetWebToken       bool
@@ -74,6 +82,12 @@ func runInit(ctx context.Context, env *Env, args []string) int {
 	fs.BoolVar(&f.noImportCodexSkills, "no-import-codex-skills", false, "skip the Codex CLI skills import step")
 	fs.BoolVar(&f.importCodexSkills, "import-codex-skills", false, "force the Codex CLI skills import step")
 	fs.StringVar(&f.codexPath, "codex-path", "", "override the Codex CLI skills source path")
+	fs.BoolVar(&f.noImportClaudeMCPs, "no-import-claude-mcps", false, "skip the Claude Code MCP import step")
+	fs.BoolVar(&f.importClaudeMCPs, "import-claude-mcps", false, "force the Claude Code MCP import step")
+	fs.StringVar(&f.claudeMCPPath, "claude-mcp-path", "", "override the Claude Code MCP source file (default ~/.claude.json)")
+	fs.BoolVar(&f.noImportCodexMCPs, "no-import-codex-mcps", false, "skip the Codex CLI MCP import step")
+	fs.BoolVar(&f.importCodexMCPs, "import-codex-mcps", false, "force the Codex CLI MCP import step")
+	fs.StringVar(&f.codexMCPPath, "codex-mcp-path", "", "override the Codex CLI MCP source file (default ~/.codex/config.toml)")
 	fs.BoolVar(&f.foreground, "foreground", false, "skip system-service install and run agentd in foreground")
 	fs.StringVar(&f.resetToken, "reset-token", "", "force re-prompt for a token kind: anthropic|openai|github")
 	fs.BoolVar(&f.resetWebToken, "reset-web-token", false, "regenerate the web bearer token")
@@ -230,6 +244,18 @@ func initFlow(ctx context.Context, env *Env, f initFlags) error {
 	if !f.noImportCodexSkills && (openaiOn || f.codexPath != "" || f.importCodexSkills) {
 		if err := importCodexSkillsAtInit(env, layout, f); err != nil {
 			fmt.Fprintf(env.Stderr, "codex skills import: %v\n", err)
+		}
+	}
+
+	if !f.noImportClaudeMCPs && (anthropicOn || f.claudeMCPPath != "" || f.importClaudeMCPs) {
+		if err := importClaudeMCPsAtInit(ctx, env, layout, cfg, f); err != nil {
+			fmt.Fprintf(env.Stderr, "claude mcp import: %v\n", err)
+		}
+	}
+
+	if !f.noImportCodexMCPs && (openaiOn || f.codexMCPPath != "" || f.importCodexMCPs) {
+		if err := importCodexMCPsAtInit(ctx, env, layout, cfg, f); err != nil {
+			fmt.Fprintf(env.Stderr, "codex mcp import: %v\n", err)
 		}
 	}
 
@@ -543,14 +569,18 @@ func applyRegistrySeed(layout paths.Layout) error {
 }
 
 type installMetadata struct {
-	Version               string   `json:"version"`
-	InstallMethod         string   `json:"install_method"`
-	InstalledAt           string   `json:"installed_at"`
-	SourceURL             string   `json:"source_url,omitempty"`
-	ClaudeImportOfferedAt *string  `json:"claude_import_offered_at"`
-	ClaudeImportedSkills  []string `json:"claude_imported_skills"`
-	CodexImportOfferedAt  *string  `json:"codex_import_offered_at"`
-	CodexImportedSkills   []string `json:"codex_imported_skills"`
+	Version                  string   `json:"version"`
+	InstallMethod            string   `json:"install_method"`
+	InstalledAt              string   `json:"installed_at"`
+	SourceURL                string   `json:"source_url,omitempty"`
+	ClaudeImportOfferedAt    *string  `json:"claude_import_offered_at"`
+	ClaudeImportedSkills     []string `json:"claude_imported_skills"`
+	CodexImportOfferedAt     *string  `json:"codex_import_offered_at"`
+	CodexImportedSkills      []string `json:"codex_imported_skills"`
+	ClaudeMCPImportOfferedAt *string  `json:"claude_mcp_import_offered_at,omitempty"`
+	ClaudeImportedMCPs       []string `json:"claude_imported_mcps,omitempty"`
+	CodexMCPImportOfferedAt  *string  `json:"codex_mcp_import_offered_at,omitempty"`
+	CodexImportedMCPs        []string `json:"codex_imported_mcps,omitempty"`
 }
 
 func writeInstallMetadata(layout paths.Layout) error {
@@ -774,6 +804,198 @@ func importCodexSkillsAtInit(env *Env, layout paths.Layout, f initFlags) error {
 		_ = recordCodexImportedSkills(layout, imported, time.Now())
 	}
 	return nil
+}
+
+func claudeMCPImportAlreadyOffered(layout paths.Layout) bool {
+	meta := loadInstallMetadata(layout)
+	return meta.ClaudeMCPImportOfferedAt != nil && *meta.ClaudeMCPImportOfferedAt != ""
+}
+
+func codexMCPImportAlreadyOffered(layout paths.Layout) bool {
+	meta := loadInstallMetadata(layout)
+	return meta.CodexMCPImportOfferedAt != nil && *meta.CodexMCPImportOfferedAt != ""
+}
+
+func recordClaudeImportedMCPs(layout paths.Layout, names []string, offeredAt time.Time) error {
+	meta := loadInstallMetadata(layout)
+	at := offeredAt.UTC().Format(time.RFC3339)
+	meta.ClaudeMCPImportOfferedAt = &at
+	meta.ClaudeImportedMCPs = mergeStringSet(meta.ClaudeImportedMCPs, names)
+	out, _ := json.MarshalIndent(meta, "", "  ")
+	return os.WriteFile(layout.InstallMeta, out, 0o644)
+}
+
+func recordCodexImportedMCPs(layout paths.Layout, names []string, offeredAt time.Time) error {
+	meta := loadInstallMetadata(layout)
+	at := offeredAt.UTC().Format(time.RFC3339)
+	meta.CodexMCPImportOfferedAt = &at
+	meta.CodexImportedMCPs = mergeStringSet(meta.CodexImportedMCPs, names)
+	out, _ := json.MarshalIndent(meta, "", "  ")
+	return os.WriteFile(layout.InstallMeta, out, 0o644)
+}
+
+func mergeStringSet(existing, add []string) []string {
+	for _, n := range add {
+		seen := false
+		for _, e := range existing {
+			if e == n {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			existing = append(existing, n)
+		}
+	}
+	return existing
+}
+
+func importClaudeMCPsAtInit(ctx context.Context, env *Env, layout paths.Layout, cfg config.Config, f initFlags) error {
+	src := f.claudeMCPPath
+	if src == "" {
+		src = mcpimport.DefaultClaudePath(layout.Home)
+	}
+	return importMCPsAtInit(ctx, env, layout, cfg, importMCPSpec{
+		label:             "claude",
+		src:               src,
+		parse:             mcpimport.ParseClaude,
+		alreadyOffered:    claudeMCPImportAlreadyOffered,
+		record:            recordClaudeImportedMCPs,
+		forceImport:       f.importClaudeMCPs,
+		promptLabelPlural: "Claude Code MCP server(s)",
+	})
+}
+
+func importCodexMCPsAtInit(ctx context.Context, env *Env, layout paths.Layout, cfg config.Config, f initFlags) error {
+	src := f.codexMCPPath
+	if src == "" {
+		src = mcpimport.DefaultCodexPath(layout.Home)
+	}
+	return importMCPsAtInit(ctx, env, layout, cfg, importMCPSpec{
+		label:             "codex",
+		src:               src,
+		parse:             mcpimport.ParseCodex,
+		alreadyOffered:    codexMCPImportAlreadyOffered,
+		record:            recordCodexImportedMCPs,
+		forceImport:       f.importCodexMCPs,
+		promptLabelPlural: "Codex CLI MCP server(s)",
+	})
+}
+
+type importMCPSpec struct {
+	label             string
+	src               string
+	parse             func(string) ([]mcpimport.ParsedEntry, error)
+	alreadyOffered    func(paths.Layout) bool
+	record            func(paths.Layout, []string, time.Time) error
+	forceImport       bool
+	promptLabelPlural string
+}
+
+func importMCPsAtInit(ctx context.Context, env *Env, layout paths.Layout, cfg config.Config, spec importMCPSpec) error {
+	entries, err := spec.parse(spec.src)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(env.Stdout, "%s mcps: %s not found, nothing to import.\n", spec.label, spec.src)
+			return nil
+		}
+		return err
+	}
+	importable := 0
+	for _, e := range entries {
+		if e.Skip == "" {
+			importable++
+		}
+	}
+	if !spec.forceImport {
+		if spec.alreadyOffered(layout) {
+			return nil
+		}
+		if importable == 0 {
+			_ = spec.record(layout, nil, time.Now())
+			if len(entries) > 0 {
+				fmt.Fprintf(env.Stdout, "%s mcps: %d entries found in %s but none are http/sse (stdio not supported yet).\n",
+					spec.label, len(entries), spec.src)
+			}
+			return nil
+		}
+		prompt := fmt.Sprintf("Import %d %s from %s? [y/N]: ", importable, spec.promptLabelPlural, spec.src)
+		ok, err := promptYesNo(env, prompt, false)
+		if err != nil {
+			return err
+		}
+		_ = spec.record(layout, nil, time.Now())
+		if !ok {
+			fmt.Fprintf(env.Stdout, "%s mcps: import skipped.\n", spec.label)
+			return nil
+		}
+	}
+	imported, err := addImportedMCPs(ctx, env, cfg, entries, spec.label, spec.forceImport)
+	if err != nil {
+		return err
+	}
+	if len(imported) > 0 {
+		_ = spec.record(layout, imported, time.Now())
+	}
+	return nil
+}
+
+// addImportedMCPs sends parsed entries to agentd via the existing AddMCP
+// RPC, falling back to UpdateMCP when force is set and the name already
+// exists. Skipped entries (stdio, conflicts without --force, etc.) are
+// reported on stderr.
+func addImportedMCPs(_ context.Context, env *Env, cfg config.Config, entries []mcpimport.ParsedEntry, label string, force bool) ([]string, error) {
+	c, code := dialAgentd(env)
+	if c == nil {
+		return nil, fmt.Errorf("%s mcps: agentd unreachable (code %d)", label, code)
+	}
+	defer func() { _ = c.Close() }()
+	_ = cfg // reserved for future per-source defaults (e.g. default_enabled)
+	imported := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Skip != "" {
+			fmt.Fprintf(env.Stderr, "%s mcps: skipped %s (%s)\n", label, e.Name, e.Skip)
+			continue
+		}
+		var resp proto.AddMCPResponse
+		err := c.Call(proto.OpAddMCP, proto.AddMCPRequest{
+			Name:        e.Name,
+			URL:         e.URL,
+			Transport:   e.Transport,
+			Kind:        "none",
+			Description: e.Description,
+		}, &resp, 5*time.Second)
+		if err == nil {
+			fmt.Fprintf(env.Stdout, "%s mcps: imported %s\n", label, e.Name)
+			imported = append(imported, e.Name)
+			continue
+		}
+		var apiErr *cliclient.APIError
+		if isAPIError(err, &apiErr) && apiErr.Code == proto.ErrConflict {
+			if !force {
+				fmt.Fprintf(env.Stderr, "%s mcps: skipped %s (already in registry)\n", label, e.Name)
+				continue
+			}
+			url, transport, kind, desc := e.URL, e.Transport, "none", e.Description
+			var upResp proto.UpdateMCPResponse
+			upErr := c.Call(proto.OpUpdateMCP, proto.UpdateMCPRequest{
+				Name:        e.Name,
+				URL:         &url,
+				Transport:   &transport,
+				Kind:        &kind,
+				Description: &desc,
+			}, &upResp, 5*time.Second)
+			if upErr != nil {
+				fmt.Fprintf(env.Stderr, "%s mcps: update %s failed: %v\n", label, e.Name, upErr)
+				continue
+			}
+			fmt.Fprintf(env.Stdout, "%s mcps: updated %s\n", label, e.Name)
+			imported = append(imported, e.Name)
+			continue
+		}
+		fmt.Fprintf(env.Stderr, "%s mcps: add %s failed: %v\n", label, e.Name, err)
+	}
+	return imported, nil
 }
 
 func healthHint(foreground bool, fgErr chan error) string {
