@@ -139,7 +139,7 @@ func (r *streamRenderer) handle(ev proto.Event) {
 		var d proto.ToolCallData
 		_ = json.Unmarshal(ev.Data, &d)
 		r.closeAssistantLine()
-		fmt.Fprintf(r.stdout, "tool> %s %s\n", d.Tool, string(d.Input))
+		fmt.Fprintf(r.stdout, "tool> %s %s\n", d.ToolName(), string(d.Input))
 	case proto.EventToolResult:
 		var d proto.ToolResultData
 		_ = json.Unmarshal(ev.Data, &d)

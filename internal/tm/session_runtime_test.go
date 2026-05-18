@@ -392,6 +392,43 @@ func TestSessionRuntime_ToolEvents_FanOutToCallbacks(t *testing.T) {
 	}
 }
 
+// The shim emits tool.call payloads with the tool identifier under `name`
+// (mirroring the SDK's tool_use block). The session runtime must accept
+// that shape so the persisted task_message carries a non-empty tool label;
+// otherwise the chat thread re-renders the entry as "?" after a refresh.
+func TestSessionRuntime_ToolCall_ShimNameField(t *testing.T) {
+	api := newFakeSessionAPI()
+	r := NewSessionRuntime(api, nil)
+	var mu sync.Mutex
+	var gotTool string
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{Name: "a"}, IssueMD: "hi",
+		OnToolUse: func(tool, _ string, _ json.RawMessage) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotTool = tool
+		},
+		OnToolResult: func(_, _ string, _ json.RawMessage, _ bool) {},
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	st := api.stream("sess-1")
+	st.push(proto.EventToolCall, map[string]any{
+		"turn_id":     "T1",
+		"tool_use_id": "tu_1",
+		"name":        "Bash",
+		"input":       map[string]any{"command": "ls"},
+	})
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return gotTool == "Bash"
+	}, "shim's `name` field decoded as tool label")
+}
+
 func TestSessionRuntime_Synthesize_CorrelatesByMessageIDAndSkipsCallback(t *testing.T) {
 	api := newFakeSessionAPI()
 	r := NewSessionRuntime(api, nil)
