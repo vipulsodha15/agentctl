@@ -221,10 +221,9 @@ func Run(ctx context.Context, opts Options) error {
 	taskMgr := tm.New(tm.Options{
 		Store:   st,
 		Library: taskLib,
-		Runtime: tm.NewSessionRuntime(manager, tmLog).
-			WithResolver(tm.ProviderResolver(providerResolver)),
-		Hub:    taskHub,
-		Logger: tmLog,
+		Runtime: newTaskRuntime(manager, tmLog, providerResolver),
+		Hub:     taskHub,
+		Logger:  tmLog,
 	})
 	_ = taskMgr
 
