@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ConversationMessage, McpStatus, ToolStatus } from "../../types";
 import { ToolBlock } from "./ToolBlock";
 
@@ -17,13 +17,7 @@ export function ToolGroup({ items, mcps }: Props) {
   const errors = items.filter((m) => statusOf(m) === "error").length;
   const done = total - pending;
 
-  // Auto-open while any tool is still running so the user can watch
-  // progress; once everything completes we leave the state alone so a
-  // user-driven toggle isn't overridden by streaming activity.
-  const [open, setOpen] = useState(pending > 0);
-  useEffect(() => {
-    if (pending > 0) setOpen(true);
-  }, [pending]);
+  const [open, setOpen] = useState(false);
 
   const status: ToolStatus =
     pending > 0 ? "pending" : errors > 0 ? "error" : "done";
