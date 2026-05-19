@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 try:
@@ -53,6 +53,15 @@ class RuntimeConfig:
     # default Claude Code prompt. Used by tm.SessionRuntime to run each
     # task-chat stage under its agent's prompt.
     system_prompt: Optional[str] = None
+    # Forwarded to ClaudeAgentOptions.sandbox. The outer Docker profile
+    # (CapDrop ALL + no-new-privileges + ReadOnlyRootFS in
+    # internal/sm/manager.go) blocks the unshare(CLONE_NEWUSER) that the
+    # CLI's bwrap-based bash sandbox needs on Linux, so even trivial
+    # commands like `/bin/echo test` come back as exit 1 in ~50ms before
+    # the wrapped command ever runs. The container is already the trust
+    # boundary, so the inner layer is redundant. Mirrors the
+    # `sandbox="danger-full-access"` workaround in codex_driver.py.
+    sandbox: dict = field(default_factory=lambda: {"enabled": False})
 
 
 class RuntimeDriver:
@@ -128,6 +137,9 @@ class RuntimeDriver:
             kwargs["system_prompt"] = self._cfg.system_prompt
         if self._sdk_session_id:
             kwargs["resume"] = self._sdk_session_id
+        # Explicitly off by default — see RuntimeConfig.sandbox.
+        if self._cfg.sandbox is not None:
+            kwargs["sandbox"] = self._cfg.sandbox
         return options_cls(**kwargs)
 
     async def _ensure_client(self) -> Any:

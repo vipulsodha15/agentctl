@@ -311,8 +311,14 @@ func (a *actor) handleSend(s *sendItem) {
 		a.broadcastLocked(proto.EventTurnStart, mustJSON(proto.TurnStartData{
 			TurnID: turnID, MessageID: s.messageID, Model: a.summary.Model,
 		}))
+		// Pass the daemon's turn_id so the shim stamps the same id on every
+		// runtime.event it emits for this turn. Without it the shim falls
+		// back to message_id (image/shim/__main__.py), which breaks the
+		// synth-correlation in tm.SessionRuntime (synthTID is the ULID turn
+		// id but assistant.message arrives with TurnID = message_id, so
+		// Synthesize hangs and Handoff never advances the stage).
 		a.sendControlLocked(AgentdMessage, mustJSON(map[string]any{
-			"message_id": s.messageID, "content": s.content,
+			"message_id": s.messageID, "content": s.content, "turn_id": turnID,
 		}))
 		s.reply <- SendResult{MessageID: s.messageID, Queued: false, QueueDepth: len(a.queue)}
 		a.summary.InFlight = true

@@ -81,6 +81,56 @@ func TestCreateSendInOrder(t *testing.T) {
 	}
 }
 
+// TestSendStampsTurnIDOnShimFrame pins the contract that the daemon passes
+// its turn_id to the shim on the direct (non-queued) handleSend path, the
+// same way startTurnFor (queue-drain path) already does. Without this, the
+// shim falls back to message_id as its turn_id, the daemon's EventTurnStart
+// carries the ULID turn id, and the two never match — which silently breaks
+// turn-correlation features built on top (notably tm.SessionRuntime synth,
+// which keys on EventTurnStart.TurnID == EventAssistantMessage.TurnID; the
+// mismatch made "Hand off to next agent" hang and never advance the stage).
+func TestSendStampsTurnIDOnShimFrame(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "turn-id", Provider: "anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := mgr.Attach(ctx, r.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	mustEvent(t, stream, proto.EventSessionSnapshot)
+
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	if _, err := mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "hi", ClientID: "cli-1"}); err != nil {
+		t.Fatal(err)
+	}
+	mustEvent(t, stream, proto.EventUserMessage)
+	ts := mustEvent(t, stream, proto.EventTurnStart)
+	var tsd proto.TurnStartData
+	if err := json.Unmarshal(ts.Data, &tsd); err != nil {
+		t.Fatal(err)
+	}
+	fr := conn.expectFrame(t, AgentdMessage)
+	var payload struct {
+		MessageID string `json:"message_id"`
+		Content   string `json:"content"`
+		TurnID    string `json:"turn_id"`
+	}
+	if err := json.Unmarshal(fr.Data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.TurnID == "" {
+		t.Fatalf("AgentdMessage payload missing turn_id; got %s", string(fr.Data))
+	}
+	if payload.TurnID != tsd.TurnID {
+		t.Fatalf("turn_id mismatch: EventTurnStart.TurnID=%q, AgentdMessage.turn_id=%q", tsd.TurnID, payload.TurnID)
+	}
+}
+
 // TestSendBeforeRuntimeReady reproduces the bug where messages sent during
 // container startup (after Create returned but before the shim's RuntimeReady
 // frame) were lost: handleSend set inFlight while a.control was either nil or
@@ -1051,6 +1101,21 @@ func (c *fakeConn) expect(t *testing.T, kind string) string {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timeout waiting for control frame %s", kind)
 			return ""
+		}
+	}
+}
+
+func (c *fakeConn) expectFrame(t *testing.T, kind string) ControlFrame {
+	t.Helper()
+	for {
+		select {
+		case fr := <-c.filtered:
+			if fr.Kind == kind {
+				return fr
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for control frame %s", kind)
+			return ControlFrame{}
 		}
 	}
 }
