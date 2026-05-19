@@ -202,15 +202,26 @@ func Run(ctx context.Context, opts Options) error {
 	manager := sm.New(managerOpts)
 	defer func() { _ = manager.Shutdown(ctx) }()
 
+	// Single provider-resolution closure shared between the CLI socket, the
+	// web server, and the task-chat session runtime. Builds the resolver
+	// inputs fresh on every call so rotating secrets or editing config.toml
+	// is picked up without a daemon restart. ADR 0020 §3 — exactly one
+	// implementation.
+	providerResolver := newProviderResolver(opts.Layout, st)
+	providerCatalog := newProviderCatalog(opts.Layout, st)
+
 	// Task chat reuses the session-manager path: each task stage spawns one
 	// fresh container session with its agent's prompt applied, instead of
 	// the old direct-HTTP path that reimplemented auth + system framing.
+	// The resolver must be wired here too — without it, sm.Create rejects
+	// stages whose agent YAML doesn't pin a provider with ErrProviderRequired,
+	// leaving the stage row's session_id NULL and breaking the task chat.
 	taskHub := fan.NewHub()
 	tmLog := log.New(log.Options{Component: "tm"})
 	taskMgr := tm.New(tm.Options{
 		Store:   st,
 		Library: taskLib,
-		Runtime: tm.NewSessionRuntime(manager, tmLog),
+		Runtime: newTaskRuntime(manager, tmLog, providerResolver),
 		Hub:     taskHub,
 		Logger:  tmLog,
 	})
@@ -245,13 +256,6 @@ func Run(ctx context.Context, opts Options) error {
 	if cmMgr != nil {
 		containerLogStream = newContainerLogStreamer(manager, cmMgr)
 	}
-
-	// Single provider-resolution closure shared between the CLI socket and
-	// the web server. Builds the resolver inputs fresh on every call so
-	// rotating secrets or editing config.toml is picked up without a
-	// daemon restart. ADR 0020 §3 — exactly one implementation.
-	providerResolver := newProviderResolver(opts.Layout, st)
-	providerCatalog := newProviderCatalog(opts.Layout, st)
 
 	sockLog := log.New(log.Options{Component: log.ComponentSock})
 	socketSrv := socksrv.New(socksrv.Options{
