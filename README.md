@@ -10,9 +10,13 @@ MCP servers, your skills, and (optionally) a clone of your repo. The CLI
 owns the database and container lifecycle, so you can detach from a session
 and reattach later without losing state.
 
+[![CI](https://github.com/vipulsodha15/agentctl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vipulsodha15/agentctl/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/vipulsodha15/agentctl/branch/main/graph/badge.svg)](https://codecov.io/gh/vipulsodha15/agentctl)
+[![Go Report Card](https://goreportcard.com/badge/github.com/vipulsodha15/agentctl)](https://goreportcard.com/report/github.com/vipulsodha15/agentctl)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/vipulsodha15/agentctl?logo=go)](go.mod)
+[![Latest Release](https://img.shields.io/github/v/release/vipulsodha15/agentctl?include_prereleases&sort=semver)](https://github.com/vipulsodha15/agentctl/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Go Reference](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/)
-[![CI](https://github.com/agentctl/agentctl/actions/workflows/ci.yml/badge.svg)](https://github.com/agentctl/agentctl/actions/workflows/ci.yml)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 ![agentctl session board](docs/screenshots/01-task-board.png)
 <sub>Kanban-style task board. Replace this image with a real capture — see [`docs/screenshots/README.md`](docs/screenshots/README.md).</sub>

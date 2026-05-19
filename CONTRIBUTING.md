@@ -46,6 +46,13 @@ CI runs all of the above on every PR — see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml). If CI is red and
 you can't reproduce locally, ping the maintainers on the PR.
 
+### Coverage
+
+The Go job emits `coverage.out` and uploads it to
+[Codecov](https://codecov.io/gh/vipulsodha15/agentctl). Public-repo uploads
+work tokenless; if you fork into an org that requires a token, set the
+`CODECOV_TOKEN` repo secret.
+
 ## Coding style
 
 - Go: `gofmt`-clean, idiomatic; prefer the stdlib. New dependencies need
