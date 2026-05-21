@@ -1,23 +1,19 @@
 # Screenshots
 
-The main `README.md` references images in this directory. Until you drop
-real captures in, these paths 404 on GitHub and the README will render
-broken-image icons.
+The main `README.md` references images in this directory.
 
-## What to capture
+## What's here
 
-Capture each of these from a real running agentctl install (`agentctl ui`
-to open the Web UI at `http://127.0.0.1:7777`). Save as PNG at the
-filename listed. 1600×1000 (logical) is a good baseline; the README will
-scale them down.
-
-| Filename | Where in the UI | What it should show |
+| Filename | Where in the UI | What it shows |
 |---|---|---|
-| `01-task-board.png` | **Tasks** route, **Board** view | All four Kanban columns (Not started / Working / Done / Abandoned) with at least one card in each. This is the hero image at the top of the README — make it look good. |
-| `02-session-console.png` | A session's **Console** tab | An active back-and-forth with the agent: a user message, a tool call, and an assistant response. The provider/model chip should be visible. |
-| `03-task-board-stages.png` | **Tasks** route, **Board** view | Same as `01` but with a task card that has visible stage progress dots (investigate → plan → execute). Crop or annotate to highlight the stage progress. |
-| `04-assembly-line-editor.png` | **Assembly lines → Edit `bug`** | The stage list with `bug-investigator`, `bug-planner`, `bug-executor`. If you're showcasing multi-provider, use `bug-multi-provider` instead so the provider chips show. |
-| `05-agent-editor.png` | **Agents → Edit `bug-investigator`** | The system prompt, MCP allow-list, and tool surface fields visible. |
+| `01-task-board.png` | **Tasks** route, **Board** view | All four Kanban columns (Not started / Working / Done / Abandoned). Hero image at the top of the README. |
+| `02-assembly-lines.png` | **Assembly lines** route | List of assembly lines with one selected; the right pane shows its ordered stages. |
+| `03-new-assembly-line.png` | **Assembly lines → New assembly line** | The authoring form for a new assembly line — name, description, and the stage list. |
+| `04-sessions.png` | **Sessions** route | The Sessions view. |
+
+If you replace these, keep the filenames (the main `README.md` references
+them by name). 1600×1000 (logical) is a good baseline; the README will
+scale them down.
 
 ## How to capture
 

@@ -18,8 +18,8 @@ and reattach later without losing state.
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-![agentctl session board](docs/screenshots/01-task-board.png)
-<sub>Kanban-style task board. Replace this image with a real capture — see [`docs/screenshots/README.md`](docs/screenshots/README.md).</sub>
+![agentctl task board](docs/screenshots/01-task-board.png)
+<sub>Kanban-style task board — five tasks across the **Working** column, each card showing its assembly line, the current stage, and progress.</sub>
 
 ---
 
@@ -31,8 +31,6 @@ its own working volume. The agent never touches your host filesystem outside
 the repo you hand it, and one session can't see another. Stop the session and
 the blast radius goes with it. Skills are bind-mounted (not baked into the
 image), so iterating on a prompt or skill is instant — no rebuild required.
-
-![Session console](docs/screenshots/02-session-console.png)
 
 ### Multi-provider: Claude Code and OpenAI Codex
 agentctl ships with first-class support for two coding-agent runtimes today:
@@ -64,8 +62,6 @@ stage, the cost so far, and any pending handoff. Drag-free switching between
 **Board** and **List** view is built in, and the same data is available from
 the CLI (`agentctl task ls`).
 
-![Task board with assembly-line stages](docs/screenshots/03-task-board-stages.png)
-
 ### Assembly lines for tasks
 Instead of one omniscient agent, define small, role-scoped agents and chain
 them into a workflow. A task moves through stages — **investigate → plan →
@@ -81,7 +77,11 @@ A multi-provider variant
 ([`bug-multi-provider.yaml`](internal/ttl/builtins/assembly-lines/bug-multi-provider.yaml))
 investigates on Claude and executes on Codex.
 
-![Assembly-line editor](docs/screenshots/04-assembly-line-editor.png)
+![Assembly lines list](docs/screenshots/02-assembly-lines.png)
+<sub>Browsing built-in and custom assembly lines. Each line is an ordered chain of role-distinct agents.</sub>
+
+![New assembly line editor](docs/screenshots/03-new-assembly-line.png)
+<sub>Authoring a new assembly line — chain stages left-to-right; each stage pins its own agent (and, optionally, its own provider).</sub>
 
 ### Pre-defined agents (built-ins)
 agentctl ships with a curated set of role-scoped agents that you can use
@@ -97,8 +97,6 @@ Each agent has its own system prompt, MCP allow-list, and tool surface — no
 hidden tool surface, no "what is this agent allowed to do?" guesswork. Define
 your own with `agentctl agent add` or in the Web UI's **Agents** editor.
 
-![Agent editor](docs/screenshots/05-agent-editor.png)
-
 ### Skills and MCP servers — first-class and explicit
 - **Skills** are folders under `~/.local/share/agentctl/custom-skills/` that
   get bind-mounted into every session container at `/skills/`. Edit in place;
@@ -112,6 +110,9 @@ Drive everything from your terminal (`agentctl start`, `attach`, `ls`,
 (`agentctl ui`). Both clients talk to the same `agentd` over the same
 internal API — a session you started on the CLI shows up in the UI and vice
 versa.
+
+![Sessions view](docs/screenshots/04-sessions.png)
+<sub>The **Sessions** view — empty state shown; live sessions started from the CLI (`agentctl new`) show up here in real time.</sub>
 
 ---
 
