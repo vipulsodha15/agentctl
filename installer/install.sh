@@ -122,6 +122,20 @@ META
   echo ""
   echo "agentctl installed at $INSTALL_DIR/agentctl"
   echo "Next: agentctl init"
+  echo ""
+  echo "========================================================================"
+  echo "WARNING: Anthropic subscription / team plan ban risk"
+  echo "========================================================================"
+  echo "Using your Claude subscription (Pro / Max / Team / Enterprise) with"
+  echo "third-party tools like agentctl may violate Anthropic's Terms of Service."
+  echo "Anthropic has banned individual and TEAM PLAN accounts for routing"
+  echo "subscription credentials through unofficial clients."
+  echo ""
+  echo "If you sign in via \`agentctl auth login\` (OAuth) with a team plan"
+  echo "account, you risk getting the ENTIRE TEAM PLAN banned — not just your"
+  echo "user. Use an API key billed to a separate account instead if you are"
+  echo "unsure."
+  echo "========================================================================"
 }
 
 case "$ACTION" in
