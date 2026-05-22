@@ -264,6 +264,10 @@ func runAuthLogin(ctx context.Context, env *Env, args []string) int {
 		return ExitUsage
 	}
 
+	if cfg.provider == secrets.ProviderAnthropic {
+		printAnthropicSubscriptionBanWarning(env)
+	}
+
 	if err := os.MkdirAll(cfg.credsDir, secrets.DirPerm); err != nil {
 		fmt.Fprintf(env.Stderr, "auth login: mkdir %s: %v\n", cfg.credsDir, err)
 		return ExitEnvironment
@@ -396,6 +400,33 @@ func persistOAuthMode(env *Env, provider string) error {
 		sec.AnthropicAuthMode = secrets.AuthModeOAuth
 	}
 	return secrets.Save(env.Layout.SecretsFile, sec)
+}
+
+// printAnthropicSubscriptionBanWarning surfaces the ToS / ban-risk notice
+// before the OAuth flow launches. Anthropic has banned both individual and
+// team-plan accounts for routing Claude subscription credentials through
+// third-party clients; on a team plan the entire org is at risk, not just
+// the signing-in user. Printed to stderr so it stays visible even if stdout
+// is being piped.
+func printAnthropicSubscriptionBanWarning(env *Env) {
+	w := env.Stderr
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "========================================================================")
+	fmt.Fprintln(w, "WARNING: Anthropic subscription / team plan ban risk")
+	fmt.Fprintln(w, "========================================================================")
+	fmt.Fprintln(w, "You are about to sign in with your Claude subscription (Pro / Max /")
+	fmt.Fprintln(w, "Team / Enterprise). Using subscription credentials with third-party")
+	fmt.Fprintln(w, "tools like agentctl may violate Anthropic's Terms of Service.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Anthropic has banned accounts — including TEAM PLAN accounts — for")
+	fmt.Fprintln(w, "routing subscription auth through unofficial clients. If you sign in")
+	fmt.Fprintln(w, "with a team plan account, you risk getting the ENTIRE TEAM PLAN")
+	fmt.Fprintln(w, "banned, not just your user.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "If you are unsure, cancel now (Ctrl-C) and use an API key billed to a")
+	fmt.Fprintln(w, "separate account via `agentctl init` instead.")
+	fmt.Fprintln(w, "========================================================================")
+	fmt.Fprintln(w, "")
 }
 
 func ensureAuthImage(ctx context.Context, env *Env, noCache bool) error {
