@@ -136,12 +136,14 @@ class Shim:
             "emit_session_id": self._emit_session_id,
             "emit_message_record": self._emit_message_record,
         }
-        # MCP rendering is Claude-specific (the SDK consumes the dict the
-        # helper builds); pass it through only when the resolved provider
-        # is Anthropic so we don't leak provider-specific keys into the
-        # Codex driver's options dict.
+        # Each driver translates the registry's wire shape into its own
+        # native MCP config: the Claude SDK takes a name-keyed dict
+        # (built by _render_mcp_servers); the Codex CLI consumes -c
+        # overrides built inside codex_driver from the raw list.
         if provider in ("anthropic", "claude"):
             driver_options["mcp_servers"] = _render_mcp_servers(greet_data.get("mcps"))
+        else:
+            driver_options["mcp_servers"] = greet_data.get("mcps") or []
         self._driver = rt.get_driver(provider, driver_options)
         self._driver.start()
 

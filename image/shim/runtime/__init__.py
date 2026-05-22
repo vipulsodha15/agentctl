@@ -149,6 +149,7 @@ def get_driver(
             cwd=options.get("cwd", "/work") or "/work",
             resume=options.get("resume") or None,
             system_prompt=options.get("system_prompt") or None,
+            mcp_servers=options.get("mcp_servers") or [],
         )
         return driver_cls(
             cfg,
