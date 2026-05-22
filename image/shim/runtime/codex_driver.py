@@ -84,6 +84,13 @@ class CodexConfig:
     # Extra flags appended to every ``codex exec`` invocation. Empty in
     # production; tests use this to point at a fixture shim.
     extra_args: list[str] = field(default_factory=list)
+    # MCP server descriptors in the agentd.greet wire shape — a list of
+    # ``{name, url, transport, kind, headers?}`` dicts. The Codex CLI does
+    # not accept the Claude SDK's name-keyed mcp_servers map, so we
+    # translate to ``-c mcp_servers.<name>.<key>=<value>`` overrides at
+    # argv-build time. HTTP/SSE entries additionally require codex's
+    # ``experimental_use_rmcp_client`` flag.
+    mcp_servers: list = field(default_factory=list)
 
 
 class CodexDriver:
@@ -279,6 +286,8 @@ class CodexDriver:
                 "-c",
                 f'model_instructions_file="{self._instructions_file}"',
             ])
+        for override in _render_codex_mcp_overrides(self._cfg.mcp_servers):
+            argv.extend(["-c", override])
         argv.extend(self._cfg.extra_args)
         argv.append(prompt)
         return argv
@@ -962,6 +971,73 @@ def _codex_usage_dict(usage: dict) -> dict:
         # the cost row arithmetic still lines up.
         "cache_write_tokens": 0,
     }
+
+
+_TOML_KEY_OK = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
+
+
+def _is_bare_toml_key(name: str) -> bool:
+    return bool(name) and all(ch in _TOML_KEY_OK for ch in name)
+
+
+def _toml_quote(s: str) -> str:
+    """Quote ``s`` as a TOML basic string for use inside a ``-c key="..."``
+    override. Escapes backslashes and double quotes; rejects control chars
+    by stripping them (codex parses each ``-c`` value as a TOML expression,
+    so we keep the value safe for that parser).
+    """
+
+    cleaned = "".join(ch for ch in s if ch >= " " or ch == "\t")
+    return '"' + cleaned.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _render_codex_mcp_overrides(mcps: Any) -> list[str]:
+    """Translate the agentd.greet ``mcps`` list into Codex CLI ``-c`` overrides.
+
+    Each HTTP/SSE entry becomes a pair of ``mcp_servers.<name>.url`` and
+    (optionally) ``mcp_servers.<name>.bearer_token`` overrides; when any
+    are emitted, codex's ``experimental_use_rmcp_client`` flag is set so
+    the rmcp client handles the URL-based transport (the legacy mcp client
+    only knows stdio). Entries with an unsafe TOML key, unsupported
+    transport, or no URL are silently skipped — the registry-side render
+    already emitted any user-facing skip events.
+    """
+
+    if not mcps or not isinstance(mcps, list):
+        return []
+    overrides: list[str] = []
+    saw_http = False
+    for m in mcps:
+        if not isinstance(m, dict):
+            continue
+        name = m.get("name")
+        if not isinstance(name, str) or not _is_bare_toml_key(name):
+            continue
+        transport = (m.get("transport") or "http").lower()
+        if transport not in ("http", "sse"):
+            continue
+        url = m.get("url") or ""
+        if not isinstance(url, str) or not url:
+            continue
+        overrides.append(f"mcp_servers.{name}.url={_toml_quote(url)}")
+        headers = m.get("headers")
+        bearer = ""
+        if isinstance(headers, dict):
+            auth = headers.get("Authorization") or headers.get("authorization") or ""
+            if isinstance(auth, str) and auth.lower().startswith("bearer "):
+                bearer = auth[len("bearer "):].strip()
+        if bearer:
+            overrides.append(
+                f"mcp_servers.{name}.bearer_token={_toml_quote(bearer)}"
+            )
+        saw_http = True
+    if saw_http:
+        # rmcp_client is required for url-based MCP servers in codex
+        # 0.130.0; without it, only stdio entries are honored.
+        overrides.insert(0, "experimental_use_rmcp_client=true")
+    return overrides
 
 
 def _drain(stream: Optional[IO[str]], sink: "deque[str]") -> None:

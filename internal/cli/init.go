@@ -950,7 +950,7 @@ func addImportedMCPs(_ context.Context, env *Env, cfg config.Config, entries []m
 		return nil, fmt.Errorf("%s mcps: agentd unreachable (code %d)", label, code)
 	}
 	defer func() { _ = c.Close() }()
-	_ = cfg // reserved for future per-source defaults (e.g. default_enabled)
+	_ = cfg
 	imported := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.Skip != "" {
@@ -959,11 +959,12 @@ func addImportedMCPs(_ context.Context, env *Env, cfg config.Config, entries []m
 		}
 		var resp proto.AddMCPResponse
 		err := c.Call(proto.OpAddMCP, proto.AddMCPRequest{
-			Name:        e.Name,
-			URL:         e.URL,
-			Transport:   e.Transport,
-			Kind:        "none",
-			Description: e.Description,
+			Name:           e.Name,
+			URL:            e.URL,
+			Transport:      e.Transport,
+			Kind:           "none",
+			DefaultEnabled: true,
+			Description:    e.Description,
 		}, &resp, 5*time.Second)
 		if err == nil {
 			fmt.Fprintf(env.Stdout, "%s mcps: imported %s\n", label, e.Name)

@@ -354,9 +354,14 @@ func runMCPImport(_ context.Context, env *Env, args []string) int {
 	path := fs.String("path", "", "explicit source file (overrides the default for the chosen source)")
 	force := fs.Bool("force", false, "overwrite existing registry entries with the same name")
 	dryRun := fs.Bool("dry-run", false, "report what would be imported without writing")
-	defaultEnabled := fs.Bool("default-enabled", false, "mark imported entries as default-enabled")
+	// Default to enabled so that newly imported servers actually reach the
+	// runtime: the New Session UI pre-selects only `default_enabled` rows
+	// (web/src/routes/NewSession.tsx) and `mcp.Resolve` treats them the
+	// same way when no explicit list is passed. Without this, an imported
+	// server sits in the registry invisibly and the agent can't discover it.
+	defaultEnabled := fs.Bool("default-enabled", true, "mark imported entries as default-enabled (use --default-enabled=false to opt out)")
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp import [claude|codex] [--path <file>] [--force] [--dry-run] [--default-enabled]")
+		fmt.Fprintln(env.Stderr, "Usage: agentctl mcp import [claude|codex] [--path <file>] [--force] [--dry-run] [--default-enabled=BOOL]")
 		fmt.Fprintln(env.Stderr, "")
 		fmt.Fprintln(env.Stderr, "Reads MCP servers from Claude Code (~/.claude.json) or Codex CLI")
 		fmt.Fprintln(env.Stderr, "(~/.codex/config.toml) and adds matching entries to the registry.")

@@ -1023,6 +1023,98 @@ class CodexDriverArgvTests(unittest.TestCase):
         # the codex CLI's defaults (AGENTS.md, etc.) take over.
         self.assertNotIn("-c", argv)
 
+    def test_argv_http_mcp_emits_rmcp_overrides(self) -> None:
+        cfg = codex_driver.CodexConfig(
+            model="gpt-5.5",
+            cwd="/work",
+            mcp_servers=[
+                {
+                    "name": "github",
+                    "url": "https://mcp.example/github",
+                    "transport": "http",
+                    "kind": "github_pat",
+                    "headers": {"Authorization": "Bearer ghp_abc123"},
+                },
+                {
+                    "name": "search",
+                    "url": "https://mcp.example/search",
+                    "transport": "http",
+                    "kind": "none",
+                },
+            ],
+        )
+        drv = codex_driver.CodexDriver(
+            cfg,
+            emit_event=lambda *_a, **_kw: None,
+            emit_session_id=lambda *_a, **_kw: None,
+        )
+        argv = drv._build_argv("hi")
+        overrides = [
+            argv[i + 1] for i, tok in enumerate(argv) if tok == "-c"
+        ]
+        self.assertIn("experimental_use_rmcp_client=true", overrides)
+        self.assertIn(
+            'mcp_servers.github.url="https://mcp.example/github"', overrides,
+        )
+        self.assertIn(
+            'mcp_servers.github.bearer_token="ghp_abc123"', overrides,
+        )
+        self.assertIn(
+            'mcp_servers.search.url="https://mcp.example/search"', overrides,
+        )
+        # The "none"-kind entry has no headers, so it has no bearer_token line.
+        self.assertNotIn(
+            "mcp_servers.search.bearer_token", "\n".join(overrides),
+        )
+
+    def test_argv_no_mcp_omits_rmcp_flag(self) -> None:
+        cfg = codex_driver.CodexConfig(model="gpt-5.5", cwd="/work")
+        drv = codex_driver.CodexDriver(
+            cfg,
+            emit_event=lambda *_a, **_kw: None,
+            emit_session_id=lambda *_a, **_kw: None,
+        )
+        argv = drv._build_argv("hi")
+        # Without any MCP servers we don't switch the rmcp client on.
+        self.assertNotIn("experimental_use_rmcp_client=true", argv)
+
+
+class CodexDriverMcpRenderTests(unittest.TestCase):
+    """Unit coverage for the wire→-c override translator. Bad inputs
+    (missing url, unsafe TOML key, unknown transport, non-dict entry)
+    are dropped silently — the registry-side render already emits
+    user-facing skip events.
+    """
+
+    def test_skips_unsupported_transport(self) -> None:
+        out = codex_driver._render_codex_mcp_overrides([
+            {"name": "fs", "transport": "stdio", "url": ""},
+        ])
+        self.assertEqual(out, [])
+
+    def test_skips_unsafe_toml_key(self) -> None:
+        out = codex_driver._render_codex_mcp_overrides([
+            {"name": "bad.name", "transport": "http", "url": "https://x"},
+        ])
+        self.assertEqual(out, [])
+
+    def test_skips_missing_url(self) -> None:
+        out = codex_driver._render_codex_mcp_overrides([
+            {"name": "x", "transport": "http"},
+        ])
+        self.assertEqual(out, [])
+
+    def test_escapes_quotes_in_url(self) -> None:
+        out = codex_driver._render_codex_mcp_overrides([
+            {"name": "x", "transport": "http", "url": 'https://a/"b"'},
+        ])
+        # TOML basic strings escape embedded double quotes with \".
+        self.assertIn(r'mcp_servers.x.url="https://a/\"b\""', out)
+
+    def test_handles_empty_list(self) -> None:
+        self.assertEqual(codex_driver._render_codex_mcp_overrides([]), [])
+        self.assertEqual(codex_driver._render_codex_mcp_overrides(None), [])
+
 
 class CodexDriverSetModelTests(unittest.TestCase):
     """ADR 0020 §4.3 — set_model on the Codex driver is just a config
