@@ -27,6 +27,12 @@ type fakeSessionAPI struct {
 	terminate []string
 	streams   map[string]*fakeStream
 
+	// mcpNames is the registry snapshot ListMCPNames returns; the
+	// unrestricted-agent path uses it to drive the "expand to all servers"
+	// fallback. Tests that don't care leave it nil — the runtime sees an
+	// empty registry and falls through.
+	mcpNames []string
+
 	nextSession  int
 	nextMID      int
 	createErr    error
@@ -97,6 +103,15 @@ func (f *fakeSessionAPI) Terminate(_ context.Context, sessionID string) error {
 		s.Close()
 	}
 	return f.terminateErr
+}
+
+func (f *fakeSessionAPI) ListMCPNames(_ context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mcpNames == nil {
+		return nil, nil
+	}
+	return append([]string(nil), f.mcpNames...), nil
 }
 
 func (f *fakeSessionAPI) stream(sessionID string) *fakeStream {
@@ -303,6 +318,82 @@ func TestSessionRuntime_StartStage_AgentFallback(t *testing.T) {
 	}
 	if req.Model != "claude-sonnet-4-6" {
 		t.Errorf("agent model not forwarded: %q", req.Model)
+	}
+}
+
+func TestSessionRuntime_StartStage_UnrestrictedAgentExpandsToAllRegistryMCPs(t *testing.T) {
+	// An agent with no `mcps_allowed` line means "let the agent see every
+	// MCP in the registry", not "only the registry's default_enabled
+	// rows". Without the expansion, sm.Manager.Create would receive nil
+	// and fall through to mcp.Resolve's default_enabled filter — which
+	// silently drops user-added servers that haven't been flagged.
+	api := newFakeSessionAPI()
+	api.mcpNames = []string{"github", "search"}
+	r := NewSessionRuntime(api, nil)
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{
+			Name:     "freeform",
+			Prompt:   "You are an agent without an MCP allowlist.",
+			Provider: "anthropic",
+			Model:    "claude-sonnet-4-6",
+			// MCPsAllowed deliberately omitted.
+		},
+		IssueMD: "do work",
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	got := api.lastCreate().MCPs
+	if len(got) != 2 || got[0] != "github" || got[1] != "search" {
+		t.Errorf("expected MCPs=[github search] from registry expansion, got %v", got)
+	}
+}
+
+func TestSessionRuntime_StartStage_RestrictedAgentKeepsAllowlist(t *testing.T) {
+	// A non-empty mcps_allowed is a deliberate allowlist; the registry
+	// expansion must not clobber it, otherwise an agent that asks for
+	// only "github" would suddenly see every server the user has added.
+	api := newFakeSessionAPI()
+	api.mcpNames = []string{"github", "search", "fs"}
+	r := NewSessionRuntime(api, nil)
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent: ttl.Agent{
+			Name:        "scoped",
+			Prompt:      "scoped to github",
+			Provider:    "anthropic",
+			Model:       "claude-sonnet-4-6",
+			MCPsAllowed: []string{"github"},
+		},
+		IssueMD: "do work",
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	got := api.lastCreate().MCPs
+	if len(got) != 1 || got[0] != "github" {
+		t.Errorf("expected MCPs=[github], got %v", got)
+	}
+}
+
+func TestSessionRuntime_StartStage_UnrestrictedAgentEmptyRegistryFallsThrough(t *testing.T) {
+	// When the registry is empty (or the daemon never wired one), the
+	// fallback should leave req.MCPs nil so sm.Manager keeps its existing
+	// behavior — there's nothing useful to expand to.
+	api := newFakeSessionAPI()
+	// mcpNames left nil
+	r := NewSessionRuntime(api, nil)
+	_, err := r.StartStage(context.Background(), StartStageInput{
+		TaskID: "t1", StageID: "s1", Position: 1,
+		Agent:   ttl.Agent{Name: "freeform", Prompt: "x", Provider: "anthropic", Model: "claude-sonnet-4-6"},
+		IssueMD: "do work",
+	})
+	if err != nil {
+		t.Fatalf("StartStage: %v", err)
+	}
+	if got := api.lastCreate().MCPs; len(got) != 0 {
+		t.Errorf("expected empty/nil MCPs when registry empty, got %v", got)
 	}
 }
 

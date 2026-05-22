@@ -42,6 +42,10 @@ type Manager interface {
 	SessionRepos(ctx context.Context, sessionID string) ([]proto.RepoState, error)
 	StoredConversation(ctx context.Context, sessionID string) ([]byte, error)
 	Rehydrate(ctx context.Context) error
+	// ListMCPNames returns every MCP server name from the registry, in
+	// registry order. Used by tm.SessionRuntime to expand an unrestricted
+	// agent into an explicit allowlist.
+	ListMCPNames(ctx context.Context) ([]string, error)
 	// UpdateModel swaps the runtime's model id mid-session (ADR 0020 §2).
 	// Validates the new id against the session's provider catalog, writes
 	// sessions.model in storage, and forwards agentd.set_model to the shim.
@@ -1065,6 +1069,28 @@ func (m *manager) List(_ context.Context) ([]proto.SessionSummary, error) {
 	}
 	m.mu.Unlock()
 	return out, nil
+}
+
+// ListMCPNames returns every registered MCP server name in registry order.
+// Task-chat session creation (internal/tm) calls this to expand an
+// unrestricted agent (`mcps_allowed` empty/omitted) into an explicit
+// allowlist of every server, so user-added MCPs that aren't marked
+// `default_enabled=true` still flow through to the agent's runtime. The
+// MCPs being nil (registry never wired) returns ``nil, nil`` rather than
+// an error — the caller falls back to its own no-op path.
+func (m *manager) ListMCPNames(ctx context.Context) ([]string, error) {
+	if m.opts.MCPs == nil {
+		return nil, nil
+	}
+	entries, err := m.opts.MCPs.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	return names, nil
 }
 
 // Rehydrate reattaches in-memory actors for every active session row in the
