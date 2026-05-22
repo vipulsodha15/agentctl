@@ -22,6 +22,15 @@ type SessionAPI interface {
 	Send(ctx context.Context, req sm.SendRequest) (sm.SendResult, error)
 	Attach(ctx context.Context, sessionID string) (fan.Stream, error)
 	Terminate(ctx context.Context, sessionID string) error
+	// ListMCPNames returns every MCP registered with the daemon (registry
+	// order, names only). StartStage uses it to expand an unrestricted
+	// agent (`mcps_allowed` empty/omitted) into an explicit allowlist of
+	// every server in the registry, so a task chat without per-agent
+	// pinning still sees user-added servers that happen to be marked
+	// `default_enabled=false`. Returning ``nil, nil`` is treated as the
+	// registry being unwired and is a no-op — the request goes through
+	// with whatever the agent specified.
+	ListMCPNames(ctx context.Context) ([]string, error)
 }
 
 // ProviderResolver mirrors socksrv.ProviderResolver — see ADR 0020 §3.
@@ -134,9 +143,23 @@ func (r *SessionRuntime) StartStage(ctx context.Context, in StartStageInput) (St
 		provider = p
 		model = m
 	}
+	// An agent with no `mcps_allowed` entry is "unrestricted": the user's
+	// intent is "let the agent see every MCP in the registry," not "use
+	// only the registry's default_enabled rows" (which is what passing nil
+	// through to sm.Create would give us via mcp.Resolve). Expand the
+	// empty list to an explicit allowlist of every server name so the
+	// session sees user-added MCPs regardless of their default_enabled
+	// flag. Restricted agents (non-empty MCPsAllowed) pass through
+	// unchanged so a deliberate allowlist still wins.
+	mcps := in.Agent.MCPsAllowed
+	if len(mcps) == 0 {
+		if names, err := r.sm.ListMCPNames(ctx); err == nil && len(names) > 0 {
+			mcps = names
+		}
+	}
 	res, err := r.sm.Create(ctx, sm.CreateRequest{
 		Name:     fmt.Sprintf("task-%s-stage-%d", in.TaskID, in.Position),
-		MCPs:     in.Agent.MCPsAllowed,
+		MCPs:     mcps,
 		Model:    model,
 		Provider: provider,
 		Repos:    nil,

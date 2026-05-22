@@ -97,6 +97,8 @@ func (s *stubSessionAPI) Attach(_ context.Context, _ string) (fan.Stream, error)
 
 func (s *stubSessionAPI) Terminate(_ context.Context, _ string) error { return nil }
 
+func (s *stubSessionAPI) ListMCPNames(_ context.Context) ([]string, error) { return nil, nil }
+
 type stubStream struct {
 	once sync.Once
 	done chan struct{}
