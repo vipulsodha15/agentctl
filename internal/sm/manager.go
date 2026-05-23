@@ -1076,7 +1076,7 @@ func (m *manager) List(_ context.Context) ([]proto.SessionSummary, error) {
 // unrestricted agent (`mcps_allowed` empty/omitted) into an explicit
 // allowlist of every server, so user-added MCPs that aren't marked
 // `default_enabled=true` still flow through to the agent's runtime. The
-// MCPs being nil (registry never wired) returns ``nil, nil`` rather than
+// MCPs being nil (registry never wired) returns `nil, nil` rather than
 // an error — the caller falls back to its own no-op path.
 func (m *manager) ListMCPNames(ctx context.Context) ([]string, error) {
 	if m.opts.MCPs == nil {
