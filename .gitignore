@@ -4,6 +4,9 @@
 /dist/
 /bin/
 
+# Go test coverage profile (written by `go test -coverprofile=coverage.out`)
+/coverage.out
+
 # Local databases / sockets that creep in if the dev runs the daemon from the repo root
 *.db
 *.db-shm
