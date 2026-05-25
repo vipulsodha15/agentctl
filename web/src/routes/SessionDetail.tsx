@@ -287,6 +287,7 @@ export function SessionDetail() {
             mcps={state.mcps}
             usageByTurn={state.usageByTurn}
             filter={filter}
+            sessionId={id}
           />
         ) : (
           <div className="conversation">

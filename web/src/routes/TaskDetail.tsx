@@ -487,6 +487,7 @@ export function TaskDetail() {
                 mcps={convState.mcps}
                 usageByTurn={convState.usageByTurn}
                 filter="all"
+                sessionId={activeSessionID}
               />
               <TaskTodoRail messages={merged} />
             </div>
