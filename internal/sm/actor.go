@@ -295,6 +295,15 @@ func (a *actor) handleSend(s *sendItem) {
 	a.mu.Lock()
 	defer func() { a.mu.Unlock() }()
 	a.summary.LastActivityAt = a.opts.Now()
+	// If the runtime died between manager.Send's status check and the mailbox
+	// dispatch (e.g. a previous mboxSend on this actor tripped
+	// handleRuntimeDiedLocked), don't queue — the queue can't drain without a
+	// shim. Surface a queued=false reply so the caller can resend; the next
+	// manager.Send will see status="stopped" and trigger Restart.
+	if a.summary.Status == "stopped" || a.summary.Status == "terminated" {
+		s.reply <- SendResult{MessageID: s.messageID, Queued: false, QueueDepth: 0}
+		return
+	}
 	// Starting a turn requires the shim to have sent RuntimeReady — otherwise
 	// the AgentdMessage frame either has no control conn to land on (a.control
 	// nil) or hits the shim before it enters its inbound loop, and the message
@@ -317,9 +326,15 @@ func (a *actor) handleSend(s *sendItem) {
 		// synth-correlation in tm.SessionRuntime (synthTID is the ULID turn
 		// id but assistant.message arrives with TurnID = message_id, so
 		// Synthesize hangs and Handoff never advances the stage).
-		a.sendControlLocked(AgentdMessage, mustJSON(map[string]any{
+		if err := a.sendControlLocked(AgentdMessage, mustJSON(map[string]any{
 			"message_id": s.messageID, "content": s.content, "turn_id": turnID,
-		}))
+		})); err != nil {
+			// handleRuntimeDiedLocked already cleared inFlight + status. The
+			// user's message is dropped; the UI sees session.stopped and the
+			// next manager.Send drives the auto-restart.
+			s.reply <- SendResult{MessageID: s.messageID, Queued: false, QueueDepth: 0}
+			return
+		}
 		s.reply <- SendResult{MessageID: s.messageID, Queued: false, QueueDepth: len(a.queue)}
 		a.summary.InFlight = true
 		return
@@ -357,14 +372,18 @@ func (a *actor) handleTerminate(t *terminateItem) {
 		return
 	}
 	a.terminated = true
-	if a.inFlight != "" {
-		a.sendControlLocked(AgentdInterrupt, mustJSON(map[string]string{"reason": "shutdown"}))
-	}
+	// Flip to "terminated" before the first control send: a transport error
+	// would otherwise trip handleRuntimeDiedLocked, which would emit a
+	// session.stopped event ahead of the session.terminated that this handler
+	// is about to broadcast.
 	a.queue = a.queue[:0]
 	a.summary.QueueDepth = 0
 	a.summary.Status = "terminated"
 	a.summary.InFlight = false
-	a.sendControlLocked(AgentdShutdown, mustJSON(map[string]int{"grace_seconds": int(a.opts.ShutdownGrace.Seconds())}))
+	if a.inFlight != "" {
+		_ = a.sendControlLocked(AgentdInterrupt, mustJSON(map[string]string{"reason": "shutdown"}))
+	}
+	_ = a.sendControlLocked(AgentdShutdown, mustJSON(map[string]int{"grace_seconds": int(a.opts.ShutdownGrace.Seconds())}))
 	if a.control != nil {
 		_ = a.control.Close()
 		a.control = nil
@@ -424,10 +443,21 @@ func (a *actor) handleControlClosed(conn ControlConn) {
 		a.mu.Unlock()
 		return
 	}
+	a.opts.Logger.Info("session.control_disconnected")
+	// If the session was actively running and the active conn just dropped,
+	// the shim/container is gone (Stop/Restart/Terminate clear a.control
+	// before the readControl goroutine wakes up, so reaching here with status
+	// still "running" means an unsolicited close). Mark the session "stopped"
+	// so manager.Send's next call triggers the auto-restart branch instead of
+	// queueing forever behind the dead in-flight turn.
+	if a.summary.Status == "running" || a.summary.Status == "starting" {
+		a.handleRuntimeDiedLocked("control conn closed")
+		a.mu.Unlock()
+		return
+	}
 	a.control = nil
 	a.runtimeReady = false
 	a.mu.Unlock()
-	a.opts.Logger.Info("session.control_disconnected")
 }
 
 func (a *actor) readControl(conn ControlConn) {
@@ -945,12 +975,86 @@ func (a *actor) queueDepth() int {
 	return len(a.queue)
 }
 
-func (a *actor) sendControlLocked(kind string, data json.RawMessage) {
+func (a *actor) sendControlLocked(kind string, data json.RawMessage) error {
 	if a.control == nil {
+		return nil
+	}
+	err := a.control.Send(ControlFrame{V: 1, Kind: kind, TS: a.opts.Now(), Data: data})
+	if err == nil {
+		return nil
+	}
+	a.opts.Logger.Warn("control.send_failed", slog.String("kind", kind), slog.String("error", err.Error()))
+	// EPIPE/ECONNRESET/net.ErrClosed from the shim socket means the container
+	// is gone. readControl on the same conn will eventually fire
+	// mboxControlClosed, but only when its Recv() unblocks — which on a wedged
+	// socket can be never. Without acting on this Send error the session sits
+	// with inFlight set and status="running" forever: the next manager.Send
+	// queues behind the dead turn instead of taking the auto-restart branch.
+	// Tear down inline so the next Send sees status="stopped" and restarts.
+	a.handleRuntimeDiedLocked(fmt.Sprintf("control send failed (%s): %v", kind, err))
+	return err
+}
+
+// handleRuntimeDiedLocked transitions the session to "stopped" after a fatal
+// transport error to the shim, so that manager.Send's status check fires the
+// auto-restart branch on the user's next message. Must be called with a.mu
+// held.
+func (a *actor) handleRuntimeDiedLocked(reason string) {
+	if a.summary.Status == "stopped" || a.summary.Status == "terminated" {
 		return
 	}
-	if err := a.control.Send(ControlFrame{V: 1, Kind: kind, TS: a.opts.Now(), Data: data}); err != nil {
-		a.opts.Logger.Warn("control.send_failed", slog.String("kind", kind), slog.String("error", err.Error()))
+	prevStatus := a.summary.Status
+	deadConn := a.control
+	a.control = nil
+	a.runtimeReady = false
+	a.inFlight = ""
+	a.currentTurn = ""
+	a.queue = a.queue[:0]
+	a.summary.QueueDepth = 0
+	a.summary.InFlight = false
+	a.summary.Status = "stopped"
+	containerID := a.containerID
+
+	a.opts.Logger.Warn("session.runtime_died", slog.String("reason", reason))
+	a.broadcastLocked(proto.EventSessionStopping, mustJSON(map[string]string{"reason": reason}))
+	a.broadcastLocked(proto.EventSessionStopped, mustJSON(map[string]string{"reason": reason, "previous": prevStatus}))
+
+	if a.opts.Store != nil {
+		if _, err := a.opts.Store.DB().Exec(`UPDATE sessions SET status='stopped', container_id=NULL WHERE id=?`, a.opts.ID); err != nil {
+			a.opts.DaemonLogger.Warn("session.runtime_died.db_update_failed", slog.String("session_id", a.opts.ID), slog.String("error", err.Error()))
+		}
+		now := a.opts.Now().Format(time.RFC3339Nano)
+		_, _ = a.opts.Store.DB().Exec(`INSERT INTO session_lifecycle (session_id, at, event, detail_json) VALUES (?, ?, 'stopped', ?)`,
+			a.opts.ID, now, mustJSON(map[string]string{"reason": reason}))
+	}
+
+	// Async cleanup of the dead conn and container — must not block the actor
+	// goroutine on a wedged socket or docker daemon. The control listener is
+	// also stopped so a stale shim can't reconnect to a session that's now
+	// stopped.
+	if deadConn != nil {
+		go func() { _ = deadConn.Close() }()
+	}
+	if a.opts.Containers != nil && containerID != "" {
+		grace := a.opts.ShutdownGrace
+		containers := a.opts.Containers
+		controlStop := a.opts.Control
+		sessID := a.opts.ID
+		logger := a.opts.DaemonLogger
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), grace+5*time.Second)
+			defer cancel()
+			if err := containers.Stop(ctx, containerID, grace); err != nil {
+				logger.Warn("session.runtime_died.container_stop_failed", slog.String("session_id", sessID), slog.String("error", err.Error()))
+			}
+			if controlStop != nil {
+				_ = controlStop.Stop(sessID)
+			}
+		}()
+	} else if a.opts.Control != nil {
+		controlStop := a.opts.Control
+		sessID := a.opts.ID
+		go func() { _ = controlStop.Stop(sessID) }()
 	}
 }
 
