@@ -5,13 +5,14 @@ import { ToolBlock } from "./ToolBlock";
 interface Props {
   items: ConversationMessage[];
   mcps: McpStatus[];
+  sessionId?: string;
 }
 
 function statusOf(m: ConversationMessage): ToolStatus {
   return m.status ?? (m.is_error ? "error" : "done");
 }
 
-export function ToolGroup({ items, mcps }: Props) {
+export function ToolGroup({ items, mcps, sessionId }: Props) {
   const total = items.length;
   const pending = items.filter((m) => statusOf(m) === "pending").length;
   const errors = items.filter((m) => statusOf(m) === "error").length;
@@ -58,7 +59,7 @@ export function ToolGroup({ items, mcps }: Props) {
         {open && (
           <div className="tool-group-list">
             {items.map((m) => (
-              <ToolBlock key={m.id} message={m} mcps={mcps} />
+              <ToolBlock key={m.id} message={m} mcps={mcps} sessionId={sessionId} />
             ))}
           </div>
         )}

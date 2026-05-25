@@ -16,6 +16,9 @@ interface Props {
   // turn boundary.
   usageByTurn: Record<string, UsageTotals>;
   filter: TranscriptFilter;
+  // Session id is plumbed through so interactive tool cards (today:
+  // AskUserQuestion) can POST a follow-up user message back to this session.
+  sessionId?: string;
 }
 
 export type TranscriptFilter = "all" | "errors" | "tools" | "text";
@@ -27,6 +30,7 @@ export function ConversationView({
   mcps,
   usageByTurn,
   filter,
+  sessionId,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
@@ -109,6 +113,7 @@ export function ConversationView({
             mcps={mcps}
             usage={g.turn_id ? usageByTurn[g.turn_id] : undefined}
             isLast={gi === groups.length - 1}
+            sessionId={sessionId}
           />
         ))}
 
@@ -219,20 +224,32 @@ function TurnGroup({
   mcps,
   usage,
   isLast,
+  sessionId,
 }: {
   group: Group;
   mcps: McpStatus[];
   usage: UsageTotals | undefined;
   isLast: boolean;
+  sessionId?: string;
 }) {
   const rows = collapseToolRuns(group.items);
   return (
     <div className="turn-group">
       {rows.map((row) =>
         row.kind === "message" ? (
-          <MessageRow key={row.message.id} message={row.message} mcps={mcps} />
+          <MessageRow
+            key={row.message.id}
+            message={row.message}
+            mcps={mcps}
+            sessionId={sessionId}
+          />
         ) : (
-          <ToolGroup key={row.key} items={row.items} mcps={mcps} />
+          <ToolGroup
+            key={row.key}
+            items={row.items}
+            mcps={mcps}
+            sessionId={sessionId}
+          />
         ),
       )}
       {(usage || (!isLast && group.items.length > 0)) && (
@@ -259,9 +276,11 @@ function TurnGroup({
 function MessageRow({
   message,
   mcps,
+  sessionId,
 }: {
   message: ConversationMessage;
   mcps: McpStatus[];
+  sessionId?: string;
 }) {
   switch (message.kind) {
     case "user":
@@ -271,7 +290,7 @@ function MessageRow({
     case "thinking":
       return <ThinkingBlock message={message} />;
     case "tool":
-      return <ToolBlock message={message} mcps={mcps} />;
+      return <ToolBlock message={message} mcps={mcps} sessionId={sessionId} />;
     case "notice":
       return <SystemNotice message={message} />;
     default:

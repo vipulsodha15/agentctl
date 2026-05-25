@@ -200,6 +200,19 @@ export function formatToolHeader(
       return { verb: "Updated todos", isMcp: false, isSkill: false };
     case "ExitPlanMode":
       return { verb: "Exited plan mode", isMcp: false, isSkill: false };
+    case "AskUserQuestion": {
+      const qs = input.questions;
+      const count = Array.isArray(qs) ? qs.length : 0;
+      return {
+        verb: "Asked you",
+        target:
+          count > 0
+            ? `${count} question${count === 1 ? "" : "s"}`
+            : undefined,
+        isMcp: false,
+        isSkill: false,
+      };
+    }
     default: {
       // Fallback: best-effort guess from inputs.
       const fp =

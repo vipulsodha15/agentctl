@@ -8,10 +8,12 @@ import {
 import { DiffPreview } from "./DiffPreview";
 import { TerminalOutput } from "./TerminalOutput";
 import { CopyButton } from "./CopyButton";
+import { AskUserQuestionCard } from "./AskUserQuestionCard";
 
 interface Props {
   message: ConversationMessage;
   mcps: McpStatus[];
+  sessionId?: string;
 }
 
 function tryParseJson(s: string): unknown {
@@ -44,7 +46,7 @@ function formatDuration(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-export function ToolBlock({ message, mcps }: Props) {
+export function ToolBlock({ message, mcps, sessionId }: Props) {
   const header = useMemo(
     () => formatToolHeader(message.tool, message.input),
     [message.tool, message.input],
@@ -64,6 +66,7 @@ export function ToolBlock({ message, mcps }: Props) {
 
   const showDiff = isFileEditTool(message.tool);
   const showTerminal = isBashTool(message.tool);
+  const isAskUserQuestion = message.tool === "AskUserQuestion";
 
   const inputObj = useMemo(() => message.input, [message.input]);
   const outputParsed = useMemo(
@@ -111,6 +114,14 @@ export function ToolBlock({ message, mcps }: Props) {
           )}
           <StatusChip status={status} duration={duration} />
         </button>
+
+        {isAskUserQuestion && (
+          <AskUserQuestionCard
+            sessionId={sessionId}
+            toolUseId={message.tool_use_id}
+            input={inputObj}
+          />
+        )}
 
         {open && (
           <div className="tool-card">
@@ -234,6 +245,8 @@ function iconFor(tool: string | undefined): string {
       return "⚡";
     case "TodoWrite":
       return "☑";
+    case "AskUserQuestion":
+      return "?";
     default:
       return "T";
   }
