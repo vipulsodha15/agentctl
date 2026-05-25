@@ -139,6 +139,34 @@ export function SessionDetail() {
     [id, currentModel],
   );
 
+  // Escape cancels the active turn — mirrors the MessageInput Stop button.
+  // The actor leaves the queue intact, so the next queued message starts
+  // automatically once the cancellation lands. Skip when a modal is open
+  // so Modal/ConfirmModal's own Escape-to-close keeps working.
+  useEffect(() => {
+    if (!id) return;
+    if (!state.inFlight) return;
+    let stopping = false;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (document.querySelector('[role="dialog"]')) return;
+      if (stopping) return;
+      stopping = true;
+      apiJson(`/v1/sessions/${encodeURIComponent(id)}/interrupt`, {
+        method: "POST",
+        ...jsonBody({ clear_queue: false }),
+      })
+        .catch(() => {
+          // Errors surface via the existing event stream / status panel.
+        })
+        .finally(() => {
+          stopping = false;
+        });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [id, state.inFlight]);
+
   useEffect(() => {
     if (!id) return;
     dispatch({ type: "reset" });
