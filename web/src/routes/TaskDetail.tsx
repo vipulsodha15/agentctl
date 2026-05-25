@@ -1108,27 +1108,56 @@ function safeJson<T = unknown>(s: string): T | null {
 //   3. Tool entries on providers whose JSONL the snapshot path can't
 //      normalize (e.g. Codex's CLI shape).
 //
-// Strategy: if convState carries any text bubbles, trust it as the canonical
-// transcript (the snapshot landed). Otherwise render the task_messages
-// fallback — which already includes tool entries — and append any extra
-// rich rows convState has from live events so a turn that arrived between
-// the snapshot and now is still visible.
+// Strategy: pick the source with MORE text bubbles. The previous "any text
+// bubble in convState wins" rule broke whenever the JSONL snapshot was
+// empty/lagging: the first live user.message event would push convState past
+// the "has text" threshold and the merge would flip to convState alone, even
+// though taskMessages held the full prior history — making the visible chat
+// blink to just the new exchange on every send. Comparing counts keeps
+// taskMessages as the backbone whenever it is richer, and only hands the
+// reins to convState once the JSONL snapshot has caught up. In the fallback
+// path we still overlay convState's rich rows (tool / thinking / notice) and
+// any newly streamed text bubbles that have not yet been mirrored.
 function mergeTranscript(
   convMessages: ConversationMessage[],
   taskMessages: TaskMessage[],
   activeStageID: string,
 ): ConversationMessage[] {
-  const convHasText = convMessages.some(
-    (m) => m.kind === "user" || m.kind === "assistant",
-  );
-  if (convHasText) return convMessages;
   const fallback = taskMessagesAsConversation(taskMessages, activeStageID);
+  const convTextCount = countTextBubbles(convMessages);
+  const fallbackTextCount = countTextBubbles(fallback);
+
+  // Steady state: convState carries at least as many text bubbles as the
+  // durable mirror, so the JSONL snapshot has caught up and the rich live
+  // transcript is canonical.
+  if (convTextCount >= fallbackTextCount) {
+    if (fallback.length === 0 && convMessages.length === 0) return convMessages;
+    return convMessages;
+  }
+
+  // Fallback path: render taskMessages as the text backbone, then append
+  // convState's rich rows and any trailing text bubbles convState carries
+  // past what the mirror has flushed (e.g. the in-flight assistant reply).
   const richExtras = convMessages.filter(
     (m) => m.kind === "tool" || m.kind === "thinking" || m.kind === "notice",
   );
-  return fallback.length === 0 && richExtras.length === 0
-    ? convMessages
-    : [...fallback, ...richExtras];
+  const convTextOverflow: ConversationMessage[] = [];
+  let seen = 0;
+  for (const m of convMessages) {
+    if (m.kind === "user" || m.kind === "assistant") {
+      if (seen >= fallbackTextCount) convTextOverflow.push(m);
+      seen++;
+    }
+  }
+  return [...fallback, ...richExtras, ...convTextOverflow];
+}
+
+function countTextBubbles(msgs: ConversationMessage[]): number {
+  let n = 0;
+  for (const m of msgs) {
+    if (m.kind === "user" || m.kind === "assistant") n++;
+  }
+  return n;
 }
 
 // Wire shape of role=tool task_messages — written by tm.Manager's
