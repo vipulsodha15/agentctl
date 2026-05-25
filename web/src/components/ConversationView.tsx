@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ConversationMessage, McpStatus, UsageTotals } from "../types";
 import { UserMessage } from "./messages/UserMessage";
 import { AssistantMessage } from "./messages/AssistantMessage";
@@ -33,50 +33,70 @@ export function ConversationView({
   sessionId,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
-  // Tracks scrolls we initiated so the onScroll handler doesn't mistake
-  // them for the user scrolling away from the bottom. The CSS sets
-  // `scroll-behavior: smooth`, so each programmatic scroll can dispatch
-  // multiple intermediate scroll events; we explicitly use `behavior:
-  // "instant"` below to land in one go and clear the guard on the next
-  // tick (scroll events are dispatched asynchronously).
-  const programmaticScrollRef = useRef(false);
+  // Previous scrollTop, used to distinguish a real user scroll-up (scrollTop
+  // decreased) from content-growth side effects. A programmatic
+  // scroll-to-bottom can only increase scrollTop, so a decrease is an
+  // unambiguous signal that the user grabbed the scrollbar / wheeled up.
+  const lastScrollTopRef = useRef(0);
   const [atBottom, setAtBottom] = useState(true);
   const [newSinceScroll, setNewSinceScroll] = useState(0);
   const last = messages[messages.length - 1];
 
-  // Auto-scroll on every new message / streaming update unless the user has
-  // actively scrolled up to read. Sending a new user message always re-pins
-  // to the bottom. useLayoutEffect + instant scroll keeps the bottom pinned
-  // synchronously as deltas arrive — useEffect + smooth scroll would race
-  // the streaming updates and stall the auto-scroll.
+  // The scroll container sets `scroll-behavior: smooth` in CSS, which would
+  // make even a direct `scrollTop = X` assignment animate and lag behind
+  // streaming deltas. Always pass `behavior: "instant"` so we land in one go.
+  const pinToBottom = (el: HTMLDivElement) => {
+    el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior });
+    lastScrollTopRef.current = el.scrollTop;
+  };
+
+  // Sending a new user message always re-pins to the bottom.
   useLayoutEffect(() => {
+    if (last?.kind !== "user") return;
+    userScrolledUpRef.current = false;
     const el = scrollRef.current;
-    if (!el) return;
-    if (last?.kind === "user") {
-      userScrolledUpRef.current = false;
-    }
-    if (!userScrolledUpRef.current) {
-      programmaticScrollRef.current = true;
-      el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior });
-      setNewSinceScroll(0);
-    } else {
-      setNewSinceScroll((n) => n + 1);
-    }
-    // We intentionally re-run on every message-text change, not just length.
-  }, [messages.length, last?.kind, last?.text, last?.output, inFlight]);
+    if (el) pinToBottom(el);
+    setNewSinceScroll(0);
+    setAtBottom(true);
+  }, [last?.id, last?.kind]);
+
+  // Auto-scroll on any content growth — covers streaming text deltas, tool
+  // output arriving on earlier messages, thinking blocks expanding, etc.
+  // Driving off ResizeObserver instead of a message-shape dep list means we
+  // pin the bottom for every kind of update without enumerating each case.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    const content = contentRef.current;
+    if (!scroller || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (!userScrolledUpRef.current) {
+        pinToBottom(scroller);
+        setNewSinceScroll(0);
+      } else {
+        setNewSinceScroll((n) => n + 1);
+      }
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (programmaticScrollRef.current) {
-      programmaticScrollRef.current = false;
-      return;
+    const prev = lastScrollTopRef.current;
+    const curr = el.scrollTop;
+    lastScrollTopRef.current = curr;
+    const nearBottom = el.scrollHeight - curr - el.clientHeight < 24;
+    if (curr < prev - 1) {
+      userScrolledUpRef.current = true;
     }
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    userScrolledUpRef.current = !nearBottom;
+    if (nearBottom) {
+      userScrolledUpRef.current = false;
+      setNewSinceScroll(0);
+    }
     setAtBottom(nearBottom);
-    if (nearBottom) setNewSinceScroll(0);
   }, []);
 
   const visible = filterMessages(messages, filter);
@@ -87,37 +107,37 @@ export function ConversationView({
 
   const jumpToBottom = () => {
     const el = scrollRef.current;
-    if (el) {
-      programmaticScrollRef.current = true;
-      el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior });
-    }
+    if (el) pinToBottom(el);
     userScrolledUpRef.current = false;
+    setNewSinceScroll(0);
   };
 
   return (
     <div className="conversation-wrap">
       <div className="conversation" ref={scrollRef} onScroll={onScroll}>
-        {warnings.map((w, i) => (
-          <div key={`w-${i}`} className="warning">
-            {w}
-          </div>
-        ))}
-        {messages.length === 0 && !inFlight && (
-          <div className="empty">No messages yet. Send one below to start.</div>
-        )}
+        <div ref={contentRef}>
+          {warnings.map((w, i) => (
+            <div key={`w-${i}`} className="warning">
+              {w}
+            </div>
+          ))}
+          {messages.length === 0 && !inFlight && (
+            <div className="empty">No messages yet. Send one below to start.</div>
+          )}
 
-        {groups.map((g, gi) => (
-          <TurnGroup
-            key={g.key}
-            group={g}
-            mcps={mcps}
-            usage={g.turn_id ? usageByTurn[g.turn_id] : undefined}
-            isLast={gi === groups.length - 1}
-            sessionId={sessionId}
-          />
-        ))}
+          {groups.map((g, gi) => (
+            <TurnGroup
+              key={g.key}
+              group={g}
+              mcps={mcps}
+              usage={g.turn_id ? usageByTurn[g.turn_id] : undefined}
+              isLast={gi === groups.length - 1}
+              sessionId={sessionId}
+            />
+          ))}
 
-        {showTyping && <TypingIndicator />}
+          {showTyping && <TypingIndicator />}
+        </div>
       </div>
       {!atBottom && newSinceScroll > 0 && (
         <button
