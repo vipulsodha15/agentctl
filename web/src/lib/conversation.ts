@@ -114,6 +114,18 @@ function applySnapshot(
   const isInFlight =
     (typeof rawInFlight === "string" && rawInFlight !== "") ||
     rawInFlight === true;
+  // A re-snapshot during a streaming turn (e.g. WS reconnect mid-stream) is
+  // generated from the SQLite mirror, which the shim populates asynchronously
+  // as it flushes JSONL records. Mid-turn the mirror can lag the events
+  // we've already applied locally, so the snapshot's `conversation` may
+  // carry FEWER text bubbles than what we've already rendered. Replacing
+  // state.messages with that stale snapshot is what makes prior history
+  // blink out until the page is refreshed. When the snapshot would shrink
+  // the visible transcript, keep the existing messages and bookkeeping;
+  // only refresh metadata.
+  const stateTextCount = countTextBubbles(state.messages);
+  const snapTextCount = countTextBubbles(messages);
+  const keepExisting = snapTextCount < stateTextCount;
   return {
     ...state,
     status: data.session?.status ?? state.status,
@@ -121,15 +133,27 @@ function applySnapshot(
     inFlight: isInFlight,
     queueDepth: data.queue_depth ?? 0,
     mcps: normalizeMcps(data.mcps_status),
-    messages,
+    messages: keepExisting ? state.messages : messages,
     warnings: [],
-    seenEventIds: new Set(),
-    openBubbleByTurn: {},
-    inFlightCount: isInFlight ? 1 : 0,
-    toolNames,
-    toolIndexById,
-    usageByTurn: {},
+    seenEventIds: keepExisting ? state.seenEventIds : new Set(),
+    openBubbleByTurn: keepExisting ? state.openBubbleByTurn : {},
+    inFlightCount: keepExisting
+      ? state.inFlightCount
+      : isInFlight
+        ? 1
+        : 0,
+    toolNames: keepExisting ? state.toolNames : toolNames,
+    toolIndexById: keepExisting ? state.toolIndexById : toolIndexById,
+    usageByTurn: keepExisting ? state.usageByTurn : {},
   };
+}
+
+function countTextBubbles(msgs: ConversationMessage[]): number {
+  let n = 0;
+  for (const m of msgs) {
+    if (m.kind === "user" || m.kind === "assistant") n++;
+  }
+  return n;
 }
 
 // mcps_status is sent as map[name]status on the wire (proto.SessionSnapshotData),
