@@ -467,7 +467,8 @@ func buildStageSeedMessage(in StartStageInput) string {
 		b.WriteString("# Task\n\n")
 		b.WriteString(in.IssueMD)
 		b.WriteString("\n\n")
-		b.WriteString("Introduce yourself briefly as the **" + in.Agent.Name + "**, restate the task in your own words, and ask the user one or two clarifying questions to advance the work. Keep your first reply concise. Do not produce a synthesis yet — the user must explicitly click 'Hand off'.")
+		b.WriteString("Introduce yourself briefly as the **" + in.Agent.Name + "**, restate the task in your own words, and ask the user one or two clarifying questions to advance the work. Keep your first reply concise. ")
+		b.WriteString(closingDirective(in.NextAgent))
 		return b.String()
 	}
 	b.WriteString(fmt.Sprintf("# Handoff from %s\n\n", in.PrevAgent))
@@ -481,6 +482,18 @@ func buildStageSeedMessage(in StartStageInput) string {
 	} else {
 		b.WriteString("You are the final stage. ")
 	}
-	b.WriteString("Keep your first reply concise. Do not produce a synthesis yet — the user must explicitly click 'Hand off'.")
+	b.WriteString("Keep your first reply concise. ")
+	b.WriteString(closingDirective(in.NextAgent))
 	return b.String()
+}
+
+// closingDirective tells the agent which control surface advances the task.
+// Non-final stages produce a synthesis on 'Hand off'; the final stage (which
+// includes single-agent tasks) is finished by the user clicking 'Complete
+// task' — there is no next agent to hand off to.
+func closingDirective(nextAgent string) string {
+	if nextAgent == "" {
+		return "Do not produce a synthesis — there is no next agent. When the work is done, the user will click 'Complete task' to finish."
+	}
+	return "Do not produce a synthesis yet — the user must explicitly click 'Hand off'."
 }
