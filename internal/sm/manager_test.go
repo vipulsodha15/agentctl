@@ -219,6 +219,124 @@ func TestQueueWhenInFlight(t *testing.T) {
 	mustEvent(t, stream, proto.EventTurnStart)
 }
 
+// TestRuntimeDiedOnSendError reproduces the bug where a shim dying mid-turn
+// left the session "stuck": the in-flight turn never completed, status stayed
+// "running", and the user's next message queued behind the dead turn instead
+// of triggering the auto-restart branch in manager.Send (manager.go:914).
+//
+// The fix turns a synchronous Send error from the control conn (EPIPE /
+// ECONNRESET / net.ErrClosed) into a runtime-died transition: status="stopped",
+// inFlight cleared, session.stopped broadcast — so the next manager.Send sees
+// the snapshot status as "stopped" and drives Restart.
+func TestRuntimeDiedOnSendError(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "die-send", Provider: "anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := mgr.Attach(ctx, r.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	mustEvent(t, stream, proto.EventSessionSnapshot)
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	// First message goes through cleanly so we have an in-flight turn — that's
+	// the state the user was in when the container died.
+	if _, err := mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	mustEvent(t, stream, proto.EventUserMessage)
+	mustEvent(t, stream, proto.EventTurnStart)
+	conn.expect(t, AgentdMessage)
+
+	// Container "dies": further writes to the shim socket fail synchronously
+	// (matching the real Unix/TCP socket behaviour from internal/cc).
+	conn.failSend(errors.New("write: broken pipe"))
+
+	// Drain the in-flight turn so the next Send takes the start-turn path
+	// (which is the one that calls sendControlLocked and triggers the
+	// runtime-died detection).
+	conn.feedRuntimeEvent(t, r.SessionID, proto.EventTurnEnd, json.RawMessage(`{"turn_id":"x","status":"ok"}`))
+	mustEvent(t, stream, proto.EventTurnEnd)
+
+	// User's next message — manager.Send still sees status="running" here
+	// because the shim death wasn't detected yet. handleSend takes the
+	// start-turn branch, calls sendControlLocked, the write fails, and
+	// handleRuntimeDiedLocked flips status to "stopped".
+	res, err := mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Queued {
+		t.Fatalf("expected dropped (not queued) Send when runtime died, got %+v", res)
+	}
+
+	// The actor broadcasts the turn.start optimistically before the send is
+	// attempted, then drops back to stopping/stopped once the write fails.
+	mustEvent(t, stream, proto.EventUserMessage)
+	mustEvent(t, stream, proto.EventTurnStart)
+	mustEvent(t, stream, proto.EventSessionStopping)
+	mustEvent(t, stream, proto.EventSessionStopped)
+
+	// Status must be "stopped" so the *next* manager.Send hits the
+	// auto-restart branch instead of queueing forever.
+	mm := mgr.(*manager)
+	a := mm.actorFor(r.SessionID)
+	if got := a.snapshotSummary().Status; got != "stopped" {
+		t.Fatalf("expected status=stopped after runtime died, got %q", got)
+	}
+	if a.snapshotSummary().InFlight {
+		t.Fatalf("expected InFlight cleared after runtime died")
+	}
+}
+
+// TestRuntimeDiedOnConnClose covers the other detection path: the container
+// dies, its end of the control socket closes, readControl's Recv returns an
+// error and enqueues mboxControlClosed. Before the fix, handleControlClosed
+// only cleared runtimeReady — status stayed "running" so a subsequent
+// manager.Send would queue forever behind the (still-set) inFlight turn.
+func TestRuntimeDiedOnConnClose(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, err := mgr.Create(ctx, CreateRequest{Name: "die-close", Provider: "anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := mgr.Attach(ctx, r.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	mustEvent(t, stream, proto.EventSessionSnapshot)
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	if _, err := mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	mustEvent(t, stream, proto.EventUserMessage)
+	mustEvent(t, stream, proto.EventTurnStart)
+	conn.expect(t, AgentdMessage)
+
+	// Container dies — its socket end closes, so the daemon's Recv returns
+	// EOF / net.ErrClosed and readControl enqueues mboxControlClosed.
+	_ = conn.Close()
+
+	mustEvent(t, stream, proto.EventSessionStopping)
+	mustEvent(t, stream, proto.EventSessionStopped)
+
+	mm := mgr.(*manager)
+	a := mm.actorFor(r.SessionID)
+	if got := a.snapshotSummary().Status; got != "stopped" {
+		t.Fatalf("expected status=stopped after control conn closed, got %q", got)
+	}
+	if a.snapshotSummary().InFlight {
+		t.Fatalf("expected InFlight cleared after runtime died")
+	}
+}
+
 func TestInterruptMidTurn(t *testing.T) {
 	mgr, fc := newTestManager(t)
 	ctx := context.Background()
@@ -1022,6 +1140,7 @@ type fakeConn struct {
 	filtered chan ControlFrame
 	in       chan ControlFrame
 	closed   bool
+	sendErr  error
 }
 
 func newFakeConn() *fakeConn {
@@ -1066,9 +1185,22 @@ func (c *fakeConn) Send(fr ControlFrame) error {
 		c.mu.Unlock()
 		return nil
 	}
+	if c.sendErr != nil {
+		err := c.sendErr
+		c.mu.Unlock()
+		return err
+	}
 	c.mu.Unlock()
 	c.raw <- fr
 	return nil
+}
+
+// failSend wires fakeConn to return err on every subsequent Send call,
+// simulating an EPIPE / ECONNRESET / net.ErrClosed from a dead shim socket.
+func (c *fakeConn) failSend(err error) {
+	c.mu.Lock()
+	c.sendErr = err
+	c.mu.Unlock()
 }
 
 func (c *fakeConn) Recv() (ControlFrame, error) {
