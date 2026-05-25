@@ -229,6 +229,34 @@ export function TaskDetail() {
   const activeStage = stages.find((s) => s.status === "active");
   const activeSessionID = activeStage?.session_id ?? "";
 
+  // Escape cancels the active stage's turn — mirrors the SessionDetail
+  // binding (commit 1f2785d) so keyboard users on the task page get the
+  // same behavior. Skip while a confirm modal is open so its own
+  // Escape-to-close keeps working.
+  useEffect(() => {
+    if (!activeSessionID) return;
+    if (!convState.inFlight) return;
+    if (confirmAbandon || confirmComplete) return;
+    let stopping = false;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (stopping) return;
+      stopping = true;
+      apiJson(
+        `/v1/sessions/${encodeURIComponent(activeSessionID)}/interrupt`,
+        { method: "POST", ...jsonBody({ clear_queue: false }) },
+      )
+        .catch(() => {
+          // Errors surface via the existing event stream / status panel.
+        })
+        .finally(() => {
+          stopping = false;
+        });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeSessionID, convState.inFlight, confirmAbandon, confirmComplete]);
+
   // Active stage's session WS — full snapshot + live event stream. Resets
   // whenever the active stage changes (handoff) so we don't carry rendering
   // state across stages.
