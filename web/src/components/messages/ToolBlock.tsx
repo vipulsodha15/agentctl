@@ -184,7 +184,7 @@ function StatusChip({
   status,
   duration,
 }: {
-  status: "pending" | "done" | "error";
+  status: "pending" | "done" | "error" | "cancelled";
   duration?: string;
 }) {
   if (status === "pending") {
@@ -198,6 +198,13 @@ function StatusChip({
     return (
       <span className="status-chip error" title="Failed">
         ✗ failed{duration ? ` · ${duration}` : ""}
+      </span>
+    );
+  }
+  if (status === "cancelled") {
+    return (
+      <span className="status-chip cancelled" title="Cancelled">
+        ⨯ cancelled
       </span>
     );
   }

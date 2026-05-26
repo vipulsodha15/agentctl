@@ -152,6 +152,11 @@ export function SessionDetail() {
       if (document.querySelector('[role="dialog"]')) return;
       if (stopping) return;
       stopping = true;
+      // Optimistic local cancel: mark in-flight turns closed and clear
+      // the "Responding" pill immediately, before /interrupt round-trips.
+      // The reducer will then drop any late streaming frames the runtime
+      // flushes for the cancelled turn.
+      dispatch({ type: "cancel_requested" });
       apiJson(`/v1/sessions/${encodeURIComponent(id)}/interrupt`, {
         method: "POST",
         ...jsonBody({ clear_queue: false }),
@@ -331,6 +336,7 @@ export function SessionDetail() {
               providerModels={providerModels}
               currentModel={currentModel}
               onModelSwitch={switchModel}
+              onStopRequested={() => dispatch({ type: "cancel_requested" })}
             />
           </div>
         )}

@@ -19,6 +19,11 @@ interface Props {
   providerModels?: string[];
   currentModel?: string;
   onModelSwitch?: (next: string) => Promise<void> | void;
+  // Optimistic local cancellation hook. Called synchronously the moment
+  // Stop is pressed, before the /interrupt POST round-trips, so the
+  // reducer can drop late streaming frames and clear the "Responding"
+  // pill immediately rather than waiting for turn.cancelled to land.
+  onStopRequested?: () => void;
 }
 
 export function MessageInput({
@@ -28,6 +33,7 @@ export function MessageInput({
   providerModels,
   currentModel,
   onModelSwitch,
+  onStopRequested,
 }: Props) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -110,6 +116,7 @@ export function MessageInput({
     if (stopping) return;
     setStopping(true);
     setError(null);
+    onStopRequested?.();
     try {
       await apiJson<InterruptResponse>(
         `/v1/sessions/${encodeURIComponent(sessionId)}/interrupt`,
