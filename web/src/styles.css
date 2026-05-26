@@ -2431,6 +2431,17 @@ form .checkbox-row {
   color: var(--c-accent-fg);
   border-color: var(--c-accent-soft-2);
 }
+.status-chip.cancelled {
+  background: var(--c-surface-2);
+  color: var(--c-fg-mute);
+  border-color: var(--c-border);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.msg.tool.tool-cancelled .tool-header {
+  opacity: 0.6;
+}
 
 .msg.tool .tool-card {
   background: var(--c-surface);

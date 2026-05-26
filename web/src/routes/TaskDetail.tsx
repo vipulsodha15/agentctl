@@ -242,6 +242,11 @@ export function TaskDetail() {
       if (e.key !== "Escape") return;
       if (stopping) return;
       stopping = true;
+      // Optimistic local cancel: clear the in-flight indicator and start
+      // dropping late streaming frames immediately, without waiting for
+      // /interrupt → turn.cancelled to round-trip. See conversation.ts
+      // for the rationale.
+      dispatchConv({ type: "cancel_requested" });
       apiJson(
         `/v1/sessions/${encodeURIComponent(activeSessionID)}/interrupt`,
         { method: "POST", ...jsonBody({ clear_queue: false }) },

@@ -309,7 +309,7 @@ export type RenderedMessageKind =
   | "notice"
   | "system";
 
-export type ToolStatus = "pending" | "done" | "error";
+export type ToolStatus = "pending" | "done" | "error" | "cancelled";
 
 export interface ConversationMessage {
   // Stable identifier for de-dup. Prefer message_id / turn_id / tool_use_id;

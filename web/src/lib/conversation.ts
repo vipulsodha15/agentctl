@@ -12,6 +12,7 @@ import type {
   McpStatus,
   SessionStatus,
   SnapshotData,
+  ToolStatus,
   UsageTotals,
   WireEvent,
 } from "../types";
@@ -46,8 +47,30 @@ export interface ConversationState {
   toolIndexById: Record<string, number>;
   // Per-turn aggregated usage, surfaced as a chip on the turn divider.
   usageByTurn: Record<string, UsageTotals>;
+  // Turn IDs that have been cancelled/ended; runtime streaming frames
+  // (tool.call, tool.result, assistant.delta, assistant.message) for these
+  // turns are dropped. The daemon accepts /interrupt and replies success
+  // before the shim has actually unwound its receive loop, so the runtime
+  // is free to flush queued tool_use / text frames for the cancelled turn
+  // before turn.cancelled lands on the wire — without this guard those
+  // late frames append a fresh pending tool row or a new assistant bubble
+  // at the bottom of the transcript and never resolve (the "tool cards
+  // jump to the bottom with a running status after ESC" failure mode).
+  closedTurnIds: Set<string>;
   connected: boolean;
   disconnectReason: string | null;
+}
+
+// Hard cap to keep closedTurnIds bounded for long-lived sessions; well
+// above any plausible number of in-flight turns.
+const CLOSED_TURN_CAP = 64;
+
+function addClosedTurn(prev: Set<string>, id: string): Set<string> {
+  if (prev.has(id) && prev.size <= CLOSED_TURN_CAP) return prev;
+  const arr = Array.from(prev);
+  if (!prev.has(id)) arr.push(id);
+  while (arr.length > CLOSED_TURN_CAP) arr.shift();
+  return new Set(arr);
 }
 
 export type ConversationAction =
@@ -55,7 +78,12 @@ export type ConversationAction =
   | { type: "snapshot"; data: SnapshotData }
   | { type: "event"; e: WireEvent }
   | { type: "ws_open" }
-  | { type: "ws_close"; reason: string };
+  | { type: "ws_close"; reason: string }
+  // Optimistic local cancel. Dispatched on ESC / Stop before the
+  // /interrupt POST round-trips, so the UI clears its "Responding" pill
+  // immediately and the reducer starts dropping late streaming frames
+  // for the cancelled turns (see closedTurnIds above).
+  | { type: "cancel_requested" };
 
 export const INITIAL_CONVERSATION_STATE: ConversationState = {
   status: "unknown",
@@ -71,6 +99,7 @@ export const INITIAL_CONVERSATION_STATE: ConversationState = {
   toolNames: {},
   toolIndexById: {},
   usageByTurn: {},
+  closedTurnIds: new Set(),
   connected: false,
   disconnectReason: null,
 };
@@ -81,7 +110,11 @@ export function conversationReducer(
 ): ConversationState {
   switch (action.type) {
     case "reset":
-      return { ...INITIAL_CONVERSATION_STATE, seenEventIds: new Set() };
+      return {
+        ...INITIAL_CONVERSATION_STATE,
+        seenEventIds: new Set(),
+        closedTurnIds: new Set(),
+      };
     case "ws_open":
       return { ...state, connected: true, disconnectReason: null };
     case "ws_close":
@@ -90,9 +123,55 @@ export function conversationReducer(
       return applySnapshot(state, action.data);
     case "event":
       return applyEvent(state, action.e);
+    case "cancel_requested":
+      return applyCancelRequested(state);
     default:
       return state;
   }
+}
+
+function applyCancelRequested(state: ConversationState): ConversationState {
+  // Collect every turn_id that still looks active so subsequent streaming
+  // frames for them are dropped at the source. We pull from three places
+  // because each one alone misses cases: an open bubble proves an
+  // assistant.delta arrived; a pending tool row proves a tool.call
+  // arrived; and either may exist without the other.
+  const turnIds = new Set<string>();
+  for (const tid of Object.keys(state.openBubbleByTurn)) turnIds.add(tid);
+  for (const m of state.messages) {
+    if (m.kind === "tool" && m.status === "pending" && m.turn_id) {
+      turnIds.add(m.turn_id);
+    }
+    if (m.kind === "assistant" && m.inFlight && m.turn_id) {
+      turnIds.add(m.turn_id);
+    }
+  }
+  // No active turn locally — but the user pressed ESC, so still clear the
+  // pill defensively. The server's /interrupt may legitimately have
+  // nothing to cancel (race against turn.end); harmless.
+  if (turnIds.size === 0 && state.inFlightCount === 0 && !state.inFlight) {
+    return state;
+  }
+  let closed = state.closedTurnIds;
+  for (const t of turnIds) closed = addClosedTurn(closed, t);
+  const now = Date.now();
+  const messages = state.messages.map((m) => {
+    if (m.kind === "tool" && m.status === "pending") {
+      return { ...m, status: "cancelled" as ToolStatus, ended_at: now };
+    }
+    if (m.kind === "assistant" && m.inFlight) {
+      return { ...m, inFlight: false };
+    }
+    return m;
+  });
+  return {
+    ...state,
+    messages,
+    closedTurnIds: closed,
+    openBubbleByTurn: {},
+    inFlightCount: 0,
+    inFlight: false,
+  };
 }
 
 function applySnapshot(
@@ -145,6 +224,11 @@ function applySnapshot(
     toolNames: keepExisting ? state.toolNames : toolNames,
     toolIndexById: keepExisting ? state.toolIndexById : toolIndexById,
     usageByTurn: keepExisting ? state.usageByTurn : {},
+    // Preserve the closed-turn drop list across snapshots. A snapshot
+    // arriving after ESC must not undo the user's cancellation — and
+    // since the daemon mirror lags the live WS, late frames for the
+    // cancelled turn may still be queued for delivery.
+    closedTurnIds: state.closedTurnIds,
   };
 }
 
@@ -348,6 +432,26 @@ function applyEvent(
   if (id) {
     if (state.seenEventIds.has(id)) return state;
   }
+  // Drop streaming frames for a turn that has already been cancelled or
+  // ended (locally optimistic, or via a prior turn.cancelled). The shim's
+  // receive loop can flush queued tool_use / text frames AFTER the actor
+  // accepted /interrupt — without this guard the late frames would land
+  // at the bottom of the transcript as new pending tool rows or new
+  // assistant bubbles that never resolve.
+  const turnId = (e.data as { turn_id?: string } | null | undefined)?.turn_id;
+  if (
+    turnId &&
+    state.closedTurnIds.has(turnId) &&
+    (e.kind === "assistant.delta" ||
+      e.kind === "assistant.message" ||
+      e.kind === "tool.call" ||
+      e.kind === "tool.result")
+  ) {
+    if (!id) return state;
+    const seen = new Set(state.seenEventIds);
+    seen.add(id);
+    return { ...state, seenEventIds: seen };
+  }
   let next: ConversationState = state;
   switch (e.kind) {
     case "user.message": {
@@ -371,7 +475,20 @@ function applyEvent(
       // for a turn (tool-use-only messages produce no text). Bubbles are
       // created lazily on the first delta / non-empty assistant.message.
       const count = next.inFlightCount + 1;
-      next = { ...next, inFlightCount: count, inFlight: count > 0 };
+      const d = e.data as { turn_id?: string };
+      // If this turn_id was previously closed (e.g. a hypothetical reuse
+      // after cancel), un-close it so its events flow through normally.
+      let closed = next.closedTurnIds;
+      if (d.turn_id && closed.has(d.turn_id)) {
+        const arr = Array.from(closed).filter((t) => t !== d.turn_id);
+        closed = new Set(arr);
+      }
+      next = {
+        ...next,
+        inFlightCount: count,
+        inFlight: count > 0,
+        closedTurnIds: closed,
+      };
       break;
     }
     case "assistant.delta": {
@@ -487,17 +604,28 @@ function applyEvent(
         };
         openMap = {};
       }
-      // Mark any tool rows still pending as cancelled-as-done so they don't
-      // spin forever after a cancellation.
+      // Mark any tool rows still pending as cancelled so the user can
+      // tell a cancelled tool from a successful one. Also seed
+      // closedTurnIds with this turn so any late streaming frames the
+      // runtime flushes post-cancel are dropped (defense in depth for
+      // server-initiated cancellations; ESC already populates this via
+      // applyCancelRequested).
       if (e.kind === "turn.cancelled") {
+        const now = Date.now();
         next = {
           ...next,
           messages: next.messages.map((m) =>
             m.kind === "tool" && m.status === "pending"
-              ? { ...m, status: "done" }
+              ? { ...m, status: "cancelled", ended_at: now }
               : m,
           ),
         };
+        if (d.turn_id) {
+          next = {
+            ...next,
+            closedTurnIds: addClosedTurn(next.closedTurnIds, d.turn_id),
+          };
+        }
       }
       next = {
         ...next,
