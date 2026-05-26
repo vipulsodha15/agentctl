@@ -368,6 +368,122 @@ func TestInterruptMidTurn(t *testing.T) {
 	mustEvent(t, stream, proto.EventTurnCancelled)
 }
 
+// TestInterruptDropsLateRuntimeFrames verifies the cancellation fence:
+// handleInterrupt broadcasts a synthetic turn.cancelled BEFORE the HTTP
+// reply, and the actor then drops any tool.call / tool.result /
+// assistant.delta / assistant.message frames the runtime flushes for the
+// cancelled turn. The runtime's eventual EventTurnCancelled is
+// deduplicated on the wire while still driving the queue advance.
+func TestInterruptDropsLateRuntimeFrames(t *testing.T) {
+	mgr, fc := newTestManager(t)
+	ctx := context.Background()
+	r, _ := mgr.Create(ctx, CreateRequest{Provider: "anthropic"})
+	stream, _ := mgr.Attach(ctx, r.SessionID)
+	defer stream.Close()
+	mustEvent(t, stream, proto.EventSessionSnapshot)
+	conn := fc.attach(t, r.SessionID, mgr)
+
+	_, _ = mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "task"})
+	mustEvent(t, stream, proto.EventUserMessage)
+	ts := mustEvent(t, stream, proto.EventTurnStart)
+	conn.expect(t, AgentdMessage)
+	var startData proto.TurnStartData
+	if err := json.Unmarshal(ts.Data, &startData); err != nil {
+		t.Fatalf("decode turn.start: %v", err)
+	}
+	turnID := startData.TurnID
+
+	if _, err := mgr.Interrupt(ctx, r.SessionID, false); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	conn.expect(t, AgentdInterrupt)
+
+	// Synthetic turn.cancelled fires before HTTP returns; assert its
+	// payload identifies the cancelled turn and the user as the reason.
+	cancelled := mustEvent(t, stream, proto.EventTurnCancelled)
+	var cd proto.TurnCancelledData
+	if err := json.Unmarshal(cancelled.Data, &cd); err != nil {
+		t.Fatalf("decode turn.cancelled: %v", err)
+	}
+	if cd.TurnID != turnID {
+		t.Fatalf("synthetic turn.cancelled turn_id=%q want %q", cd.TurnID, turnID)
+	}
+	if cd.Reason != "user" {
+		t.Fatalf("synthetic turn.cancelled reason=%q want user", cd.Reason)
+	}
+
+	// Runtime flushes queued frames for the cancelled turn — all must be
+	// dropped, not forwarded to the wire.
+	conn.feedRuntimeEvent(t, r.SessionID, proto.EventToolCall, json.RawMessage(
+		`{"turn_id":"`+turnID+`","tool_use_id":"u-late","name":"Bash","input":{}}`,
+	))
+	conn.feedRuntimeEvent(t, r.SessionID, proto.EventToolResult, json.RawMessage(
+		`{"turn_id":"`+turnID+`","tool_use_id":"u-late","content":"ok","is_error":false}`,
+	))
+	conn.feedRuntimeEvent(t, r.SessionID, proto.EventAssistantDelta, json.RawMessage(
+		`{"turn_id":"`+turnID+`","delta":"late text"}`,
+	))
+	conn.feedRuntimeEvent(t, r.SessionID, proto.EventAssistantMessage, json.RawMessage(
+		`{"turn_id":"`+turnID+`","content":"late final"}`,
+	))
+	// Runtime confirms cancellation — broadcast must be suppressed but
+	// completeTurn must run so the next Send can start a fresh turn.
+	conn.feedRuntimeEvent(t, r.SessionID, proto.EventTurnCancelled, json.RawMessage(
+		`{"turn_id":"`+turnID+`","reason":"runtime"}`,
+	))
+
+	// Synchronize on the actor having drained all the feed frames before
+	// we send the next message. feedRuntimeEvent posts to the conn's in
+	// channel asynchronously; without this poll, the next Send can race
+	// the cancellation handling and false-positive as a queue insert.
+	mm := mgr.(*manager)
+	a := mm.actorFor(r.SessionID)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !a.snapshotSummary().InFlight {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.snapshotSummary().InFlight {
+		t.Fatalf("actor.InFlight stayed true after runtime turn.cancelled")
+	}
+
+	// Strict assertion: the next two events on the stream must be the
+	// new turn's user.message / turn.start. If any of the dropped frames
+	// leaked through they would arrive first and fail this check.
+	_, _ = mgr.Send(ctx, SendRequest{SessionID: r.SessionID, Content: "next"})
+	expectNextKinds(t, stream, proto.EventUserMessage, proto.EventTurnStart)
+}
+
+// expectNextKinds asserts that the next N events from the stream have the
+// given kinds in order, with no other events interleaved. Use this when a
+// test needs to prove a frame did NOT arrive (mustEvent silently skips
+// non-matching events).
+func expectNextKinds(t *testing.T, stream Stream, kinds ...string) {
+	t.Helper()
+	for i, want := range kinds {
+		done := make(chan struct{})
+		var ev proto.Event
+		var ok bool
+		go func() {
+			ev, ok, _ = stream.Recv()
+			close(done)
+		}()
+		select {
+		case <-done:
+			if !ok {
+				t.Fatalf("expectNextKinds[%d]: stream closed waiting for %s", i, want)
+			}
+			if ev.Kind != want {
+				t.Fatalf("expectNextKinds[%d]: got %s, want %s", i, ev.Kind, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expectNextKinds[%d]: timeout waiting for %s", i, want)
+		}
+	}
+}
+
 func TestInterruptWithoutInFlight(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()

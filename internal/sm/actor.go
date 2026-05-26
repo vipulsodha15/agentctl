@@ -140,6 +140,20 @@ type actor struct {
 	// so a fresh shim after a daemon restart can resume the same SDK session
 	// and keep extending the same JSONL file instead of orphaning it.
 	sdkSessionID string
+	// cancelInFlight is set when handleInterrupt has broadcast a synthetic
+	// turn.cancelled for the live turn and is waiting for the runtime to
+	// confirm. While true:
+	//   * incoming runtime-sourced streaming frames (tool.call,
+	//     tool.result, assistant.delta, assistant.message) are dropped —
+	//     they're the shim's queued flush for the cancelled turn, and
+	//     forwarding them would land late pending tool rows and orphan
+	//     assistant bubbles in the client transcript.
+	//   * the runtime's eventual EventTurnCancelled is suppressed on the
+	//     wire (we already broadcast it) but still drives completeTurn so
+	//     the queue advances.
+	// Cleared by completeTurn / handleRuntimeDiedLocked / the
+	// EventTurnCancelled branch in handleRuntimeEvent.
+	cancelInFlight bool
 }
 
 func newActor(opts actorOptions) *actor {
@@ -352,6 +366,7 @@ func (a *actor) handleInterrupt(it *interruptItem) {
 		it.errReply <- ErrNoInFlight
 		return
 	}
+	cancelledTurnID := a.inFlight
 	a.sendControlLocked(AgentdInterrupt, mustJSON(map[string]string{"reason": "user"}))
 	cleared := 0
 	if it.clearQueue {
@@ -360,7 +375,18 @@ func (a *actor) handleInterrupt(it *interruptItem) {
 		a.summary.QueueDepth = 0
 		a.broadcastLocked(proto.EventQueueDepth, mustJSON(proto.QueueDepthData{Depth: 0}))
 	}
-	a.opts.Logger.Info("session.interrupt_requested", slog.String("turn_id", a.inFlight), slog.Bool("clear_queue", it.clearQueue))
+	// Synthetic turn.cancelled fence: emit it before the HTTP reply so the
+	// client can rely on /interrupt returning 200 to mean "the cancellation
+	// is visible on the stream." The shim's CancelledError round-trip would
+	// otherwise race any tool_use frames the runtime had already queued.
+	// Forwarding of those late frames is suppressed by cancelInFlight; see
+	// handleRuntimeEvent.
+	a.cancelInFlight = true
+	a.broadcastLocked(proto.EventTurnCancelled, mustJSON(proto.TurnCancelledData{
+		TurnID: cancelledTurnID,
+		Reason: "user",
+	}))
+	a.opts.Logger.Info("session.interrupt_requested", slog.String("turn_id", cancelledTurnID), slog.Bool("clear_queue", it.clearQueue))
 	it.reply <- InterruptResult{Interrupted: true, ClearedQueueDepth: cleared}
 }
 
@@ -534,7 +560,15 @@ func (a *actor) handleRuntimeEvent(fr ControlFrame) {
 	}
 	a.mu.Lock()
 	a.summary.LastActivityAt = a.opts.Now()
+	cancelInFlight := a.cancelInFlight
 	a.mu.Unlock()
+	// Post-cancel drop: while waiting for the runtime to confirm the
+	// cancellation, swallow streaming frames it had already queued for the
+	// cancelled turn so they don't land as orphan UI rows.
+	if cancelInFlight && isStreamingKind(inner.Kind) {
+		a.opts.Logger.Debug("control.drop_post_cancel", slog.String("kind", inner.Kind))
+		return
+	}
 	switch inner.Kind {
 	case proto.EventTurnEnd:
 		a.broadcast(inner.Kind, inner.Data)
@@ -542,11 +576,36 @@ func (a *actor) handleRuntimeEvent(fr ControlFrame) {
 	case proto.EventUsage:
 		a.broadcast(inner.Kind, a.persistUsage(inner.Data))
 	case proto.EventTurnCancelled:
-		a.broadcast(inner.Kind, inner.Data)
+		// If handleInterrupt already broadcast a synthetic turn.cancelled
+		// for this turn, suppress the runtime's confirmation on the wire
+		// — clients only need to see one — but still complete the turn so
+		// the queue advances.
+		a.mu.Lock()
+		suppress := a.cancelInFlight
+		a.cancelInFlight = false
+		a.mu.Unlock()
+		if !suppress {
+			a.broadcast(inner.Kind, inner.Data)
+		}
 		a.completeTurn("cancelled")
 	default:
 		a.broadcast(inner.Kind, inner.Data)
 	}
+}
+
+// isStreamingKind reports whether a runtime event carries mid-turn
+// content (text or a tool round-trip). These are the kinds we drop while
+// a cancellation is awaiting confirmation, so the runtime's queued flush
+// doesn't reach the client as orphan rows.
+func isStreamingKind(kind string) bool {
+	switch kind {
+	case proto.EventToolCall,
+		proto.EventToolResult,
+		proto.EventAssistantDelta,
+		proto.EventAssistantMessage:
+		return true
+	}
+	return false
 }
 
 // persistUsage writes the usage row (R10) and returns the same data with the
@@ -599,6 +658,7 @@ func (a *actor) completeTurn(_ string) {
 	a.inFlight = ""
 	a.summary.InFlight = false
 	a.currentTurn = ""
+	a.cancelInFlight = false
 	var next *queuedMessage
 	if len(a.queue) > 0 {
 		head := a.queue[0]
@@ -1009,6 +1069,7 @@ func (a *actor) handleRuntimeDiedLocked(reason string) {
 	a.runtimeReady = false
 	a.inFlight = ""
 	a.currentTurn = ""
+	a.cancelInFlight = false
 	a.queue = a.queue[:0]
 	a.summary.QueueDepth = 0
 	a.summary.InFlight = false
