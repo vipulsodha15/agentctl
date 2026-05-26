@@ -489,6 +489,7 @@ export function TaskDetail() {
           <PriorStageCard
             key={s.stage_id}
             stage={s}
+            taskMessages={taskMessages}
             nextAgent={
               stages.find((n) => n.position === s.position + 1)?.agent_name
             }
@@ -834,20 +835,25 @@ function IssueSeedPanel({
 }
 
 // PriorStageCard renders a handed-off stage's full session transcript.
-// The session has been terminated (no live WS), but the SDK JSONL records
-// survive in the messages table — we fetch them via GET
-// /v1/sessions/{id}/snapshot and normalize through the same code path the
-// live reducer uses. The stage's synthesis is shown as a footer callout
-// so the takeaway is visible without scrolling through the whole turn
-// history.
+// The session has been terminated (no live WS). We prefer the SDK JSONL
+// records from GET /v1/sessions/{id}/snapshot when present, but that
+// mirror is async — the shim may not have flushed before StopStage tore
+// the actor down, especially on fast Complete flows. Fall back to the
+// synchronous task_messages backbone keyed by stage_id (the same source
+// mergeTranscript uses for the active stage) so the chat never goes
+// silently blank just because the JSONL mirror is empty. The stage's
+// synthesis is shown as a footer callout so the takeaway is visible
+// without scrolling through the whole turn history.
 function PriorStageCard({
   stage,
+  taskMessages,
   nextAgent,
 }: {
   stage: TaskStage;
+  taskMessages: TaskMessage[];
   nextAgent?: string;
 }) {
-  const [messages, setMessages] = useState<ConversationMessage[] | null>(null);
+  const [snapshot, setSnapshot] = useState<ConversationMessage[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -864,7 +870,7 @@ function PriorStageCard({
       .then((r) => {
         if (cancelled) return;
         const { messages: msgs } = normalizeConversation(r.conversation ?? []);
-        setMessages(msgs);
+        setSnapshot(msgs);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -882,6 +888,12 @@ function PriorStageCard({
     };
   }, [stage.session_id]);
 
+  const merged = mergeTranscript(
+    snapshot ?? [],
+    taskMessages,
+    stage.stage_id,
+  );
+
   return (
     <>
       <div className={`task-prior-stage swatch-${stage.colour ?? "slate"}`}>
@@ -896,24 +908,29 @@ function PriorStageCard({
             <CheckIcon /> done
           </span>
         </div>
-        {loading && (
+        {loading && merged.length === 0 && (
           <div className="task-stage-loading muted">Loading transcript…</div>
         )}
-        {err && (
+        {err && merged.length === 0 && (
           <div className="task-stage-loading error-text">
             Couldn't load transcript: {err}
           </div>
         )}
-        {messages !== null && messages.length > 0 && (
+        {merged.length > 0 && (
           <div className="task-prior-transcript">
             <ConversationView
-              messages={messages}
+              messages={merged}
               warnings={[]}
               inFlight={false}
               mcps={[]}
               usageByTurn={{}}
               filter="all"
             />
+          </div>
+        )}
+        {!loading && !err && merged.length === 0 && !stage.synthesis && (
+          <div className="task-stage-loading muted">
+            Transcript unavailable for this stage.
           </div>
         )}
         {stage.synthesis && (
